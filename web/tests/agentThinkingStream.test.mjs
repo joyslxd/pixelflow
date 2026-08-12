@@ -106,7 +106,10 @@ test("thinking stream uses flat Thought-for style without card shell", async () 
     "utf8",
   );
   assert.match(source, /Thought for/, "header must follow Thought for Xs pattern");
-  assert.match(source, /Thinking/, "live footer must show Thinking");
+  assert.match(source, /思考中…/, "empty live header uses 思考中… once");
+  assert.doesNotMatch(source, />Thinking</, "must not stack a second Thinking footer");
+  assert.doesNotMatch(source, /Thinking…/, "must not show empty-body Thinking… placeholder");
+  assert.doesNotMatch(source, /statusLine/, "title/subtitle must not render as extra status lines");
   assert.doesNotMatch(source, /rounded-2xl border/, "must not use bordered card shell");
   assert.doesNotMatch(source, /bg-\[#1c2128\]/, "thinking must not keep dark shell");
   assert.doesNotMatch(source, /bg-\[#fbfcfd\]/, "thinking must not keep old plan card background");
@@ -162,6 +165,8 @@ test("workspace prefers live thinking over archived for current turn", async () 
   assert.match(source, /setAgentThinkingHistory/);
   assert.match(source, /thinking-answer:/, "completed answer must become a chat bubble");
   assert.match(source, /thinkingAnswerNoticeInFlightRef/);
+  assert.match(source, /waiting_for_input/, "waiting plans must not duplicate answer bubbles");
+  assert.match(source, /thinkingTurnAnchorsRef/, "thinking must pin to turn user message");
   assert.match(source, /当前 Turn 优先展示 live/);
   assert.match(source, /holdActivePlanForThinking/);
   assert.match(source, /思考流打字机未结束前不展示本轮 Plan/);

@@ -62,7 +62,10 @@ class StubPlanner:
                 title=step.title,
                 status=PlanStepStatus.PENDING,
                 arguments=dict(step.arguments),
-                confirmation_required=step.tool_name == "confirm_script_creative",
+                confirmation_required=step.tool_name in {
+                    "confirm_script_creative",
+                    "generate_scene_assets",
+                },
             )
             for index, step in enumerate(proposal.steps, start=1)
         )
@@ -97,6 +100,36 @@ def _creative_short_plan() -> VideoPlanProposal:
             VideoPlanStepProposal(
                 tool_name="confirm_script_creative",
                 title="确认选题创意",
+                arguments={},
+            ),
+        ),
+    )
+
+
+def _scene_assets_short_plan() -> VideoPlanProposal:
+    return VideoPlanProposal(
+        public_goal="生成角色、场景与道具参考图",
+        steps=(
+            VideoPlanStepProposal(
+                tool_name="generate_scene_assets",
+                title="生成参考图",
+                arguments={
+                    "image_model": "seeddream-5.0",
+                    "image_ratio": "9:16",
+                    "image_size": "2K",
+                },
+            ),
+        ),
+    )
+
+
+def _prepare_packages_short_plan() -> VideoPlanProposal:
+    return VideoPlanProposal(
+        public_goal="生成视频场景资产包",
+        steps=(
+            VideoPlanStepProposal(
+                tool_name="prepare_scene_packages",
+                title="生成资产包",
                 arguments={},
             ),
         ),
@@ -176,6 +209,141 @@ async def test_entrypoint_creates_recoverable_workspace_plan_and_public_event() 
     assert updated.payload["plan_id"] == submission.plan.plan_id
     assert isinstance(updated.payload.get("steps"), list)
     assert len(updated.payload["steps"]) == len(steps)
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_retries_when_revision_bumps_during_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """确认脚本会在思考流期间 bump revision；延迟提交不得因此整 Turn 失败。"""
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner(
+        [
+            VideoPlanProposal(
+                public_goal="生成视频资产包",
+                steps=(
+                    VideoPlanStepProposal(
+                        tool_name="prepare_scene_packages",
+                        title="生成资产包",
+                        arguments={},
+                    ),
+                ),
+            )
+        ]
+    )
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    conversation_id = "conversation-confirm-race"
+    from pixelflow.video_agent.entrypoint import _stable_id
+
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    seeded = await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "latest_input": "旧脚本会话",
+                "script": {
+                    "artifact_ref": "artifact:script-ready",
+                    "source": "user_edit",
+                    "version": 1,
+                    "status": "ready",
+                    "content": "0-10秒｜开场\n【剧情】主角展示产品。",
+                    "missing_requirements": [],
+                },
+            },
+            created_at=datetime(2026, 8, 12, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 12, tzinfo=UTC),
+        ),
+    )
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        current = await video_repository.get_workspace("user-1", workspace_id)
+        assert current is not None
+        await video_repository.apply_workspace_patch(
+            "user-1",
+            current.workspace_id,
+            {"script_plan_confirmed": True},
+            expected_revision=current.revision,
+            now=datetime(2026, 8, 12, 1, tzinfo=UTC),
+        )
+        return IntakeThinkingResult(
+            user_message="已确认脚本，准备生成资产包。",
+            entry_path="continue",
+            intent="continue_assets",
+            target_capability="prepare_scene_packages",
+            readiness="ready",
+            needs_user_reply=False,
+            missing_requirements=(),
+        )
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+
+    submission = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-confirm",
+        content="确认脚本并生成资产包",
+        artifact_refs=(),
+    )
+
+    assert submission.plan is not None
+    assert submission.workspace.revision > seeded.revision
+    assert submission.workspace.payload.get("script_plan_confirmed") is True
+    # 关键：思考期间 revision bump 后仍成功落库，不抛 ConflictError。
+
+
+@pytest.mark.asyncio
+async def test_apply_workspace_patch_resilient_recovers_stale_revision() -> None:
+    from pixelflow.video_agent.contracts import VideoWorkspace
+
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=StubPlanner([_creative_short_plan()]),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    stale = await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="video_workspace_race",
+            conversation_id="conversation-race",
+            payload={"latest_input": "旧输入"},
+            created_at=datetime(2026, 8, 12, tzinfo=UTC),
+            updated_at=datetime(2026, 8, 12, tzinfo=UTC),
+        ),
+    )
+    bumped = await video_repository.apply_workspace_patch(
+        "user-1",
+        stale.workspace_id,
+        {"script_plan_confirmed": True},
+        expected_revision=stale.revision,
+        now=datetime(2026, 8, 12, 1, tzinfo=UTC),
+    )
+    updated = await entrypoint._apply_workspace_patch_resilient(
+        owner="user-1",
+        workspace=stale,
+        patch={"latest_input": "确认脚本并生成资产包"},
+        now=datetime(2026, 8, 12, 2, tzinfo=UTC),
+    )
+    assert updated.revision > bumped.revision
+    assert updated.payload["latest_input"] == "确认脚本并生成资产包"
+    assert updated.payload["script_plan_confirmed"] is True
 
 
 @pytest.mark.asyncio
@@ -390,12 +558,12 @@ async def test_creative_followup_after_start_reseeds_path_a_instead_of_inspect()
 async def test_production_field_reply_while_awaiting_confirm_replans_with_script(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """待确认期间补字段：合并脚本上下文；思考无裁决时落 inspect，不再调 Planner。"""
+    """待确认期间补字段：合并脚本上下文后交 Planner（不再短路 inspect）。"""
 
     from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
 
     async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
-        # 模拟思考流失败/无裁决，走补字段确定性降级。
+        # 模拟思考流失败/无裁决，走补字段确定性降级后再 Planner。
         return IntakeThinkingResult(
             user_message="已完成初步判断，继续生成执行方案。",
             entry_path=None,
@@ -454,6 +622,7 @@ async def test_production_field_reply_while_awaiting_confirm_replans_with_script
                 "missing_requirements": ["视频画幅", "结尾行动引导"],
             },
             "latest_input": script,
+            "awaiting_production_fields": True,
         },
         expected_revision=first.workspace.revision,
         now=datetime(2026, 8, 11, tzinfo=UTC),
@@ -483,23 +652,383 @@ async def test_production_field_reply_while_awaiting_confirm_replans_with_script
         artifact_refs=(),
     )
 
-    # 补字段跟进不得再调 Planner 出 import；只落 inspect + 更新 missing。
-    assert len(planner.calls) == 1
+    # 首轮 + 补字段后各一次 Planner。
+    assert len(planner.calls) == 2
     latest_input = str(second.workspace.payload.get("latest_input") or "")
     assert "【本轮指令】180s 9:16 结尾不需要引导" in latest_input
     assert "防晒妆前" in latest_input
     assert second.workspace.payload["script"]["missing_requirements"] == []
-    assert "已更新" in second.plan.public_goal
-    assert [step.tool_name for step in second.plan.steps] == ["inspect_video_workspace"]
+    assert second.plan is not None
+    assert [step.tool_name for step in second.plan.steps] == [
+        "run_script_skill_stage",
+        "confirm_script_creative",
+    ]
     assert second.plan.public_goal != "当前有待确认步骤，请先确认或取消后再继续"
 
 
 @pytest.mark.asyncio
-async def test_intake_thinking_verdict_drives_inspect_without_planner(
+async def test_no_reference_image_continues_to_generate_scene_assets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """思考流裁决缺字段时只追问、不落 Plan，避免与气泡文案重复。"""
+    """场景包就绪后回复「没有参考图，直接生成」必须规划参考图，不得补字段 waiting。"""
 
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        # 即使 Intake 误写成 create，工作区「场景包已出、参考图未出」闸门仍应推进生图。
+        return IntakeThinkingResult(
+            user_message="可继续推进。",
+            entry_path="continue",
+            intent="continue_images",
+            target_capability="generate_scene_assets",
+            needs_user_reply=False,
+            missing_requirements=(),
+        )
+
+    async def _fake_analysis(**_kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("不应再走补生产字段分析")
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.analyze_production_fields_with_llm",
+        _fake_analysis,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_scene_assets_short_plan()])
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-no-ref-assets"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "script_plan_confirmed": True,
+                "script": {
+                    "content": "# 剧本\n### 镜头 01\n",
+                    "aspect_ratio": "9:16",
+                    "ending_cta": "none",
+                    "missing_requirements": [],
+                },
+                "form_values": {"video_ratio": "9:16", "ending_cta": "none"},
+                "scene_packages": [{"scene_id": "s1", "scene_index": 1}],
+                "global_assets": {
+                    "characters": [{"name": "安然"}],
+                    "scenes": [{"name": "酒店"}],
+                    "props": [{"name": "防晒"}],
+                },
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-assets",
+        content="没有参考图，直接生成",
+        artifact_refs=(),
+    )
+    assert len(planner.calls) == 1
+    assert result.plan is not None
+    assert result.plan.status is not AgentPlanStatus.WAITING_FOR_INPUT
+    assert [step.tool_name for step in result.plan.steps] == ["generate_scene_assets"]
+    assert "参考图" in (result.plan.public_goal or "")
+
+
+@pytest.mark.asyncio
+async def test_continue_images_without_packages_waits_instead_of_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intake 要参考图但工作区无资产包时，不得静默进 Planner 挂起。"""
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        return IntakeThinkingResult(
+            user_message="可继续生成参考图。",
+            entry_path="continue",
+            intent="continue_images",
+            target_capability="generate_scene_assets",
+            needs_user_reply=False,
+            missing_requirements=(),
+        )
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_creative_short_plan()])
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-no-packages"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "script_plan_confirmed": True,
+                "script": {
+                    "content": "# 剧本\n### 镜头 01\n",
+                    "aspect_ratio": "9:16",
+                    "ending_cta": "none",
+                    "missing_requirements": [],
+                },
+                "scene_package_job": {"job_id": "job-missing-result", "status": "polling"},
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-wait-packages",
+        content="没有参考图，直接生成",
+        artifact_refs=(),
+    )
+    assert len(planner.calls) == 0
+    assert result.plan is not None
+    assert result.plan.status is AgentPlanStatus.WAITING_FOR_INPUT
+    assert "资产包" in (result.plan.public_goal or "")
+
+
+@pytest.mark.asyncio
+async def test_continue_images_hydrates_packages_from_completion_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """completion_dispatch 未回写时，从完成事件回填资产包再规划参考图。"""
+
+    from pixelflow.agent_runtime.contracts import AgentEvent, AgentEventType
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        return IntakeThinkingResult(
+            user_message="可继续生成参考图。",
+            entry_path="continue",
+            intent="continue_images",
+            target_capability="generate_scene_assets",
+            needs_user_reply=False,
+            missing_requirements=(),
+        )
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_scene_assets_short_plan()])
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-hydrate-packages"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    job_id = "job-hydrate-packages"
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "script_plan_confirmed": True,
+                "script": {
+                    "content": "# 剧本\n### 镜头 01\n",
+                    "aspect_ratio": "9:16",
+                    "ending_cta": "none",
+                    "missing_requirements": [],
+                },
+                "scene_package_job": {
+                    "job_id": job_id,
+                    "plan_step_id": "step-1",
+                    "status": "polling",
+                },
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    await runtime_repository.create_event(
+        "user-1",
+        AgentEvent(
+            event_id=f"evt-completion-{job_id}",
+            sequence=1,
+            cursor=f"c_evt-completion-{job_id}",
+            conversation_id=conversation_id,
+            run_id="run-hydrate",
+            occurred_at=now,
+            type=AgentEventType.EXTERNAL_JOB_STATE_CHANGED,
+            payload={
+                "job_id": job_id,
+                "status": "succeeded",
+                "result": {
+                    "scene_packages": [{"scene_id": "s1", "scene_index": 1}],
+                    "global_assets": {
+                        "characters": [{"name": "安然"}],
+                        "scenes": [{"name": "酒店"}],
+                        "props": [{"name": "防晒"}],
+                    },
+                },
+            },
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-hydrate",
+        content="没有参考图，直接生成",
+        artifact_refs=(),
+    )
+    assert len(planner.calls) == 1
+    assert result.plan is not None
+    assert [step.tool_name for step in result.plan.steps] == ["generate_scene_assets"]
+    packages = result.workspace.payload.get("scene_packages")
+    assert isinstance(packages, list) and len(packages) == 1
+
+
+@pytest.mark.asyncio
+async def test_short_field_reply_with_create_path_persists_ratio_and_cta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intake 误标 create 时，短回复「9：16，不需要」仍须落库生产字段。"""
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        return IntakeThinkingResult(
+            user_message="识别到成稿，准备导入。",
+            entry_path="create",
+            intent="create",
+            needs_user_reply=False,
+            missing_requirements=(),
+        )
+
+    async def _fake_analysis(*, text: str, **_kwargs):  # noqa: ANN001, ARG001
+        from pixelflow.video_agent.production_fields import ProductionFieldsAnalysis
+
+        assert "9:16" in text or "9：16" in text
+        return ProductionFieldsAnalysis(
+            duration_sec=180,
+            missing=(),
+            has_aspect_ratio=True,
+            has_ending_cta=True,
+            aspect_ratio="9:16",
+            ending_cta="none",
+        )
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.analyze_production_fields_with_llm",
+        _fake_analysis,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([
+        VideoPlanProposal(
+            public_goal="导入成熟脚本",
+            steps=(
+                VideoPlanStepProposal(
+                    tool_name="import_script",
+                    title="导入脚本",
+                    arguments={},
+                ),
+            ),
+        ),
+    ])
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-field-create-path"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    script = (
+        "# 剧本正文 /episode\n"
+        "**片名**：防晒妆前\n**时长**：180秒\n"
+        "### 镜头 01\n- **时间**：00:00-00:10\n- **画面**：涂防晒\n"
+    )
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "latest_input": script,
+                "script": {
+                    "content": script,
+                    "source": "intake_draft",
+                    "status": "draft",
+                    "missing_requirements": ["视频画幅", "结尾行动引导"],
+                },
+                "awaiting_production_fields": True,
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-field",
+        content="9：16，不需要",
+        artifact_refs=(),
+    )
+    script_obj = result.workspace.payload.get("script")
+    assert isinstance(script_obj, dict)
+    assert script_obj.get("aspect_ratio") == "9:16"
+    assert script_obj.get("ending_cta") == "none"
+    assert script_obj.get("missing_requirements") == []
+    form = result.workspace.payload.get("form_values")
+    assert isinstance(form, dict)
+    assert form.get("video_ratio") == "9:16"
+    assert form.get("ending_cta") == "none"
+    assert len(planner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_thinking_verdict_persists_waiting_for_input_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """思考流缺字段时落 WAITING_FOR_INPUT Plan（无 Tool 步），不调 Planner。"""
+
+    from pixelflow.video_agent.contracts import AgentPlanStatus
     from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
 
     async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
@@ -537,17 +1066,101 @@ async def test_intake_thinking_verdict_drives_inspect_without_planner(
         artifact_refs=(),
     )
     assert len(planner.calls) == 0
-    assert result.plan is None
+    assert result.plan is not None
+    assert result.plan.status is AgentPlanStatus.WAITING_FOR_INPUT
+    assert result.plan.steps == ()
+    assert "缺少画幅" in (result.plan.public_goal or "")
     assert result.workspace.payload.get("awaiting_production_fields") is True
     script = result.workspace.payload.get("script")
     assert isinstance(script, dict)
     assert "防晒妆前" in str(script.get("content") or "")
     assert script.get("source") == "intake_draft"
+    assert str(script.get("artifact_ref") or "").startswith("artifact:script:intake_draft:")
     assert script.get("missing_requirements") == ["视频画幅", "结尾行动引导"]
     digest = result.workspace.payload.get("last_intake_thinking")
     assert isinstance(digest, dict)
     assert digest.get("needs_user_reply") is True
     assert "缺少画幅" in str(result.workspace.payload.get("last_production_fields_notice") or "")
+
+
+@pytest.mark.asyncio
+async def test_intake_false_missing_reconciled_from_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作区已有画幅/CTA 时，Intake 误报 missing 不得再落 waiting。"""
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        return IntakeThinkingResult(
+            user_message="请补充画幅与结尾引导。",
+            entry_path="inspect",
+            intent="clarify",
+            missing_requirements=("视频画幅", "结尾行动引导"),
+            needs_user_reply=True,
+        )
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([
+        VideoPlanProposal(
+            public_goal="准备视频资产包",
+            steps=(
+                VideoPlanStepProposal(
+                    tool_name="prepare_scene_packages",
+                    title="生成视频资产包",
+                    arguments={},
+                ),
+            ),
+        ),
+    ])
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-reconcile-missing"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "script": {
+                    "status": "ready",
+                    "content": "# 剧本\n### 镜头 01\n- **画面**：涂防晒\n",
+                    "source": "intake_draft",
+                    "aspect_ratio": "9:16",
+                    "ending_cta": "none",
+                    "missing_requirements": [],
+                },
+                "form_values": {"video_ratio": "9:16", "ending_cta": "none"},
+                "script_plan_confirmed": True,
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-reconcile",
+        content="确认脚本并继续，直接生成资产包",
+        artifact_refs=(),
+    )
+    assert len(planner.calls) == 1
+    assert result.plan is not None
+    assert result.plan.status is not AgentPlanStatus.WAITING_FOR_INPUT
+    assert result.workspace.payload.get("awaiting_production_fields") is not True
 
 
 @pytest.mark.asyncio
@@ -618,7 +1231,9 @@ async def test_continue_assets_followup_goes_through_thinking_then_plan(
         content=script,
         artifact_refs=(),
     )
-    assert first.plan is None
+    assert first.plan is not None
+    assert first.plan.status.value == "waiting_for_input"
+    assert first.plan.steps == ()
     assert isinstance(first.workspace.payload.get("script"), dict)
 
     await video_repository.apply_workspace_patch(
@@ -810,6 +1425,91 @@ def test_continue_markers_exclude_bare_generate_video() -> None:
     assert not _is_continue_video_generation("生成视频")
 
 
+def test_confirm_assets_instruction_not_merged_with_history_script() -> None:
+    from pixelflow.video_agent.entrypoint import merge_video_turn_content_with_history
+
+    script = (
+        "60秒竖屏广告分镜脚本如下，可直接拍摄。\n"
+        "镜头1 00:00-00:10 特写 景别近景 运镜推镜 画面瓶身反光 旁白熬夜急救精华\n"
+        "镜头2 00:10-00:25 中景 画面涂抹脸颊 台词三秒吸收不油腻 行动引导轻拍\n"
+        "镜头3 00:25-00:40 全景 运镜摇镜 旁白今晚就试试这瓶\n"
+        "镜头4 00:40-00:55 近景 产品特写 CTA点击购买小黄车\n"
+        "镜头5 00:55-01:00 行动引导 下方小黄车下单领取赠品\n"
+    )
+    merged = merge_video_turn_content_with_history(
+        "确认脚本并生成资产包",
+        [script],
+    )
+    assert merged == "确认脚本并生成资产包"
+    assert "【本轮指令】" not in merged
+
+
+@pytest.mark.asyncio
+async def test_confirm_script_skips_long_thinking_and_plans_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已确认脚本 + 确认短令：跳过长 Intake，交给 Planner 选 prepare_scene_packages。"""
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
+    from pixelflow.video_agent.entrypoint import _stable_id
+
+    async def _boom_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("确认生成资产包不应再跑长思考流")
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _boom_thinking,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    planner = StubPlanner([_prepare_packages_short_plan()])
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=planner,  # type: ignore[arg-type]
+        clock=lambda: now,
+    )
+    conversation_id = "conversation-confirm-prepare"
+    workspace_id = _stable_id("video_workspace", conversation_id)
+    await video_repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            payload={
+                "script_plan_confirmed": True,
+                "script": {
+                    "content": (
+                        "# 剧本\n**画幅**：9:16\n**结尾**：进直播间\n"
+                        "### 镜头 01\n- **时间**：00:00-00:10\n- **画面**：涂防晒\n"
+                    ),
+                    "aspect_ratio": "9:16",
+                    "ending_cta": "keep",
+                    "missing_requirements": [],
+                },
+                "form_values": {"video_ratio": "9:16", "ending_cta": "keep"},
+            },
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    result = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id=conversation_id,
+        turn_id="turn-confirm-prepare",
+        content="确认脚本并生成资产包",
+        artifact_refs=(),
+    )
+    assert len(planner.calls) == 1
+    assert planner.calls[0].intake_thinking.get("intent") == "continue_assets"
+    assert planner.calls[0].intake_thinking.get("target_capability") == (
+        "prepare_scene_packages"
+    )
+    assert result.plan is not None
+    assert [step.tool_name for step in result.plan.steps] == ["prepare_scene_packages"]
+
+
 def test_multi_person_script_without_character_section_needs_full_plan() -> None:
     from pixelflow.video_agent.entrypoint import (
         analyze_script_character_readiness,
@@ -831,12 +1531,13 @@ def test_multi_person_script_without_character_section_needs_full_plan() -> None
 
 
 def test_characters_stage_with_settings_is_ready() -> None:
+    from datetime import UTC, datetime
+
+    from pixelflow.video_agent.contracts import VideoWorkspace
     from pixelflow.video_agent.entrypoint import (
         analyze_script_character_readiness,
         script_needs_full_character_plan,
     )
-    from pixelflow.video_agent.contracts import VideoWorkspace
-    from datetime import UTC, datetime
 
     characters = (
         "## 角色设定\n"
@@ -955,6 +1656,64 @@ async def test_entrypoint_awaits_planner_with_timeout_and_falls_back_to_inspect(
     assert elapsed < 2
     assert [step.tool_name for step in steps] == ["inspect_video_workspace"]
     assert submission.plan.public_goal == "规划超时，先读取项目资料"
+
+
+@pytest.mark.asyncio
+async def test_ready_import_intake_falls_back_to_import_when_planner_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成熟脚本已通过 Intake 闸门时，Planner 超时不应退化为无效 inspect。"""
+
+    from pixelflow.video_agent.thinking_stream import IntakeThinkingResult
+
+    async def _fake_thinking(**_kwargs):  # noqa: ANN001, ARG001
+        return IntakeThinkingResult(
+            user_message="已收到完整分镜脚本，准备导入并结构化。",
+            entry_path="polish",
+            intent="polish",
+            duration_sec=60,
+            aspect_ratio="9:16",
+            ending_cta="present",
+            target_capability="import_script",
+            readiness="ready",
+            current_state={"script_available": False},
+        )
+
+    class SlowPlanner:
+        async def plan_turn(self, context):  # noqa: ANN001, ARG002
+            await asyncio.Event().wait()
+            raise AssertionError("超时后不应继续执行")
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.entrypoint.stream_intake_thinking",
+        _fake_thinking,
+    )
+    runtime_repository = MemoryAgentRuntimeRepository()
+    video_repository = MemoryVideoAgentRepository()
+    entrypoint = VideoAgentEntrypoint(
+        runtime_repository=runtime_repository,
+        video_repository=video_repository,
+        planner=SlowPlanner(),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 12, tzinfo=UTC),
+        planning_timeout_sec=0.1,
+    )
+
+    submission = await entrypoint.submit_turn(
+        user_id="user-1",
+        conversation_id="conversation-import-timeout",
+        turn_id="turn-import-timeout",
+        content=(
+            "# 防晒妆前分镜\n时长 60s，画幅 9:16。\n"
+            "00:00-00:20 近景，人物涂抹防晒，台词：妆前打底。\n"
+            "00:20-00:45 中景，完成底妆，台词：底妆一直在线。\n"
+            "00:45-01:00 产品特写，结尾引导：点击下单。\n"
+        ),
+        artifact_refs=(),
+    )
+
+    steps = await video_repository.list_plan_steps("user-1", submission.plan.plan_id)
+    assert [step.tool_name for step in steps] == ["import_script"]
+    assert submission.plan.public_goal == "导入完整分镜脚本并结构化"
 
 
 @pytest.mark.asyncio

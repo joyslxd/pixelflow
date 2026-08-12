@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, FileText, LoaderCircle, PencilLine } from "lucide-react";
+import { Check, FileText, LoaderCircle, PencilLine, X } from "lucide-react";
 
 import {
   shortStageLabel,
@@ -22,6 +22,8 @@ interface AgentScriptPreviewPanelProps {
   onSave?(markdown: string): Promise<void> | void;
   /** 用户确认脚本方案后进入资产包；与仅保存区分。 */
   onConfirmScript?(markdown: string): Promise<void> | void;
+  /** 关闭右侧预览（默认收起，仅从对话卡片打开）。 */
+  onClose?(): void;
 }
 
 /** 轻量 Markdown 预览：不依赖 @uiw（本地常未装齐），覆盖脚本常见语法。 */
@@ -245,6 +247,7 @@ export function AgentScriptPreviewPanel({
   exportReady = false,
   onSave,
   onConfirmScript,
+  onClose,
 }: AgentScriptPreviewPanelProps) {
   const [draft, setDraft] = useState(script?.content ?? "");
   const [editing, setEditing] = useState(false);
@@ -332,6 +335,16 @@ export function AgentScriptPreviewPanel({
               ?? "等待脚本阶段产物"}
           </p>
         </div>
+        {onClose ? (
+          <button
+            type="button"
+            aria-label="收起脚本预览"
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            onClick={onClose}
+          >
+            <X className="size-4" />
+          </button>
+        ) : null}
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">

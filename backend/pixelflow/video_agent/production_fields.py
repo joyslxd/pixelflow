@@ -59,6 +59,67 @@ def workspace_missing_requirements(
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+_ALLOWED_RATIOS = frozenset({"9:16", "16:9", "1:1"})
+_CONFIRMED_ENDING_CTA = frozenset({"keep", "none", "present"})
+
+
+def _payload_maps(payload: Mapping[str, object] | None) -> tuple[dict, dict, dict]:
+    if not isinstance(payload, Mapping):
+        return {}, {}, {}
+    script = payload.get("script")
+    form = payload.get("form_values")
+    contract = payload.get("creation_contract")
+    return (
+        dict(script) if isinstance(script, dict) else {},
+        dict(form) if isinstance(form, dict) else {},
+        dict(contract) if isinstance(contract, dict) else {},
+    )
+
+
+def workspace_resolved_aspect_ratio(payload: Mapping[str, object] | None) -> str | None:
+    """工作区已落库的画幅（script / form / contract），不做用户原文正则猜测。"""
+
+    script, form, contract = _payload_maps(payload)
+    for source in (script, form, contract):
+        raw = source.get("aspect_ratio") or source.get("video_ratio")
+        if isinstance(raw, str) and raw.strip() in _ALLOWED_RATIOS:
+            return raw.strip()
+    return None
+
+
+def workspace_has_ending_cta(payload: Mapping[str, object] | None) -> bool:
+    """工作区是否已确认结尾行动引导（含明确不要 CTA）。"""
+
+    return workspace_resolved_ending_cta(payload) is not None
+
+
+def workspace_resolved_ending_cta(payload: Mapping[str, object] | None) -> str | None:
+    """工作区已落库的结尾行动引导取值。"""
+
+    script, form, contract = _payload_maps(payload)
+    for source in (script, form, contract):
+        raw = source.get("ending_cta")
+        if isinstance(raw, str) and raw.strip() in _CONFIRMED_ENDING_CTA:
+            return raw.strip()
+    return None
+
+
+def reconcile_missing_with_workspace(
+    missing: Sequence[str] | None,
+    payload: Mapping[str, object] | None,
+) -> list[str]:
+    """用工作区已有生产字段剔除 Intake 误报的 missing。"""
+
+    gaps = [str(item).strip() for item in (missing or ()) if str(item).strip()]
+    if not gaps:
+        return []
+    if workspace_resolved_aspect_ratio(payload) is not None:
+        gaps = [item for item in gaps if item != "视频画幅"]
+    if workspace_has_ending_cta(payload):
+        gaps = [item for item in gaps if item != "结尾行动引导"]
+    return gaps
+
+
 def workspace_has_script_content(payload: Mapping[str, object] | None) -> bool:
     if not isinstance(payload, Mapping):
         return False
@@ -76,20 +137,24 @@ def looks_like_production_field_reply(
     *,
     workspace_payload: Mapping[str, object] | None = None,
 ) -> bool:
-    """短补丁是否应按「补生产字段」合并上下文。
+    """短跟进是否可能是「补生产字段」——只做结构门闩，不做话术语义判定。
 
-    不解析 9:16 / CTA 内容（禁止正则猜字段）；只看「短回复 + 工作区已有脚本/缺项」。
+    允许进入补字段降级的条件：
+    - 文本够短（避免把整篇脚本当补丁）；
+    - 工作区已在等生产字段，或 script 上已记录 missing。
+
+    禁止：按关键词猜测「这是不是 9:16 / CTA / 没有参考图」。
+    业务意图（补字段 vs 生图 vs 成片）由 Intake `target_capability` / `intent` 裁决。
     """
 
     text = normalize_user_text(content)
     if not text or len(text) > 240:
         return False
     if workspace_payload is None:
-        # 无工作区时：极短补丁留给历史合并层处理，不在此用正则认字段。
         return len(text) <= 48
-    if workspace_missing_requirements(workspace_payload):
+    if workspace_payload.get("awaiting_production_fields") is True:
         return True
-    if workspace_has_script_content(workspace_payload):
+    if workspace_missing_requirements(workspace_payload):
         return True
     return False
 
@@ -102,6 +167,8 @@ class ProductionFieldsAnalysis:
     missing: tuple[str, ...]
     has_aspect_ratio: bool
     has_ending_cta: bool
+    aspect_ratio: str | None = None
+    ending_cta: str | None = None
 
 
 def _parse_analysis_payload(raw: str) -> ProductionFieldsAnalysis | None:
@@ -129,8 +196,18 @@ def _parse_analysis_payload(raw: str) -> ProductionFieldsAnalysis | None:
         if value is not None and 1 <= value <= 3600:
             duration = value
 
-    has_aspect = bool(payload.get("has_aspect_ratio"))
-    has_cta = bool(payload.get("has_ending_cta"))
+    aspect_ratio: str | None = None
+    raw_ratio = payload.get("aspect_ratio")
+    if isinstance(raw_ratio, str) and raw_ratio.strip() in _ALLOWED_RATIOS:
+        aspect_ratio = raw_ratio.strip()
+
+    ending_cta: str | None = None
+    raw_cta = payload.get("ending_cta")
+    if isinstance(raw_cta, str) and raw_cta.strip() in _CONFIRMED_ENDING_CTA:
+        ending_cta = raw_cta.strip()
+
+    has_aspect = bool(payload.get("has_aspect_ratio")) or aspect_ratio is not None
+    has_cta = bool(payload.get("has_ending_cta")) or ending_cta is not None
     missing_raw = payload.get("missing")
     missing: list[str] = []
     if isinstance(missing_raw, list):
@@ -152,7 +229,53 @@ def _parse_analysis_payload(raw: str) -> ProductionFieldsAnalysis | None:
         missing=tuple(missing),
         has_aspect_ratio=has_aspect,
         has_ending_cta=has_cta,
+        aspect_ratio=aspect_ratio,
+        ending_cta=ending_cta,
     )
+
+
+def apply_production_fields_to_script(
+    script: Mapping[str, object] | None,
+    analysis: ProductionFieldsAnalysis,
+    *,
+    workspace_payload: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """把分析结果与工作区已有画幅/CTA 写入 script，并重算 missing。"""
+
+    next_script = dict(script) if isinstance(script, Mapping) else {}
+    base = dict(workspace_payload) if isinstance(workspace_payload, Mapping) else {}
+    prior_script = dict(base["script"]) if isinstance(base.get("script"), dict) else {}
+    lookup_payload = {
+        **base,
+        "script": {**prior_script, **next_script},
+    }
+    ratio = analysis.aspect_ratio or workspace_resolved_aspect_ratio(lookup_payload)
+    cta = analysis.ending_cta or workspace_resolved_ending_cta(lookup_payload)
+    if ratio is not None:
+        next_script["aspect_ratio"] = ratio
+        next_script["video_ratio"] = ratio
+    if cta is not None:
+        next_script["ending_cta"] = cta
+    if analysis.duration_sec is not None:
+        next_script["duration_sec"] = analysis.duration_sec
+    gaps = list(analysis.missing)
+    if ratio is not None or analysis.has_aspect_ratio:
+        gaps = [item for item in gaps if item != "视频画幅"]
+    if cta is not None or analysis.has_ending_cta:
+        gaps = [item for item in gaps if item != "结尾行动引导"]
+    next_script["missing_requirements"] = gaps
+    return next_script
+
+
+def production_fields_form_patch(analysis: ProductionFieldsAnalysis) -> dict[str, object]:
+    """写入 form_values 的画幅/CTA 补丁（仅已解析出的值）。"""
+
+    patch: dict[str, object] = {}
+    if analysis.aspect_ratio:
+        patch["video_ratio"] = analysis.aspect_ratio
+    if analysis.ending_cta:
+        patch["ending_cta"] = analysis.ending_cta
+    return patch
 
 
 def _create_fields_model(factory: Callable[..., Any]) -> Any:
@@ -249,14 +372,20 @@ async def analyze_production_fields_with_llm(
             "无法判断则 null。\n"
             "2) has_aspect_ratio：是否已有画幅（9:16/9：16/16:9/竖屏/横屏/1:1 等）；"
             "【本轮指令】里的画幅优先。\n"
-            "3) has_ending_cta：已有结尾行动引导，或用户说「结尾不变/CTA保持/沿用」；"
-            "若用户明确说「结尾不需要引导/不要CTA/无需行动引导/不用引导」，"
-            "也视为已确认（has_ending_cta=true，不要再追问）。\n"
-            "4) missing：只能从 [\"视频画幅\",\"结尾行动引导\"] 中选仍缺的项；"
+            "3) aspect_ratio：若已有画幅，输出精确值 9:16 / 16:9 / 1:1；竖屏=9:16，横屏=16:9；"
+            "无法精确映射则 null。\n"
+            "4) has_ending_cta：已有结尾行动引导，或用户说「结尾不变/CTA保持/沿用」；"
+            "若用户明确说「结尾不需要引导/不要CTA/无需行动引导/不用引导/不需要」，"
+            "也视为已确认（has_ending_cta=true，ending_cta=none）。\n"
+            "5) ending_cta：keep（沿用）/ none（不需要）/ present（有具体引导）；未知则 null。\n"
+            "6) missing：只能从 [\"视频画幅\",\"结尾行动引导\"] 中选仍缺的项；"
             "不要把「视频时长」放入 missing。\n"
             "JSON 形状："
             "{\"duration_sec\": <int|null>, \"has_aspect_ratio\": <bool>, "
-            "\"has_ending_cta\": <bool>, \"missing\": [<string>]}",
+            "\"aspect_ratio\": <\"9:16\"|\"16:9\"|\"1:1\"|null>, "
+            "\"has_ending_cta\": <bool>, "
+            "\"ending_cta\": <\"keep\"|\"none\"|\"present\"|null>, "
+            "\"missing\": [<string>]}",
         ),
         ("human", f"【用户输入】\n{excerpt}\n"),
     ]
@@ -390,6 +519,7 @@ __all__ = [
     "CLARIFY_MARKER",
     "ProductionFieldsAnalysis",
     "analyze_production_fields_with_llm",
+    "apply_production_fields_to_script",
     "build_production_fields_excerpt",
     "creative_confirm_cost_summary",
     "format_creative_confirm_clarification",
@@ -397,7 +527,12 @@ __all__ = [
     "looks_like_production_field_reply",
     "missing_creative_production_fields_async",
     "normalize_user_text",
+    "production_fields_form_patch",
+    "reconcile_missing_with_workspace",
     "user_latest_input",
+    "workspace_has_ending_cta",
     "workspace_has_script_content",
     "workspace_missing_requirements",
+    "workspace_resolved_aspect_ratio",
+    "workspace_resolved_ending_cta",
 ]

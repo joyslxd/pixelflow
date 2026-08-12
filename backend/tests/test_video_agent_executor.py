@@ -442,3 +442,50 @@ async def test_executor_returns_cancelled_plan_without_completing_superseded_ste
     assert result.status is AgentPlanStatus.CANCELLED
     assert result.steps[0].status is PlanStepStatus.SKIPPED
     assert tool.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_retries_workspace_patch_after_revision_conflict() -> None:
+    """长耗时 Tool 返回后若 revision 被并发 bump，应重读后仍写回补丁。"""
+
+    executor, repository, _ = await make_executor(
+        WorkspacePatchTool(),
+        confirmation_required=False,
+    )
+    original_apply = repository.apply_workspace_patch
+    calls = {"n": 0}
+
+    async def flaky_apply(user_id, workspace_id, patch, *, expected_revision, now):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 模拟并发 Turn 已写入：先 bump revision，再让原 CAS 失败。
+            await original_apply(
+                user_id,
+                workspace_id,
+                {"product_info": {"name": "concurrent"}},
+                expected_revision=expected_revision,
+                now=now,
+            )
+            from pixelflow.agent_runtime.persistence.repositories import (
+                AgentRuntimeRecordConflictError,
+            )
+
+            raise AgentRuntimeRecordConflictError("VideoAgent workspace revision 已变化")
+        return await original_apply(
+            user_id,
+            workspace_id,
+            patch,
+            expected_revision=expected_revision,
+            now=now,
+        )
+
+    repository.apply_workspace_patch = flaky_apply  # type: ignore[method-assign]
+
+    completed = await executor.run_plan("user-1", "plan-1")
+    workspace = await repository.get_workspace("user-1", "workspace-1")
+
+    assert completed.status is AgentPlanStatus.COMPLETED
+    assert workspace is not None
+    assert workspace.payload["script"]["source"] == "user_import"
+    assert workspace.payload["product_info"]["name"] == "concurrent"
+    assert calls["n"] >= 2

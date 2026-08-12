@@ -852,6 +852,40 @@ def test_generate_scene_assets_reports_missing_prompt_instead_of_silently_skippi
     ]
 
 
+def test_generate_scene_assets_rejects_empty_jobs_instead_of_fake_success():
+    """无角色/场景/道具可排队时不得 ok=True 假成功。"""
+
+    class FakeImageSkill:
+        async def text_to_image(self, **_kwargs):
+            raise AssertionError("无作业时不应调用生图接口")
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("无作业时不应调用参考生图接口")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={},
+            scene_packages=[
+                {
+                    "scene_id": "scene-1",
+                    "scene_index": 1,
+                    "storyline": "只有文案没有资产",
+                }
+            ],
+            image_ratio="9:16",
+            image_size="2K",
+            model="gpt-image-2",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["failed_assets"]
+    assert result["failed_assets"][0]["error_code"] == "scene_asset_jobs_empty"
+    assert "没有可生成" in str(result.get("message") or "")
+
+
 def test_generate_scene_assets_falls_back_to_text_to_image_without_materials():
     class FakeImageSkill:
         async def text_to_image(self, **kwargs):

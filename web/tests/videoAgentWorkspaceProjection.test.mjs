@@ -68,6 +68,49 @@ test("asset package and right evidence share one authoritative revision", () => 
   assert.equal(assetPackage.assets[0].url, evidence.scene.mediaUrl);
 });
 
+test("workspace projection keeps full scene packages and global assets for chat card", () => {
+  const projected = projectVideoWorkspaceSnapshot({
+    workspace_id: "workspace-1",
+    conversation_id: "conversation-1",
+    revision: 5,
+    payload: {
+      scenes: [{
+        scene_id: "scene-1",
+        scene_index: 1,
+        title: "开场",
+        storyline: "产品特写",
+        shot_description: { text: "0-8秒 特写面霜" },
+        narration: "旁白",
+        prompt: "镜头提示词",
+      }],
+      scene_packages: [{
+        scene_id: "scene-1",
+        scene_index: 1,
+        title: "开场",
+        storyline: "产品特写",
+        shot_description: { text: "0-8秒 特写面霜" },
+        narration: "旁白",
+        prompt: "镜头提示词",
+      }],
+      global_assets: {
+        characters: [{ name: "安然", three_view_prompt: "三视图" }],
+        scenes: [{ name: "酒店", image_prompt: "暖光" }],
+        props: [{ name: "面霜", image_prompt: "玻璃瓶" }],
+      },
+      creation_contract: { video_duration_sec: 60, video_ratio: "9:16" },
+      target_duration_ms: 60_000,
+      assets: [],
+      qc: {},
+    },
+  }, "conversation-1");
+
+  assert.equal(projected.scenePackages.length, 1);
+  assert.equal(projected.scenePackages[0].prompt, "镜头提示词");
+  assert.equal(projected.globalAssets.characters[0].name, "安然");
+  assert.equal(projected.targetDurationMs, 60_000);
+  assert.equal(projected.creationContract.video_duration_sec, 60);
+});
+
 test("older and conflicting same revision snapshots cannot overwrite current preview", () => {
   const current = applyVideoWorkspaceSnapshot(
     createVideoWorkspaceProjectionState("conversation-1"),
@@ -147,11 +190,12 @@ test("confirmation card submits persisted identifiers without free-form workflow
   assert.match(legacyWorkspace, /AgentPipelineProgress/);
   assert.match(legacyWorkspace, /AgentScriptPreviewPanel/);
   assert.match(legacyWorkspace, /useVideoAgent/);
-  assert.match(legacyWorkspace, /SceneEvidencePanel/);
+  // 分镜证据面板已下线：有 scenes 时不再挤掉脚本预览。
+  assert.doesNotMatch(legacyWorkspace, /SceneEvidencePanel/);
   assert.match(legacyWorkspace, /AgentConfirmationCard/);
   assert.match(legacyWorkspace, /actionAvailable/);
-  assert.match(legacyWorkspace, /onEditScene/);
-  assert.match(legacyWorkspace, /请修改分镜/u);
+  assert.doesNotMatch(legacyWorkspace, /onEditScene/);
+  assert.doesNotMatch(legacyWorkspace, /请修改分镜/u);
   assert.match(hook, /selectedSceneId/);
   assert.match(hook, /selectScene/);
   assert.match(storyboardSurface, /StoryboardPanel/);

@@ -845,12 +845,33 @@ class AgentRuntimeService:
                             turn_id=turn_key,
                             chain_next=True,
                         )
+                except asyncio.CancelledError:
+                    if credential is not None:
+                        credential.discard()
+                    logger.warning(
+                        "VideoAgent 延迟提交被取消，收尾 Turn 以免假排队 turn_id=%s",
+                        turn_key,
+                    )
+                    await self._complete_video_agent_runtime_turn(
+                        user_id=owner,
+                        conversation_id=conversation_id,
+                        turn_id=turn_key,
+                        chain_next=True,
+                    )
+                    raise
                 except Exception:
                     if credential is not None:
                         credential.discard()
                     logger.exception(
                         "VideoAgent 延迟提交失败 turn_id=%s",
                         turn_key,
+                    )
+                    # 失败也必须释放占用，否则后续输入永远 QUEUED。
+                    await self._complete_video_agent_runtime_turn(
+                        user_id=owner,
+                        conversation_id=conversation_id,
+                        turn_id=turn_key,
+                        chain_next=True,
                     )
 
             self._deferred_video_agent_submits[turn_key] = _deferred_submit
@@ -1011,11 +1032,12 @@ class AgentRuntimeService:
         user_id: str,
         conversation_id: str,
     ) -> None:
-        """收尾「Plan 已完成但 Turn 仍 ACCEPTED/PROCESSING」的僵尸占用。"""
+        """收尾僵尸 Turn：Plan 已终态，或长时间无 Plan 仍占 ACCEPTED。"""
 
         if self._video_agent_repository is None:
             return
         owner = user_id.strip()
+        now = self._clock()
         turns = await self.repository.list_turns(owner, conversation_id)
         for turn in turns:
             if turn.status not in {
@@ -1025,18 +1047,38 @@ class AgentRuntimeService:
                 continue
             plan_id = video_agent_plan_id(conversation_id, turn.turn_id)
             plan = await self._video_agent_repository.get_plan(owner, plan_id)
-            if plan is None or plan.status not in {
+            if plan is not None and plan.status in {
                 AgentPlanStatus.COMPLETED,
                 AgentPlanStatus.FAILED,
                 AgentPlanStatus.CANCELLED,
+                # 等待补充也视为本轮 Turn 可收尾（Plan 仍挂在会话上给前端展示）。
+                AgentPlanStatus.WAITING_FOR_INPUT,
             }:
+                await self._complete_video_agent_runtime_turn(
+                    user_id=owner,
+                    conversation_id=conversation_id,
+                    turn_id=turn.turn_id,
+                    chain_next=False,
+                )
                 continue
-            await self._complete_video_agent_runtime_turn(
-                user_id=owner,
-                conversation_id=conversation_id,
-                turn_id=turn.turn_id,
-                chain_next=False,
-            )
+            # 热重载/取消打断思考：Turn 仍 ACCEPTED 但尚无 Plan，超时后释放以免假排队。
+            if plan is None:
+                created = turn.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                age_sec = (now - created).total_seconds()
+                if age_sec >= 180.0:
+                    logger.warning(
+                        "释放无 Plan 的陈旧 VideoAgent Turn turn_id=%s age_sec=%.0f",
+                        turn.turn_id,
+                        age_sec,
+                    )
+                    await self._complete_video_agent_runtime_turn(
+                        user_id=owner,
+                        conversation_id=conversation_id,
+                        turn_id=turn.turn_id,
+                        chain_next=False,
+                    )
 
     async def _finalize_video_agent_turn(self, scope: VideoAgentRunScope) -> None:
         if self._video_agent_repository is None:
@@ -1055,6 +1097,7 @@ class AgentRuntimeService:
             AgentPlanStatus.COMPLETED,
             AgentPlanStatus.FAILED,
             AgentPlanStatus.CANCELLED,
+            AgentPlanStatus.WAITING_FOR_INPUT,
         }:
             return
         await self._complete_video_agent_runtime_turn(

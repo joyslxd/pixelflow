@@ -56,6 +56,21 @@ def test_pending_step_rejects_execution_timestamps() -> None:
         )
 
 
+def test_waiting_for_input_plan_allows_empty_steps() -> None:
+    plan = AgentPlan(
+        plan_id="plan-wait-1",
+        workspace_id="workspace-1",
+        conversation_id="conversation-1",
+        status=AgentPlanStatus.WAITING_FOR_INPUT,
+        public_goal="请补充：视频画幅、结尾行动引导",
+        steps=(),
+        created_at=datetime(2026, 8, 11, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    assert plan.status is AgentPlanStatus.WAITING_FOR_INPUT
+    assert plan.steps == ()
+
+
 def test_plan_and_tool_call_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         AgentPlan(

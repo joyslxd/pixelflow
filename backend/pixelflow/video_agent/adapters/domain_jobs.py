@@ -150,9 +150,22 @@ class PrepareScenePackageJobService:
                     "ok": True,
                     "global_assets": result.get("global_assets") if isinstance(result, Mapping) else {},
                     "scene_packages": result.get("scene_packages") if isinstance(result, Mapping) else [],
-                    "creation_contract": result.get("creation_contract") if isinstance(result, Mapping) else None,
+                    "creation_contract": (
+                        result.get("creation_contract")
+                        if isinstance(result, Mapping) and isinstance(result.get("creation_contract"), Mapping)
+                        else None
+                    ),
                     "message": str(result.get("message") or "场景包已准备") if isinstance(result, Mapping) else "场景包已准备",
-                    "target_duration_ms": result.get("target_duration_ms") if isinstance(result, Mapping) else None,
+                    "target_duration_ms": (
+                        result.get("target_duration_ms")
+                        if isinstance(result, Mapping)
+                        else None
+                    )
+                    or (
+                        int(target_duration_ms)
+                        if isinstance(target_duration_ms, int)
+                        else 30_000
+                    ),
                 }
             ),
         }
@@ -236,7 +249,14 @@ class GenerateSceneAssetsJobService:
                     "global_assets": result.get("global_assets") or {},
                     "scene_packages": result.get("scene_packages") or [],
                     "failed_assets": result.get("failed_assets") or [],
-                    "message": str(result.get("message") or "参考图生成完成"),
+                    "message": str(
+                        result.get("message")
+                        or (
+                            "参考图生成完成"
+                            if result.get("ok") is not False
+                            else "参考图生成失败"
+                        )
+                    ),
                 }
             ),
         }

@@ -1163,16 +1163,16 @@ export function MessageBubble({
                     <Sparkles size={15} />
                     {sceneAssetQuotaPaused ? "继续生成参考图" : "重新生成参考图"}
                   </button>
-                ) : msg.artifact.sceneAssetsGenerating || msg.artifact.sceneAssetsAwaitingModel ? (
+                ) : msg.artifact.sceneAssetsGenerating ? (
                   <button
                     type="button"
                     disabled
                     className="flex items-center justify-center gap-1.5 rounded-xl border border-line bg-canvas py-2.5 text-[13px] font-medium text-ink-soft"
                   >
                     <LoaderCircle size={15} className="animate-spin" />
-                    {msg.artifact.sceneAssetsAwaitingModel ? "待选择生图模型" : "参考图生成中"}
+                    参考图生成中
                   </button>
-                ) : (
+                ) : msg.artifact.sceneAssetsAwaitingModel ? null : (
                   <button
                     type="button"
                     onClick={() => onGenerateVideoFromScenePackages?.(msg)}

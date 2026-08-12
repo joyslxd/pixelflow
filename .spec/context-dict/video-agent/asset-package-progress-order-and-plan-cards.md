@@ -23,9 +23,10 @@ keywords:
 1. `startVideoAgentAssetPackageFromScript` await 落库后的真实 notice message id 再设锚点
 2. `replaceOptimisticMessage` 同步重映射 `assetPackageAnchor` / `videoAgentPlanAnchors`
 3. 进度卡 fallback：notice 文案 → 脚本确认卡 → 最近助手消息；**禁止**回落用户消息
-4. 执行方案缺锚点时回落首条用户消息；orphan 也挂到首条用户消息后
+4. 执行方案缺锚点时回落最近用户消息；orphan 也挂到最近用户消息后（进行中资产包须在对话末段）
 5. 切会话先 `loadVideoAgentPlanHistory`；runtime 空时不把热缓存冲成空
 
 ## 注意事项
 - 后端 chat / plans 持久化仍然有效；这次是前端锚点错位导致“看不见”
 - 刷新后依赖 conversation context 里的 `asset_package_anchor_message_id` + Snapshot.plans
+- 2026-08-12：RUNNING 方案再按 planIndex 挂早期用户消息会把「生成资产包」顶到中间；见 `prepare-revision-conflict-stuck-running.md`

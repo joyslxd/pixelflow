@@ -17,7 +17,7 @@ from pixelflow.agent_runtime.operation_namespace import (
 from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
-from pixelflow.video_agent.contracts import AgentPlanStatus, PlanStepStatus
+from pixelflow.video_agent.contracts import AgentPlanStatus, PlanStepStatus, VideoWorkspace
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.workspace import VideoAgentRepository
 
@@ -28,6 +28,38 @@ _FAILED_OPERATION_STATUSES = frozenset(
         ExternalJobStatus.EXPIRED.value,
     }
 )
+_WORKSPACE_PATCH_MAX_ATTEMPTS = 3
+
+
+async def _apply_workspace_patch_resilient(
+    repository: VideoAgentRepository,
+    *,
+    user_id: str,
+    workspace: VideoWorkspace,
+    patch: Mapping[str, object],
+    now: datetime,
+) -> VideoWorkspace:
+    """额度投影写回：冲突时按最新 revision 重试，避免 completion_dispatch 永久卡死。"""
+
+    current = workspace
+    last_error: AgentRuntimeRecordConflictError | None = None
+    for _ in range(_WORKSPACE_PATCH_MAX_ATTEMPTS):
+        try:
+            return await repository.apply_workspace_patch(
+                user_id,
+                current.workspace_id,
+                dict(patch),
+                expected_revision=current.revision,
+                now=now,
+            )
+        except AgentRuntimeRecordConflictError as exc:
+            last_error = exc
+            refreshed = await repository.get_workspace(user_id, current.workspace_id)
+            if refreshed is None:
+                raise
+            current = refreshed
+    assert last_error is not None
+    raise last_error
 
 
 class VideoAgentOperationResumer:
@@ -215,11 +247,11 @@ class VideoAgentQuotaResumer:
                 raise AgentRuntimeRecordConflictError(
                     "VideoAgent已有不同额度中断"
                 )
-            await self._repository.apply_workspace_patch(
-                user_id,
-                workspace.workspace_id,
-                {"quota_interrupt": projection},
-                expected_revision=workspace.revision,
+            await _apply_workspace_patch_resilient(
+                self._repository,
+                user_id=user_id,
+                workspace=workspace,
+                patch={"quota_interrupt": projection},
                 now=quota_event.occurred_at,
             )
             return
@@ -242,10 +274,11 @@ class VideoAgentQuotaResumer:
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent额度恢复与当前中断不匹配"
             )
-        await self._repository.apply_workspace_patch(
-            user_id,
-            workspace.workspace_id,
-            {
+        await _apply_workspace_patch_resilient(
+            self._repository,
+            user_id=user_id,
+            workspace=workspace,
+            patch={
                 "quota_interrupt": None,
                 "last_quota_resolution": {
                     "event_id": quota_event.event_id,
@@ -254,7 +287,6 @@ class VideoAgentQuotaResumer:
                     "state": "resumed",
                 },
             },
-            expected_revision=workspace.revision,
             now=quota_event.occurred_at,
         )
 

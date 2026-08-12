@@ -16,6 +16,8 @@ _PLAN_OUTPUT_EXAMPLE = (
     '{"public_goal":"导入成熟脚本","steps":'
     '[{"tool_name":"import_script","title":"导入脚本","arguments":{}}]}'
 )
+# 与 Intake 对齐：规划必须 stream=true，避免上游整段等待。
+_PLANNING_TIMEOUT_SEC = 90.0
 
 
 class _PlanningContract(BaseModel):
@@ -58,20 +60,6 @@ class VideoPlanningModel(Protocol):
     ) -> VideoPlanProposal: ...
 
 
-def _bind_structured_planner(model: Any) -> Any:
-    """优先 json_schema；供应商不支持时回退默认绑定。"""
-
-    binder = getattr(model, "with_structured_output", None)
-    if binder is None:
-        raise TypeError("规划模型缺少 with_structured_output")
-    try:
-        return binder(VideoPlanProposal, method="json_schema")
-    except TypeError:
-        return binder(VideoPlanProposal)
-    except Exception:
-        return binder(VideoPlanProposal)
-
-
 def _coerce_plan_proposal(result: Any) -> VideoPlanProposal:
     """把结构化输出结果收敛为 VideoPlanProposal；形态不对时抛 ValidationError 供修复重试。"""
 
@@ -87,7 +75,7 @@ def _coerce_plan_proposal(result: Any) -> VideoPlanProposal:
 
 
 class DeepSeekVideoPlanningModel:
-    """通过项目模型工厂调用 deepseek-v4-pro 的结构化输出。"""
+    """通过项目模型工厂调用 deepseek-v4-pro；强制 HTTP stream=true 再解析计划 JSON。"""
 
     def __init__(
         self,
@@ -105,6 +93,11 @@ class DeepSeekVideoPlanningModel:
         skill_manifests: Sequence[SkillManifest],
         feedback: str | None,
     ) -> VideoPlanProposal:
+        from pixelflow.video_agent.thinking_stream import (
+            _extract_json_object,
+            stream_chat_tokens,
+        )
+
         model_factory = self._model_factory
         if model_factory is None:
             from deerflow.models import create_chat_model
@@ -113,9 +106,15 @@ class DeepSeekVideoPlanningModel:
         model = model_factory(
             name="deepseek-v4-pro",
             thinking_enabled=False,
+            streaming=True,
+            request_timeout=_PLANNING_TIMEOUT_SEC,
             app_config=self._app_config,
         )
-        structured = _bind_structured_planner(model)
+        # LangChain：实例 streaming=False 会让 astream 退化成 ainvoke（HTTP stream=false）。
+        try:
+            setattr(model, "streaming", True)
+        except Exception:  # noqa: BLE001
+            pass
         tools = [
             {
                 "name": spec.name,
@@ -141,19 +140,30 @@ class DeepSeekVideoPlanningModel:
             "输出必须严格符合："
             f"{_PLAN_OUTPUT_EXAMPLE}。"
             "不要一次性铺开完整脚本流水线或成片流程；优先最小可推进的下一步。"
-            "用户贴入成熟脚本或要求导入脚本时，优先 import_script。"
+            "用户贴入成熟脚本或要求导入脚本时，优先 import_script；"
+            "import_script 会强制拆解角色/场景/道具与分镜提示词，禁止只用 inspect 口头判断成稿。"
             "若存在 blocking_confirmation，只能规划 inspect_video_workspace 或公开澄清，"
             "不得绕过确认、额度或权限闸门。"
             "计费和破坏性步骤仍由服务端确认闸门控制。"
             "用户确认脚本并生成资产包时优先 prepare_scene_packages；"
+            "若 workspace_digest.script_plan_confirmed=true 且 has_scene_packages=false，"
+            "且用户说「确认脚本/同意方案/生成资产包」，必须规划 prepare_scene_packages，"
+            "禁止只 inspect 或改成 clarify。"
             "确认生图模型或继续生成失败参考图时用 generate_scene_assets；"
+            "若 workspace_digest.has_scene_packages=true 且 has_scene_asset_images=false，"
+            "用户说「没有参考图，直接生成/生成参考图/开始生图」必须规划 generate_scene_assets，"
+            "禁止跳到 generate_scenes 或整片视频生成。"
             "若 workspace_digest.failed_scene_asset_count>0 且用户说继续/重试失败参考图，"
             "应规划 generate_scene_assets（可由后续确认闸门执行）。"
             "用户修改第 N 镜/指定分镜时优先 patch_scene；"
             "确认生成或重生成已修改分镜时用 generate_scenes，"
             "且应只覆盖 dirty_scene_ids 或用户明确点名的镜头，禁止整包重做未改镜头。"
-            "若提供 intake_thinking：把其中的 intent、facts、missing_requirements 视为本轮上下文，"
-            "但必须由你根据 workspace、Operation 与注册工具独立选择计划标题和工具。"
+            "若提供 intake_thinking：它是 Intake 给出的状态诊断证据。"
+            "intent 表示用户目标；target_capability 表示建议进入的业务能力；"
+            "readiness 表示前置条件状态；current_state 表示已存在的工作区产物；"
+            "scene_ids 表示本轮明确涉及的镜头；constraints 表示局部执行和检查约束。"
+            "这些字段都不是工具调用命令；你必须结合 workspace_digest、Operation、"
+            "blocking_confirmation 和服务端注册工具，独立选择计划标题、工具与参数。"
             "若 needs_user_reply=true 或 missing 非空，不要规划计费/破坏性工具。"
             "不得把 Intake 的用户可见文案或任何旧步骤建议当作工具选择指令。"
         )
@@ -172,10 +182,14 @@ class DeepSeekVideoPlanningModel:
             "output_schema": VideoPlanProposal.model_json_schema(),
             "output_example": json.loads(_PLAN_OUTPUT_EXAMPLE),
         }
-        result = await structured.ainvoke(
-            [
+        _, answer = await stream_chat_tokens(
+            model=model,
+            messages=[
                 ("system", system_prompt),
                 ("human", json.dumps(user_payload, ensure_ascii=False)),
-            ]
+            ],
+            timeout_sec=_PLANNING_TIMEOUT_SEC,
         )
-        return _coerce_plan_proposal(result)
+        parsed = _extract_json_object(answer or "")
+        # 无 JSON 时仍走 coerce，抛 ValidationError 供 Planner 修复重试。
+        return _coerce_plan_proposal(parsed if parsed is not None else (answer or ""))

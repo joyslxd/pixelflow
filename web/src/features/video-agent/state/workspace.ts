@@ -52,6 +52,12 @@ export interface VideoAgentWorkspaceProjection {
   assets: VideoAgentWorkspaceAsset[];
   script: VideoAgentScriptEvidence | null;
   scriptStages: VideoAgentScriptStageEvidence[];
+  /** 完整分镜包（含提示词/旁白），供对话资产包卡片与 StoryboardPanel 使用。 */
+  scenePackages: Record<string, unknown>[];
+  /** 角色/场景/道具全局资产，含 three_view_prompt / image_prompt。 */
+  globalAssets: Record<string, unknown> | null;
+  creationContract: Record<string, unknown> | null;
+  targetDurationMs: number | null;
 }
 
 export interface VideoWorkspaceProjectionState {
@@ -188,11 +194,13 @@ function projectAsset(value: Record<string, unknown>): VideoAgentWorkspaceAsset 
 function projectScript(value: unknown): VideoAgentScriptEvidence | null {
   if (!isRecord(value)) return null;
   const content = optionalText(value.content);
-  const reference = artifactRef(value.artifact_ref);
   const version = value.version;
-  if (!content || !reference || !Number.isSafeInteger(version) || (version as number) < 1) {
+  if (!content || !Number.isSafeInteger(version) || (version as number) < 1) {
     return null;
   }
+  // intake_draft 等种子稿可能尚未带 artifact_ref；合成稳定引用，避免右侧预览整块消失。
+  const reference = artifactRef(value.artifact_ref)
+    ?? `artifact:script:draft:v${version as number}`;
   return {
     artifactRef: reference,
     version: version as number,
@@ -233,6 +241,29 @@ function projectScriptStages(value: unknown): VideoAgentScriptStageEvidence[] {
   return stages;
 }
 
+function projectScenePackages(value: unknown): Record<string, unknown>[] {
+  return records(value).filter((item) => (
+    typeof item.scene_id === "string"
+    || typeof item.scene_index === "number"
+    || typeof item.title === "string"
+  ));
+}
+
+function projectGlobalAssets(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  return value;
+}
+
+function projectCreationContract(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function projectTargetDurationMs(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1_000
+    ? value
+    : null;
+}
+
 export function projectVideoWorkspaceSnapshot(
   value: unknown,
   expectedConversationId: string,
@@ -255,6 +286,9 @@ export function projectVideoWorkspaceSnapshot(
   if (new Set(scenes.map((scene) => scene.sceneId)).size !== scenes.length) {
     throw new TypeError("VideoAgent工作区包含重复scene_id");
   }
+  const scenePackages = projectScenePackages(
+    value.payload.scene_packages ?? value.payload.scenes,
+  );
   return {
     workspaceId: requiredText(value.workspace_id, "workspace_id"),
     conversationId,
@@ -265,6 +299,10 @@ export function projectVideoWorkspaceSnapshot(
       .filter((item): item is VideoAgentWorkspaceAsset => item !== null),
     script: projectScript(value.payload.script),
     scriptStages: projectScriptStages(value.payload.script_pipeline),
+    scenePackages,
+    globalAssets: projectGlobalAssets(value.payload.global_assets),
+    creationContract: projectCreationContract(value.payload.creation_contract),
+    targetDurationMs: projectTargetDurationMs(value.payload.target_duration_ms),
   };
 }
 
@@ -346,6 +384,12 @@ export function cloneVideoWorkspaceProjectionState(
               ]),
           )
           : {},
+        scene_packages: Array.isArray(current.scenePackages) ? current.scenePackages : [],
+        global_assets: isRecord(current.globalAssets) ? current.globalAssets : null,
+        creation_contract: isRecord(current.creationContract) ? current.creationContract : null,
+        target_duration_ms: typeof current.targetDurationMs === "number"
+          ? current.targetDurationMs
+          : null,
         qc: Array.isArray(current.scenes)
           ? Object.fromEntries(current.scenes.flatMap((scene) => (
             isRecord(scene) && typeof scene.sceneId === "string"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -24,6 +25,8 @@ from ..persistence.repositories import (
 )
 from ..ports import OperationConflictError
 from .providers import ProviderJobOutcome, ProviderJobSnapshot
+
+logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUS_BY_OUTCOME = {
     ProviderJobOutcome.SUCCEEDED: ExternalJobStatus.SUCCEEDED,
@@ -406,7 +409,12 @@ class OperationCompletionDispatcher:
                 completion_event=completion_event,
                 idempotency_key=claim.event.event_id,
             )
-        except Exception:
+        except Exception as exc:
+            # 只记异常类型，不回显供应商/用户内容；便于区分 Conflict 与 Tool 失败。
+            logger.warning(
+                "Operation 完成投递 resume 失败 error_type=%s",
+                type(exc).__name__,
+            )
             raise OperationCompletionDispatchError("Workflow Graph 恢复失败") from None
 
         try:

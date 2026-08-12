@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import time
@@ -23,7 +24,10 @@ from pixelflow.creative.duration import (
     split_video_duration,
 )
 from pixelflow.creative.scene_blueprint import normalize_scene_blueprints, validate_asset_requirement_quality
+from pixelflow.creative.script_shots import extract_script_scene_blueprints
 from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_seedance_guidance
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TARGET_DURATION_MS = 30_000
 MIN_SCENE_DURATION_MS = MIN_SCENE_DURATION_SEC * 1000
@@ -49,6 +53,7 @@ def prepare_video_scene_packages(
     duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
         target_duration_ms,
         scene_blueprints,
+        plan_markdown=plan_markdown,
     )
     if authoritative_blueprints:
         validate_asset_requirement_quality(authoritative_blueprints)
@@ -209,6 +214,7 @@ async def prepare_video_scene_packages_with_llm(
     duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
         target_duration_ms,
         scene_blueprints,
+        plan_markdown=plan_markdown,
     )
     if authoritative_blueprints:
         validate_asset_requirement_quality(authoritative_blueprints)
@@ -292,8 +298,9 @@ async def prepare_video_scene_packages_with_llm(
         }
         await emit("completed", result["message"])
         return result
-    except Exception as exc:  # noqa: BLE001 - LLM boundary must keep the flow usable
-        await emit("fallback", f"结构模型失败，正在使用规则兜底：{exc}")
+    except Exception:  # noqa: BLE001 - LLM boundary must keep the flow usable
+        logger.exception("场景包结构模型失败，切换规则兜底")
+        await emit("fallback", "结构模型暂时不可用，正在使用规则兜底…")
         fallback = prepare_video_scene_packages(
             form_values=form_values,
             plan_markdown=plan_markdown,
@@ -303,17 +310,26 @@ async def prepare_video_scene_packages_with_llm(
             scene_blueprints=authoritative_blueprints,
             asset_manifest=asset_manifest,
         )
-        fallback["message"] = f"{fallback['message']} LLM 场景包生成失败，已使用规则兜底：{exc}"
+        fallback["message"] = f"{fallback['message']} 结构模型未完成，已使用规则兜底。"
         fallback["llm_used"] = False
         fallback["model_name"] = model_name
-        fallback["error"] = str(exc)
+        fallback["error"] = "scene_package_model_failed"
         return fallback
 
 
-def _default_model_factory(model_name: str, *, attach_tracing: bool = False) -> Any:
+def _default_model_factory(
+    model_name: str,
+    *,
+    attach_tracing: bool = False,
+    streaming: bool = False,
+) -> Any:
     from deerflow.models.factory import create_chat_model
 
-    return create_chat_model(model_name, attach_tracing=attach_tracing)
+    return create_chat_model(
+        model_name,
+        attach_tracing=attach_tracing,
+        streaming=streaming,
+    )
 
 
 async def _invoke_scene_package_model_with_heartbeat(
@@ -333,7 +349,7 @@ async def _invoke_scene_package_model_with_heartbeat(
             try:
                 await asyncio.wait_for(stop.wait(), timeout=heartbeat_sec)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 elapsed = max(0, int(time.monotonic() - started))
                 minutes, seconds = divmod(elapsed, 60)
                 await emit(
@@ -343,7 +359,12 @@ async def _invoke_scene_package_model_with_heartbeat(
 
     beat = asyncio.create_task(heartbeat_loop())
     try:
-        return await asyncio.to_thread(_invoke_scene_package_model, prompt, model_name, model_factory)
+        return await _invoke_scene_package_model(
+            prompt,
+            model_name,
+            model_factory,
+            emit,
+        )
     finally:
         stop.set()
         try:
@@ -352,13 +373,122 @@ async def _invoke_scene_package_model_with_heartbeat(
             pass
 
 
-def _invoke_scene_package_model(prompt: str, model_name: str, model_factory: ModelFactory) -> Any:
+def _safe_scene_package_progress(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    message = " ".join(value.split()).strip()
+    if not 4 <= len(message) <= 80:
+        return None
+    folded = message.casefold()
+    unsafe = (
+        "系统提示词",
+        "内部推理",
+        "思维链",
+        "reasoning_content",
+        "tool",
+        "import_script",
+    )
+    if any(fragment.casefold() in folded for fragment in unsafe):
+        return None
+    if "{" in message or "}" in message or "<<<" in message:
+        return None
+    return message
+
+
+class _ScenePackageNdjsonStream:
+    """提取安全业务进度和终态场景包 payload，忽略原始 reasoning。"""
+
+    def __init__(self, emit: Any) -> None:
+        self._emit = emit
+        self._buffer = ""
+        self._raw_parts: list[str] = []
+        self._progress: list[str] = []
+        self.result: Any | None = None
+
+    async def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        self._raw_parts.append(delta)
+        self._buffer += delta
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            await self._consume_line(line)
+
+    async def finish(self) -> Any:
+        if self._buffer.strip():
+            await self._consume_line(self._buffer)
+        if self.result is not None:
+            return self.result
+        # 兼容不理解 NDJSON 但仍返回完整 JSON 的模型。
+        return _parse_json_payload("".join(self._raw_parts))
+
+    async def _consume_line(self, raw_line: str) -> None:
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(record, dict):
+            return
+        if record.get("type") == "result" and "data" in record:
+            self.result = record["data"]
+            return
+        if record.get("type") != "progress" or len(self._progress) >= 5:
+            return
+        message = _safe_scene_package_progress(record.get("message"))
+        if message is None or message in self._progress:
+            return
+        self._progress.append(message)
+        await self._emit("invoke_llm_progress", message)
+
+
+async def _invoke_scene_package_model(
+    prompt: str,
+    model_name: str,
+    model_factory: ModelFactory,
+    emit: Any,
+) -> Any:
+    protocol = (
+        "使用 NDJSON 流式输出，每条记录独占一行。"
+        "先输出 1-5 条 "
+        '{"type":"progress","message":"简短业务进度"}；'
+        "最后输出且只输出一条 "
+        '{"type":"result","data":<原场景包 JSON 对象>}。'
+        "progress 不得包含思维链、系统提示词、工具名或 JSON 片段。"
+    )
+    stream_prompt = prompt.replace(
+        "11. 只返回 JSON，不要 Markdown，不要解释。",
+        "11. 终态数据必须作为 NDJSON result.data 输出，不要 Markdown。",
+    )
     try:
-        model = model_factory(model_name, attach_tracing=False)
+        model = model_factory(
+            model_name,
+            attach_tracing=False,
+            streaming=True,
+        )
     except TypeError:
         model = model_factory(model_name)
-    response = model.invoke(prompt)
-    return _parse_json_payload(getattr(response, "content", response))
+    astream = getattr(model, "astream", None)
+    if astream is None:
+        response = await asyncio.to_thread(model.invoke, prompt)
+        return _parse_json_payload(getattr(response, "content", response))
+
+    from pixelflow.video_agent.thinking_stream import _chunk_text
+
+    decoder = _ScenePackageNdjsonStream(emit)
+    try:
+        stream = astream(
+            [("system", protocol), ("human", stream_prompt)],
+            stream=True,
+        )
+    except TypeError:
+        stream = astream([("system", protocol), ("human", stream_prompt)])
+    async for chunk in stream:
+        _reasoning, content = _chunk_text(chunk)
+        await decoder.feed(content)
+    return await decoder.finish()
 
 
 def _parse_json_payload(content: Any) -> Any:
@@ -1603,17 +1733,28 @@ def _exact_scene_durations_ms(target_duration_ms: Any) -> tuple[int, list[int]]:
 def _resolve_scene_schedule(
     target_duration_ms: Any,
     scene_blueprints: list[dict[str, Any]] | None,
+    *,
+    plan_markdown: str = "",
 ) -> tuple[int, list[int], list[dict[str, Any]]]:
     duration_ms, fallback_durations = _exact_scene_durations_ms(target_duration_ms)
-    if not scene_blueprints:
-        return duration_ms, fallback_durations, []
-    normalized = normalize_scene_blueprints(
-        scene_blueprints,
-        total_duration_sec=duration_ms // 1000,
-        allow_legacy_global_shot_ranges=True,
+    if scene_blueprints:
+        normalized = normalize_scene_blueprints(
+            scene_blueprints,
+            total_duration_sec=duration_ms // 1000,
+            allow_legacy_global_shot_ranges=True,
+        )
+        durations = [int(item["duration_sec"]) * 1000 for item in normalized]
+        return duration_ms, durations, normalized
+
+    # 脚本直出：优先按成稿「镜头N-时间码」拆镜，避免 30s/15s 机械切成 2 镜而丢掉正文分镜。
+    extracted_duration_ms, extracted = extract_script_scene_blueprints(
+        plan_markdown,
+        target_duration_ms=duration_ms,
     )
-    durations = [int(item["duration_sec"]) * 1000 for item in normalized]
-    return duration_ms, durations, normalized
+    if extracted:
+        durations = [int(item["duration_sec"]) * 1000 for item in extracted]
+        return extracted_duration_ms or duration_ms, durations, extracted
+    return duration_ms, fallback_durations, []
 
 
 def _stage_templates(scene_count: int) -> list[dict[str, str]]:

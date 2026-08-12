@@ -113,5 +113,21 @@ export function resolveSupervisorRuntimeNotice(
     };
   }
 
+  const activeProcessing = input.inputQueue.some(
+    (item) => item.status === "accepted"
+      || item.status === "processing"
+      || item.status === "sending",
+  ) || input.runStatus === "running";
+  if (activeProcessing) {
+    return {
+      kind: "queue",
+      tone: "working",
+      title: "正在处理中，请稍候…",
+      detail: "你可以继续输入，新消息会排队；导入成熟脚本可能需要一两分钟。",
+      progressPercent: null,
+      queueBadge: null,
+    };
+  }
+
   return null;
 }

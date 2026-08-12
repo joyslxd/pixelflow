@@ -23,6 +23,17 @@ def test_normalize_fullwidth_colon() -> None:
     assert normalize_user_text("9：16") == "9:16"
 
 
+def test_parse_analysis_payload_keeps_aspect_and_cta_values() -> None:
+    parsed = _parse_analysis_payload(
+        '{"duration_sec": 180, "has_aspect_ratio": true, "aspect_ratio": "9:16", '
+        '"has_ending_cta": true, "ending_cta": "none", "missing": []}'
+    )
+    assert parsed is not None
+    assert parsed.aspect_ratio == "9:16"
+    assert parsed.ending_cta == "none"
+    assert parsed.missing == ()
+
+
 def test_parse_analysis_payload_drops_duration_from_missing() -> None:
     parsed = _parse_analysis_payload(
         '{"duration_sec": 180, "has_aspect_ratio": false, '
@@ -41,6 +52,32 @@ def test_format_clarification_uses_explicit_llm_fields_only() -> None:
     assert "已识别时长：180秒" in clarification
     assert CLARIFY_MARKER in clarification
     assert "视频时长" not in clarification
+
+
+def test_production_field_reply_is_structural_gate_only() -> None:
+    """补字段门闩只认 awaiting/missing，不认话术关键词。"""
+
+    with_missing = {
+        "script": {"content": "x" * 100, "missing_requirements": ["视频画幅"]},
+    }
+    assert looks_like_production_field_reply(
+        "9：16",
+        workspace_payload=with_missing,
+    ) is True
+    # 有缺项时短句结构上可进补字段；是否真该补由 Entrypoint + Intake 再裁。
+    assert looks_like_production_field_reply(
+        "没有参考图，直接生成",
+        workspace_payload=with_missing,
+    ) is True
+    # 无 awaiting/missing 时，即使短句也不当成补字段。
+    assert looks_like_production_field_reply(
+        "9：16",
+        workspace_payload={"script": {"content": "x" * 100, "missing_requirements": []}},
+    ) is False
+    assert looks_like_production_field_reply(
+        "随便聊聊天气",
+        workspace_payload={"latest_input": "短"},
+    ) is False
 
 
 def test_production_field_reply_uses_workspace_not_regex() -> None:

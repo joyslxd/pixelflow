@@ -149,6 +149,7 @@ _PLAN_STATUS_TRANSITIONS: dict[AgentPlanStatus, frozenset[AgentPlanStatus]] = {
         {
             AgentPlanStatus.RUNNING,
             AgentPlanStatus.AWAITING_CONFIRMATION,
+            AgentPlanStatus.WAITING_FOR_INPUT,
             AgentPlanStatus.FAILED,
             AgentPlanStatus.CANCELLED,
         }
@@ -166,6 +167,13 @@ _PLAN_STATUS_TRANSITIONS: dict[AgentPlanStatus, frozenset[AgentPlanStatus]] = {
             AgentPlanStatus.RUNNING,
             AgentPlanStatus.FAILED,
             AgentPlanStatus.CANCELLED,
+        }
+    ),
+    # 用户补齐信息或新 Turn 覆盖时，结束等待态。
+    AgentPlanStatus.WAITING_FOR_INPUT: frozenset(
+        {
+            AgentPlanStatus.CANCELLED,
+            AgentPlanStatus.COMPLETED,
         }
     ),
     AgentPlanStatus.COMPLETED: frozenset(),
@@ -296,6 +304,15 @@ class VideoAgentRepository(Protocol):
         conversation_id: str,
         *,
         now: datetime,
+    ) -> list[AgentPlan]: ...
+
+    async def cancel_waiting_for_input_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+        exclude_plan_id: str | None = None,
     ) -> list[AgentPlan]: ...
 
     async def start_step_with_event(
@@ -518,7 +535,15 @@ class MemoryVideoAgentRepository:
             if existing_owner != owner:
                 raise AgentRuntimeRecordConflictError("VideoAgent plan 已属于其他用户")
             return _clone(self._plan_by_owner[(owner, plan.plan_id)])
-        if {step.plan_id for step in steps} != {plan.plan_id} or len({step.sequence for step in steps}) != len(steps):
+        if not steps:
+            if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent plan 缺少 steps（仅 waiting_for_input 允许空步骤）"
+                )
+        elif (
+            {step.plan_id for step in steps} != {plan.plan_id}
+            or len({step.sequence for step in steps}) != len(steps)
+        ):
             raise AgentRuntimeRecordConflictError("VideoAgent plan steps 不符合当前 plan 或 sequence 唯一约束")
         stored = plan.model_copy(
             update={
@@ -843,6 +868,38 @@ class MemoryVideoAgentRepository:
                     update={
                         "status": AgentPlanStatus.CANCELLED,
                         "steps": tuple(steps),
+                        "updated_at": now,
+                    }
+                )
+                self._plan_by_owner[(owner, plan.plan_id)] = _clone(cancelled)
+                cancelled_plans.append(_clone(cancelled))
+            return cancelled_plans
+
+    async def cancel_waiting_for_input_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+        exclude_plan_id: str | None = None,
+    ) -> list[AgentPlan]:
+        """新 Turn 推进前取消旧的等待补充 Plan，避免时间线叠多个等待卡。"""
+
+        async with self._transition_lock:
+            owner = _owner(user_id)
+            conversation = conversation_id.strip()
+            excluded = (exclude_plan_id or "").strip() or None
+            plans = await self.list_conversation_plans(owner, conversation)
+            cancelled_plans: list[AgentPlan] = []
+            for plan in plans:
+                if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+                    continue
+                if excluded and plan.plan_id == excluded:
+                    continue
+                _assert_plan_transition(plan.status, AgentPlanStatus.CANCELLED)
+                cancelled = plan.model_copy(
+                    update={
+                        "status": AgentPlanStatus.CANCELLED,
                         "updated_at": now,
                     }
                 )
@@ -1363,7 +1420,15 @@ class SQLVideoAgentRepository:
         steps: list[AgentPlanStep],
     ) -> AgentPlan:
         owner = _owner(user_id)
-        if {step.plan_id for step in steps} != {plan.plan_id} or len({step.sequence for step in steps}) != len(steps):
+        if not steps:
+            if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent plan 缺少 steps（仅 waiting_for_input 允许空步骤）"
+                )
+        elif (
+            {step.plan_id for step in steps} != {plan.plan_id}
+            or len({step.sequence for step in steps}) != len(steps)
+        ):
             raise AgentRuntimeRecordConflictError("VideoAgent plan steps 不符合当前 plan 或 sequence 唯一约束")
         async with self._session_factory() as session:
             async with session.begin():
@@ -1743,6 +1808,54 @@ class SQLVideoAgentRepository:
                         if step_row.started_at is None:
                             step_row.started_at = now
                         step_row.completed_at = now
+                    plan_row.status = AgentPlanStatus.CANCELLED.value
+                    plan_row.updated_at = now
+                    await session.flush()
+                    cancelled_plans.append(_plan_from_row(plan_row))
+        result: list[AgentPlan] = []
+        for plan in cancelled_plans:
+            steps = await self.list_plan_steps(owner, plan.plan_id)
+            result.append(plan.model_copy(update={"steps": tuple(steps)}))
+        return result
+
+    async def cancel_waiting_for_input_plans(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        now: datetime,
+        exclude_plan_id: str | None = None,
+    ) -> list[AgentPlan]:
+        """新 Turn 推进前取消旧的等待补充 Plan，避免时间线叠多个等待卡。"""
+
+        owner = _owner(user_id)
+        conversation = conversation_id.strip()
+        excluded = (exclude_plan_id or "").strip() or None
+        plans = await self.list_conversation_plans(owner, conversation)
+        cancelled_plans: list[AgentPlan] = []
+        for plan in plans:
+            if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+                continue
+            if excluded and plan.plan_id == excluded:
+                continue
+            async with self._session_factory() as session:
+                async with session.begin():
+                    plan_row = (
+                        await session.scalars(
+                            select(PixelFlowVideoAgentPlanRow)
+                            .where(
+                                PixelFlowVideoAgentPlanRow.user_id == owner,
+                                PixelFlowVideoAgentPlanRow.plan_id == plan.plan_id,
+                            )
+                            .with_for_update()
+                        )
+                    ).one_or_none()
+                    if plan_row is None:
+                        continue
+                    current_status = AgentPlanStatus(plan_row.status)
+                    if current_status is not AgentPlanStatus.WAITING_FOR_INPUT:
+                        continue
+                    _assert_plan_transition(current_status, AgentPlanStatus.CANCELLED)
                     plan_row.status = AgentPlanStatus.CANCELLED.value
                     plan_row.updated_at = now
                     await session.flush()

@@ -52,6 +52,26 @@ test("message bubble opens script preview from version phrase", () => {
   assert.match(bubble, /splitScriptVersionPreviewParts/);
   assert.match(bubble, /onOpenScriptPreview/);
   assert.match(workspace, /onOpenScriptPreview=\{\(\) => \{/);
+  assert.match(workspace, /setScriptPreviewOpen\(true\)/);
+  assert.match(workspace, /scriptPreviewOpen && \(/);
+});
+
+test("script preview panel stays closed until chat opens it", () => {
+  const workspace = fs.readFileSync(
+    path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"),
+    "utf8",
+  );
+  const panel = fs.readFileSync(
+    path.resolve("src/features/video-agent/AgentScriptPreviewPanel.tsx"),
+    "utf8",
+  );
+  assert.match(workspace, /const \[scriptPreviewOpen, setScriptPreviewOpen\] = useState\(false\)/);
+  assert.doesNotMatch(
+    workspace,
+    /工作区有脚本草稿时关掉画布，露出右侧脚本预览/,
+  );
+  assert.match(panel, /收起脚本预览/);
+  assert.match(panel, /onClose\?/);
 });
 
 test("plan timeline shows 规划中 while steps are empty", () => {
@@ -63,6 +83,31 @@ test("plan timeline shows 规划中 while steps are empty", () => {
   assert.match(source, /规划中，正在生成执行步骤/);
 });
 
+test("plan timeline shows 等待补充 for waiting_for_input", () => {
+  const timeline = fs.readFileSync(
+    path.resolve("src/features/video-agent/AgentPlanTimeline.tsx"),
+    "utf8",
+  );
+  const contracts = fs.readFileSync(
+    path.resolve("src/features/video-agent/state/contracts.ts"),
+    "utf8",
+  );
+  const reducer = fs.readFileSync(
+    path.resolve("src/features/video-agent/state/reducer.ts"),
+    "utf8",
+  );
+  assert.match(contracts, /waiting_for_input/);
+  assert.match(reducer, /waiting_for_input/);
+  assert.match(timeline, /等待补充/);
+  assert.match(timeline, /等待你在对话框补充所需信息后再继续规划/);
+  assert.doesNotMatch(
+    timeline,
+    /等待你补充所需信息后再继续规划\s*\{?\$?\{?plan\.publicGoal/,
+    "waiting body must not repeat publicGoal",
+  );
+  assert.match(timeline, /plan\.status === "waiting_for_input"/);
+});
+
 test("supervisor reducer keeps thinking open across plan updates", () => {
   const source = fs.readFileSync(
     path.resolve("src/lib/supervisor/reducer.ts"),
@@ -70,4 +115,22 @@ test("supervisor reducer keeps thinking open across plan updates", () => {
   );
   assert.match(source, /agent\.plan\.updated/);
   assert.match(source, /思考流先于 Plan/);
+});
+
+test("intake_draft script projects without artifact_ref; preview stays user-opened", () => {
+  const workspace = fs.readFileSync(
+    path.resolve("src/features/video-agent/state/workspace.ts"),
+    "utf8",
+  );
+  const legacy = fs.readFileSync(
+    path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"),
+    "utf8",
+  );
+  assert.match(
+    workspace,
+    /artifact:script:draft:v\$\{version/,
+    "missing artifact_ref must synthesize draft ref",
+  );
+  assert.match(legacy, /scriptPreviewOpen/);
+  assert.match(legacy, /waiting_for_input/);
 });

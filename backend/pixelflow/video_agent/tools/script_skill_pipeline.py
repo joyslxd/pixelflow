@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Literal
 
@@ -119,6 +120,112 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
         "这是用户将看到的终稿，必须连贯、顺序正确、忠于用户输入。"
     ),
 }
+
+# 成稿导入后的结构化拆解：一次产出角色/场景/道具 + 分镜提示词（供右侧预览与后续资产包）。
+_IMPORT_STRUCTURE_SYSTEM = (
+    "你是 PixelFlow 分镜脚本结构化拆解器。用户已提供完整或接近完整的成稿。"
+    "你必须调用「拆解」能力：把上下文拆成角色、场景、道具、分镜提示词，禁止只写一句笼统摘要。\n"
+    "输出 Markdown，且必须依次包含四个二级标题：\n"
+    "## 角色设定\n"
+    "## 场景设定\n"
+    "## 道具与产品设定\n"
+    "## 分镜提示词\n"
+    "规则：\n"
+    "1) 角色/场景/道具：逐项列出视觉与可拍要点；道具标题用具体产品名，禁止「核心产品」。\n"
+    "2) 分镜提示词：按成稿镜头顺序，每镜含时间码、景别/运镜、画面提示词、对白或旁白摘要；"
+    "时间码与镜头数尽量与成稿一致，不得大幅删镜或重写剧情。\n"
+    "3) 忠实原文，不编造未出现的人物/品牌/卖点。\n"
+)
+
+
+def _split_import_structure_markdown(markdown: str) -> tuple[str, str]:
+    """把综合拆解稿切成 characters / outline 两段，便于 script_pipeline 复用。"""
+
+    text = markdown.strip()
+    if not text:
+        return "", ""
+    shot_match = re.search(r"^##\s*分镜提示词\s*$", text, flags=re.M)
+    if shot_match is None:
+        return text, ""
+    settings = text[: shot_match.start()].strip()
+    shots = text[shot_match.start() :].strip()
+    if not re.search(r"##\s*角色设定", settings):
+        settings = f"## 角色设定\n\n（待从成稿补全）\n\n{settings}".strip()
+    return settings, shots
+
+
+async def extract_imported_script_structure(
+    *,
+    markdown: str,
+    workspace_id: str,
+    on_token: Callable[[str], Awaitable[None]] | None = None,
+) -> dict[str, dict[str, JsonValue]]:
+    """导入成稿后的强制结构化拆解：写入 characters + outline 阶段产物。"""
+
+    body = markdown.strip()
+    if not body:
+        raise VideoToolValidationError("成稿为空，无法拆解")
+    from pixelflow.video_agent.thinking_stream import stream_chat_tokens
+
+    try:
+        model = create_chat_model(thinking_enabled=False, streaming=True)
+    except TypeError:
+        model = create_chat_model(thinking_enabled=False)
+    messages = [
+        ("system", _IMPORT_STRUCTURE_SYSTEM),
+        ("human", f"【用户成稿】\n{body[:12_000]}\n\n只输出 Markdown，不要解释过程。"),
+    ]
+    chunks: list[str] = []
+
+    async def on_content(delta: str) -> None:
+        chunks.append(delta)
+        if on_token is not None:
+            await on_token(delta)
+
+    try:
+        _, answer = await stream_chat_tokens(
+            model=model,
+            messages=messages,
+            on_content=on_content,
+            timeout_sec=SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise VideoToolValidationError(
+            f"成稿结构化拆解超时（{int(SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS)}秒），请稍后重试"
+        ) from exc
+    combined = ("".join(chunks) or (answer or "")).strip()
+    if not combined:
+        raise VideoToolValidationError("成稿结构化拆解结果为空")
+    settings_md, shots_md = _split_import_structure_markdown(combined)
+    if not settings_md.strip():
+        settings_md = combined
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"kind": "import_structure", "story": body[:4_000]},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    result: dict[str, dict[str, JsonValue]] = {
+        "characters": {
+            "stage": "characters",
+            "title": STAGE_TITLES["characters"],
+            "content": _with_stage_heading("characters", settings_md),
+            "artifact_ref": _artifact_ref(workspace_id, "characters", fingerprint),
+            "request_fingerprint": f"{fingerprint}:characters",
+            "change_summary": "从用户成稿拆解角色/场景/道具设定",
+        },
+    }
+    if shots_md.strip():
+        result["outline"] = {
+            "stage": "outline",
+            "title": STAGE_TITLES["outline"],
+            "content": _with_stage_heading("outline", shots_md),
+            "artifact_ref": _artifact_ref(workspace_id, "outline", fingerprint),
+            "request_fingerprint": f"{fingerprint}:outline",
+            "change_summary": "从用户成稿拆解分镜提示词",
+        }
+    return result
 
 
 class ScriptSkillStageInput(BaseModel):

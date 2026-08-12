@@ -11,6 +11,7 @@ from pixelflow.video_agent.tools.inspect_workspace import InspectVideoWorkspaceT
 from pixelflow.video_agent.tools.registry import (
     VideoToolContext,
     VideoToolCostLevel,
+    VideoToolExecutionError,
     VideoToolIdempotencyMode,
     VideoToolRecoveryMode,
     VideoToolRegistry,
@@ -100,7 +101,7 @@ async def test_registry_maps_invalid_arguments_to_safe_tool_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_drops_undeclared_workspace_mutations() -> None:
+async def test_registry_rejects_undeclared_workspace_mutations() -> None:
     registry = VideoToolRegistry([UndeclaredPatchTool()])
     context = VideoToolContext(
         user_id="user-1",
@@ -110,11 +111,11 @@ async def test_registry_drops_undeclared_workspace_mutations() -> None:
         ),
     )
 
-    result = await registry.execute(context, "unsafe_patch", {})
-
-    assert result.public_summary == "工具结果无效，请稍后重试"
-    assert result.workspace_patch == {}
-    assert "secret-value" not in result.model_dump_json()
+    with pytest.raises(
+        VideoToolExecutionError,
+        match="工具结果无效，请稍后重试",
+    ):
+        await registry.execute(context, "unsafe_patch", {})
 
 
 @pytest.mark.asyncio

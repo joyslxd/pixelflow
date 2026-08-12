@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 THINKING_FLUSH_INTERVAL_SEC = 0.08
 THINKING_FLUSH_MIN_CHARS = 1
 # 入场上下文理解需产出完整事实摘要；DeepSeek thinking 首包可能很慢。
-THINKING_PREAMBLE_TIMEOUT_SEC = 45.0
-THINKING_REQUEST_TIMEOUT_SEC = 40.0
+# 必须走 stream=true：非流式会等整段返回，易在首包前触发整请求超时。
+# HTTP request_timeout 不得短于本 wait_for，否则会先被客户端掐断。
+THINKING_PREAMBLE_TIMEOUT_SEC = 90.0
+THINKING_REQUEST_TIMEOUT_SEC = 90.0
 THINKING_MAX_TOKENS = 2_400
 THINKING_LLM_INPUT_MAX_CHARS = 2_400
 DURATION_EXTRACT_TIMEOUT_SEC = 12.0
@@ -46,7 +48,85 @@ IntakeIntent = Literal[
     "inspect",
     "clarify",
 ]
-ALLOWED_INTAKE_MISSING = ("视频画幅", "结尾行动引导")
+IntakeTargetCapability = Literal[
+    "clarify_brief",
+    "develop_script",
+    "import_script",
+    "confirm_script",
+    "prepare_scene_packages",
+    "inspect_storyboard",
+    "generate_scene_assets",
+    "inspect_scene_results",
+    "patch_scene",
+    "generate_scenes",
+    "review_generated_scenes",
+    "compose_video",
+    "inspect_workspace",
+]
+IntakeReadiness = Literal[
+    "ready",
+    "blocked",
+    "waiting_confirmation",
+    "inspect_required",
+]
+_ALLOWED_TARGET_CAPABILITIES = {
+    "clarify_brief",
+    "develop_script",
+    "import_script",
+    "confirm_script",
+    "prepare_scene_packages",
+    "inspect_storyboard",
+    "generate_scene_assets",
+    "inspect_scene_results",
+    "patch_scene",
+    "generate_scenes",
+    "review_generated_scenes",
+    "compose_video",
+    "inspect_workspace",
+}
+_ALLOWED_READINESS = {
+    "ready",
+    "blocked",
+    "waiting_confirmation",
+    "inspect_required",
+}
+_INTAKE_STATE_KEYS = (
+    "script_available",
+    "script_confirmed",
+    "storyboard_available",
+    "scene_packages_available",
+    "scene_assets_available",
+    "scene_videos_available",
+    "final_video_available",
+)
+_INTAKE_CONSTRAINT_KEYS = (
+    "dirty_scene_only",
+    "requires_visual_inspection",
+)
+_MAX_MODEL_PROGRESS_MESSAGES = 3
+_MAX_MODEL_PROGRESS_CHARS = 80
+_UNSAFE_PROGRESS_FRAGMENTS = (
+    "系统提示词",
+    "提示词规定",
+    "内部推理",
+    "思维链",
+    "我们被要求",
+    "我被要求",
+    "规则要求我",
+    "reasoning_content",
+    "import_script",
+    "run_script_skill_stage",
+    "confirm_script_creative",
+)
+ALLOWED_INTAKE_MISSING = (
+    "视频画幅",
+    "结尾行动引导",
+    "整片时长",
+    "脚本方案确认",
+    "角色设定",
+    "产品信息",
+    "创意方向",
+)
 _INTENT_TO_ENTRY_PATH: dict[str, IntakeEntryPath] = {
     "create": "create",
     "polish": "polish",
@@ -71,6 +151,11 @@ class IntakeThinkingResult:
     aspect_ratio: str | None = None
     ending_cta: str | None = None
     needs_user_reply: bool = False
+    target_capability: IntakeTargetCapability | None = None
+    readiness: IntakeReadiness | None = None
+    current_state: dict[str, bool] = field(default_factory=dict)
+    scene_ids: tuple[str, ...] = ()
+    constraints: dict[str, bool] = field(default_factory=dict)
 
     def as_planner_digest(self) -> dict[str, Any]:
         return {
@@ -83,6 +168,11 @@ class IntakeThinkingResult:
             "aspect_ratio": self.aspect_ratio,
             "ending_cta": self.ending_cta,
             "needs_user_reply": self.needs_user_reply,
+            "target_capability": self.target_capability,
+            "readiness": self.readiness,
+            "current_state": dict(self.current_state),
+            "scene_ids": list(self.scene_ids),
+            "constraints": dict(self.constraints),
         }
 
 
@@ -208,7 +298,7 @@ class ThinkingStreamPublisher:
         self,
         *,
         title: str,
-        subtitle: str = "AI 编剧思考中…",
+        subtitle: str = "",
     ) -> None:
         now = self._clock()
         self._last_flush = time.monotonic()
@@ -216,8 +306,8 @@ class ThinkingStreamPublisher:
             AgentEventType.AGENT_THINKING_STARTED,
             {
                 "turn_id": self._turn_id,
-                "title": title.strip() or "正在分析素材，提炼电商属性并构思方向…",
-                "subtitle": subtitle.strip() or "AI 编剧思考中…",
+                "title": title.strip() or "思考中",
+                "subtitle": subtitle.strip(),
                 "started_at": _iso(now),
             },
             event_key="started",
@@ -338,7 +428,9 @@ async def stream_chat_tokens(
 ) -> tuple[str, str]:
     """消费模型流式输出；返回 (reasoning, content) 全文。
 
-    优先 `astream`；若模型未暴露 astream，才退回一次性 invoke。
+    强制 `astream(..., stream=True)`，避免 LangChain 在实例
+    ``streaming=False`` 时把 astream 退化成 ``ainvoke``（HTTP stream=false）。
+    仅当模型根本没有 astream 时才退回一次性 invoke。
     """
 
     reasoning_parts: list[str] = []
@@ -359,7 +451,11 @@ async def stream_chat_tokens(
                 if on_content is not None:
                     await on_content(content)
             return
-        stream_iter = astream(list(messages))
+        # 显式 stream=True：覆盖实例 streaming=False，保证上游收到流式请求。
+        try:
+            stream_iter = astream(list(messages), stream=True)
+        except TypeError:
+            stream_iter = astream(list(messages))
         async for chunk in stream_iter:
             reasoning, content = _chunk_text(chunk)
             if reasoning:
@@ -379,12 +475,13 @@ def _create_streaming_chat_model(
     factory: Callable[..., Any],
     *,
     thinking_enabled: bool = False,
+    model_name: str = "deepseek-v4-pro",
 ) -> Any:
     """创建强制开启 OpenAI 兼容 streaming 的聊天模型。
 
     DeepSeek V4 思考模式需在请求里带 extra_body.thinking；真正把
     reasoning_content 解析进 chunk 依赖配置里的 PatchedChatOpenAIReasoning。
-    入场预热用 low + 短超时，避免 high 导致首包数分钟无输出。
+    入场预热用 low；HTTP 超时与 wait_for 对齐，避免非流式整段等待被掐断。
     """
 
     thinking_kwargs: dict[str, Any] = {}
@@ -395,29 +492,43 @@ def _create_streaming_chat_model(
         thinking_kwargs["request_timeout"] = THINKING_REQUEST_TIMEOUT_SEC
     try:
         model = factory(
+            name=model_name,
             thinking_enabled=thinking_enabled,
             streaming=True,
             **thinking_kwargs,
         )
     except TypeError:
         try:
-            model = factory(thinking_enabled=thinking_enabled, **thinking_kwargs)
+            model = factory(
+                name=model_name,
+                thinking_enabled=thinking_enabled,
+                **thinking_kwargs,
+            )
         except TypeError:
             try:
-                model = factory(thinking_enabled=thinking_enabled, streaming=True)
+                model = factory(
+                    name=model_name,
+                    thinking_enabled=thinking_enabled,
+                    streaming=True,
+                )
             except TypeError:
                 model = factory(thinking_enabled=False)
-    # 配置里 when_thinking_enabled.reasoning_effort=high 会覆盖 kwargs；入场强制改回 low。
+    # 配置里 when_thinking_enabled.reasoning_effort=high 会覆盖 kwargs；入场强制改回。
+    # LangChain：实例 streaming=False 会让 astream 退化成 ainvoke（HTTP stream=false）。
+    force_attrs: list[tuple[str, Any]] = [("streaming", True)]
     if thinking_enabled:
-        for attr, value in (
-            ("reasoning_effort", "low"),
-            ("max_tokens", THINKING_MAX_TOKENS),
-            ("request_timeout", THINKING_REQUEST_TIMEOUT_SEC),
-        ):
-            try:
-                setattr(model, attr, value)
-            except Exception:  # noqa: BLE001
-                pass
+        force_attrs.extend(
+            (
+                ("reasoning_effort", "low"),
+                ("max_tokens", THINKING_MAX_TOKENS),
+                ("request_timeout", THINKING_REQUEST_TIMEOUT_SEC),
+            )
+        )
+    for attr, value in force_attrs:
+        try:
+            setattr(model, attr, value)
+        except Exception:  # noqa: BLE001
+            pass
     return model
 
 
@@ -481,7 +592,107 @@ def _split_answer_and_machine_block(raw_answer: str) -> tuple[str, Mapping[str, 
                 user_message = tail
         payload = parsed
         break
+    if not payload:
+        parsed = _extract_json_object(text)
+        if parsed is not None and text.startswith("{"):
+            payload = parsed
+            user_message = ""
     return user_message, payload
+
+
+def _parse_bool_map(raw: Any, *, allowed_keys: Sequence[str]) -> dict[str, bool]:
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        key: value
+        for key in allowed_keys
+        if isinstance((value := raw.get(key)), bool)
+    }
+
+
+def _parse_scene_ids(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    scene_ids: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        scene_id = item.strip()[:128]
+        if scene_id and scene_id not in scene_ids:
+            scene_ids.append(scene_id)
+        if len(scene_ids) >= 100:
+            break
+    return tuple(scene_ids)
+
+
+def _safe_public_progress(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    message = " ".join(raw.split()).strip()
+    if not 4 <= len(message) <= _MAX_MODEL_PROGRESS_CHARS:
+        return None
+    folded = message.casefold()
+    if any(fragment.casefold() in folded for fragment in _UNSAFE_PROGRESS_FRAGMENTS):
+        return None
+    if "{" in message or "}" in message or "<<<" in message:
+        return None
+    return message
+
+
+class _IntakeNdjsonStream:
+    """从流式正文提取安全公开进度和终态诊断，同时保留旧格式原文。"""
+
+    def __init__(self, publisher: ThinkingStreamPublisher) -> None:
+        self._publisher = publisher
+        self._buffer = ""
+        self._raw_parts: list[str] = []
+        self._progress_messages: list[str] = []
+        self._result: Mapping[str, Any] | None = None
+
+    async def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        self._raw_parts.append(delta)
+        self._buffer += delta
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            await self._consume_line(line)
+
+    async def finish(self) -> None:
+        if self._buffer.strip():
+            await self._consume_line(self._buffer)
+        self._buffer = ""
+
+    def final_content(self) -> str:
+        if self._result is not None:
+            return json.dumps(dict(self._result), ensure_ascii=False)
+        return "".join(self._raw_parts)
+
+    async def _consume_line(self, raw_line: str) -> None:
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(record, Mapping):
+            return
+        record_type = record.get("type")
+        if record_type == "result" and isinstance(record.get("data"), Mapping):
+            self._result = record["data"]
+            return
+        if record_type != "progress":
+            return
+        message = _safe_public_progress(record.get("message"))
+        if (
+            message is None
+            or message in self._progress_messages
+            or len(self._progress_messages) >= _MAX_MODEL_PROGRESS_MESSAGES
+        ):
+            return
+        self._progress_messages.append(message)
+        await self._publisher.push_delta(f"{message}\n", channel="reasoning")
 
 
 def _parse_intake_answer_and_verdict(
@@ -541,6 +752,26 @@ def _parse_intake_answer_and_verdict(
     if isinstance(raw_cta, str) and raw_cta.strip() in {"keep", "none", "present", "unknown"}:
         ending_cta = raw_cta.strip()
 
+    target_capability: IntakeTargetCapability | None = None
+    raw_capability = payload.get("target_capability")
+    if isinstance(raw_capability, str) and raw_capability.strip() in _ALLOWED_TARGET_CAPABILITIES:
+        target_capability = raw_capability.strip()  # type: ignore[assignment]
+
+    readiness: IntakeReadiness | None = None
+    raw_readiness = payload.get("readiness")
+    if isinstance(raw_readiness, str) and raw_readiness.strip() in _ALLOWED_READINESS:
+        readiness = raw_readiness.strip()  # type: ignore[assignment]
+
+    current_state = _parse_bool_map(
+        payload.get("current_state"),
+        allowed_keys=_INTAKE_STATE_KEYS,
+    )
+    scene_ids = _parse_scene_ids(facts.get("scene_ids"))
+    constraints = _parse_bool_map(
+        payload.get("constraints"),
+        allowed_keys=_INTAKE_CONSTRAINT_KEYS,
+    )
+
     needs_user_reply = payload.get("needs_user_reply") is True or bool(missing)
     return IntakeThinkingResult(
         user_message=user_message[:2_000],
@@ -551,40 +782,88 @@ def _parse_intake_answer_and_verdict(
         aspect_ratio=aspect_ratio,
         ending_cta=ending_cta,
         needs_user_reply=needs_user_reply,
+        target_capability=target_capability,
+        readiness=readiness,
+        current_state=current_state,
+        scene_ids=scene_ids,
+        constraints=constraints,
     )
 
 
-_INTAKE_SYSTEM_PROMPT = (
-    "你是 PixelFlow 电商短视频工作台的上下文理解器（VideoAgent Intake）。\n"
-    "你只负责：理解本轮全部上下文、提取事实和缺失项，并给出用户可见的当前判断。\n"
-    "\n"
-    "【判断要求】\n"
-    "1) 先概括用户本轮真正想干什么（创作/导入润色/补字段/改第N镜/生资产/生图/成片/探查）。\n"
-    "2) 对照 workspace：缺什么、卡在哪、能不能直接推进。\n"
-    "3) 分镜「0—10秒」「170—180秒」是局部时间码；整片时长取连续时间码末尾或本轮「180s」；"
-    "画幅看 9:16/16:9/1:1；「结尾不变」=沿用；「不需要结尾CTA」=已确认无CTA。\n"
-    "4) 若缺画幅或 CTA，needs_user_reply=true，并明确列出 missing。\n"
-    "5) 不要选择工具、不要生成执行步骤、不要承诺已执行或绕过确认、额度、权限。\n"
-    "6) 不要输出最终完整脚本正文；不要编造未出现的产品/素材。\n"
-    "\n"
-    "【最终正文格式】\n"
-    "A) 先写 1–3 句中文结论（直接给用户看）\n"
-    "B) 紧接着输出机器块（供 Planner 读取，前端会剥离）：\n"
-    "<<<INTAKE_CONTEXT>>>\n"
-    "{\n"
-    '  "answer": "<与上面中文结论一字不差>",\n'
-    '  "needs_user_reply": false,\n'
-    '  "missing": [],\n'
-    '  "facts": {\n'
-    '    "duration_sec": 180,\n'
-    '    "aspect_ratio": "9:16",\n'
-    '    "ending_cta": "keep|none|present|unknown",\n'
-    '    "intent": "create|polish|continue_assets|continue_images|continue_video|patch_scene|inspect|clarify"\n'
-    "  },\n"
-    "}\n"
-    "<<<END>>>\n"
-    "needs_user_reply=true 时必须列出 missing。\n"
-)
+_INTAKE_SYSTEM_PROMPT = """
+你是 PixelFlow VideoAgent 的状态理解器。
+
+你的职责是根据用户本轮输入、附件、workspace_digest 和
+blocking_confirmation，判断：
+
+1. 用户希望达成的业务目标；
+2. 工作区当前已经完成和缺失的产物；
+3. 目标能力的前置条件是否满足；
+4. 当前应该进入哪一种业务能力；
+5. 是否需要用户补充信息、确认，或先检查现有结果。
+
+你不选择 Tool，不生成执行步骤，不按照固定工作流机械推进。
+Planner 会根据你的状态诊断和服务端 Tool Registry 决定具体执行方案。
+
+【允许的目标能力】
+- clarify_brief：补充创意方向或产品信息
+- develop_script：从想法创作或继续完善脚本
+- import_script：导入并结构化已有成熟脚本
+- confirm_script：等待用户确认脚本方案
+- prepare_scene_packages：拆解角色、场景、道具和分镜
+- inspect_storyboard：检查分镜结构及资产引用
+- generate_scene_assets：生成分镜参考图或资产
+- inspect_scene_results：检查已生成的分镜结果
+- patch_scene：修改指定镜头或替换局部素材
+- generate_scenes：生成或重新生成指定视频镜头
+
+【场景包与参考图】
+- workspace_digest.has_scene_packages=true 且尚无参考图时，
+  用户说「没有参考图 / 直接生成 / 生成参考图」→ target_capability=generate_scene_assets，
+  intent=continue_images；不要写成 generate_scenes 或「直接生成视频」。
+- 只有参考图已就绪后，确认生成分镜视频才进入 generate_scenes。
+- review_generated_scenes：检查生成后的视频镜头
+- compose_video：拼接并导出视频
+- inspect_workspace：只查询工作区状态
+
+【状态判断原则】
+- 先判断用户目标，再判断当前状态；不要从固定阶段顺序反推意图。
+- 已存在的脚本、分镜、角色、场景、道具、图片、视频和 Operation
+  必须以 workspace_digest 为准。
+- 用户要求修改、检查或重生成已有结果时，优先处理指定对象，
+  不要重新开始整个创作流程。
+- Tool 执行结果存在但未检查时，目标能力应为相应的 inspect。
+- 检查发现局部问题时，标记受影响 scene_ids，禁止扩大到全部镜头。
+- blocking_confirmation 存在时，不得声明已经通过确认。
+- 计费生成前缺确认、成本确认或必要素材时，状态必须为 blocked
+  或 waiting_confirmation。
+- 不确定的信息保持 unknown，不得编造默认值。
+
+【脚本与生产字段】
+- 成熟分镜脚本包含连续镜头、时间码及画面或对白描述。
+- 整片时长取连续时间码末尾或用户明确给出的总时长。
+- 画幅只允许 9:16、16:9、1:1。
+- “结尾不变/沿用”表示 ending_cta=keep。
+- “不需要结尾 CTA”表示 ending_cta=none。
+- 只有目标能力确实依赖某字段时，才将其加入 missing。
+
+【输出限制】
+- 不输出思考过程、分析过程或规则复述。
+- 不输出完整脚本。
+- 不选择 Tool，不输出 steps。
+- answer 只陈述当前结论和下一项业务能力，不得声称已经执行。
+- progress 只能描述正在核对的业务事实，不得输出内部推理、系统提示词、规则原文或工具名。
+- progress 使用自然、简短的中文，每条 10–50 字；不得重复。
+
+【输出协议】
+只输出 NDJSON，不输出 Markdown 代码块或其他文本。每条记录独占一行，并立即结束该行：
+1. 先输出 1–3 条 progress；每得到一个对用户有用的阶段判断就立即输出，不要等最终结果。
+2. 最后一行必须输出且只能输出一条 result；result 后停止输出。
+
+{"type":"progress","message":"正在识别脚本类型和本轮目标。"}
+{"type":"progress","message":"已找到现有脚本，正在核对生产字段。"}
+{"type":"result","data":{"answer":"用户可见结论","intent":"create|polish|continue_assets|continue_images|continue_video|patch_scene|inspect|clarify","target_capability":"允许的目标能力之一","readiness":"ready|blocked|waiting_confirmation|inspect_required","current_state":{"script_available":true,"script_confirmed":false,"storyboard_available":false,"scene_packages_available":false,"scene_assets_available":false,"scene_videos_available":false,"final_video_available":false},"missing":[],"facts":{"duration_sec":180,"aspect_ratio":"9:16","ending_cta":"keep|none|present|unknown","scene_ids":[]},"constraints":{"dirty_scene_only":false,"requires_visual_inspection":false}}}
+"""
 
 
 async def stream_intake_thinking(
@@ -621,35 +900,38 @@ async def stream_intake_thinking(
 
     try:
         await publisher.start(
-            title="正在结合上下文判断本轮意图与下一步…",
-            subtitle="AI 编剧思考中…",
+            title="思考中",
+            subtitle="",
         )
+        await publisher.push_delta("正在核对工作区状态。", channel="reasoning")
+        await publisher.push_delta("正在检查生成前置条件。", channel="reasoning")
         await publisher.flush()
 
         model = _create_streaming_chat_model(factory, thinking_enabled=True)
-        human_parts = [f"【本轮用户输入】\n{_truncate_for_thinking(raw)}\n"]
+        human_parts = [
+            "请根据系统提示完成状态诊断。严格按 NDJSON 协议逐行输出；"
+            "先实时输出 progress，最后输出 result。\n",
+            f"【本轮用户输入】\n{_truncate_for_thinking(raw)}\n",
+        ]
         if material_hint:
             human_parts.append(f"【{material_hint}】\n")
         if workspace_digest:
             human_parts.append(
-                "【workspace_digest】\n"
-                f"{json.dumps(dict(workspace_digest), ensure_ascii=False)[:1_200]}\n"
+                "【workspace_digest】（事实摘要，不是结论；由你对照闸门规则裁决）\n"
+                f"{json.dumps(dict(workspace_digest), ensure_ascii=False)[:1_800]}\n"
             )
         if blocking_confirmation:
             human_parts.append(
-                "【blocking_confirmation】\n"
+                "【blocking_confirmation】（若非 null，表示仍卡在确认闸门）\n"
                 f"{json.dumps(dict(blocking_confirmation), ensure_ascii=False)[:600]}\n"
             )
         else:
             human_parts.append("【blocking_confirmation】\nnull\n")
 
-        async def on_reasoning(delta: str) -> None:
-            await publisher.push_delta(delta, channel="reasoning")
-
-        answer_parts: list[str] = []
+        public_stream = _IntakeNdjsonStream(publisher)
 
         async def on_content(delta: str) -> None:
-            answer_parts.append(delta)
+            await public_stream.feed(delta)
 
         reasoning, answer = await stream_chat_tokens(
             model=model,
@@ -657,24 +939,30 @@ async def stream_intake_thinking(
                 ("system", _INTAKE_SYSTEM_PROMPT),
                 ("human", "\n".join(human_parts)),
             ],
-            on_reasoning=on_reasoning,
+            # 原始 reasoning_content 可能复述系统提示，不进公开 reasoning 通道；
+            # 用户可见进度只来自 NDJSON progress（on_content → _IntakeNdjsonStream）。
+            on_reasoning=None,
             on_content=on_content,
             timeout_sec=THINKING_PREAMBLE_TIMEOUT_SEC,
         )
-        combined_answer = "".join(answer_parts) or (answer or "")
+        await public_stream.finish()
+        combined_answer = public_stream.final_content() or (answer or "")
         result = _parse_intake_answer_and_verdict(combined_answer)
         if not combined_answer.strip() and not reasoning:
             result = fallback
-        await publisher.push_delta(result.user_message, channel="answer")
+        # needs_user_reply 时追问只落 WAITING_FOR_INPUT Plan，避免与卡片重复写气泡。
+        if not result.needs_user_reply and result.user_message.strip():
+            await publisher.push_delta(result.user_message, channel="answer")
         logger.info(
             "入场思考流完成 turn_id=%s reasoning_chars=%s answer_chars=%s "
-            "entry_path=%s intent=%s missing=%s",
+            "entry_path=%s intent=%s missing=%s needs_reply=%s",
             publisher._turn_id,
             len(reasoning or ""),
             len(result.user_message),
             result.entry_path,
             result.intent,
             list(result.missing_requirements),
+            result.needs_user_reply,
         )
         return result
     except TimeoutError:
@@ -714,8 +1002,14 @@ async def stream_intake_thinking(
             needs_user_reply=False,
         )
     finally:
+        # complete 写 AGENT_THINKING_COMPLETED；卡住则前端 caret 永不收口。
         try:
-            await publisher.complete()
+            await asyncio.wait_for(publisher.complete(), timeout=8.0)
+        except TimeoutError:
+            logger.warning(
+                "思考流收口超时 turn_id=%s，继续规划以免整轮挂死",
+                publisher._turn_id,
+            )
         except Exception:  # noqa: BLE001
             try:
                 await publisher.flush()
@@ -746,9 +1040,8 @@ def fold_thinking_history_from_events(
                 order.append(turn_id)
             by_turn[turn_id] = {
                 "turn_id": turn_id,
-                "title": str(payload.get("title") or "").strip()
-                or "正在分析素材，提炼电商属性并构思方向…",
-                "subtitle": str(payload.get("subtitle") or "").strip() or "AI 编剧思考中…",
+                "title": str(payload.get("title") or "").strip() or "思考中",
+                "subtitle": str(payload.get("subtitle") or "").strip(),
                 "text": "",
                 "answer": "",
                 "started_at": payload.get("started_at"),

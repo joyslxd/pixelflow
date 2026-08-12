@@ -129,11 +129,15 @@ export function AgentPlanTimeline({
     ? "已完成"
     : plan.status === "awaiting_confirmation"
       ? "待确认"
-      : plan.status === "failed"
-        ? "失败"
-        : plan.status === "planning" || steps.length === 0
-          ? "规划中"
-          : "进行中";
+      : plan.status === "waiting_for_input"
+        ? "等待补充"
+        : plan.status === "failed"
+          ? "失败"
+          : plan.status === "cancelled"
+            ? "已取消"
+            : plan.status === "planning" || steps.length === 0
+              ? "规划中"
+              : "进行中";
 
   return (
     <section
@@ -152,7 +156,13 @@ export function AgentPlanTimeline({
         </span>
       </header>
 
-      {steps.length === 0 ? (
+      {plan.status === "waiting_for_input" ? (
+        <p className="px-1 py-2 text-[12px] text-amber-800">
+          {plan.publicGoal?.trim()
+            ? plan.publicGoal
+            : "已完成判断，等待你在对话框补充所需信息后再继续规划。"}
+        </p>
+      ) : steps.length === 0 ? (
         <p className="px-1 py-2 text-[12px] text-slate-500">规划中，正在生成执行步骤…</p>
       ) : (
       <ol className="space-y-2">

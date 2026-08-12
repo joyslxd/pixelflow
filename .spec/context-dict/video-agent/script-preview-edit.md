@@ -29,4 +29,4 @@ keywords:
 - 标题里的 `vN` = `workspace.script.version`（episode/export/用户保存每次 +1）；`工作区 rN` = `workspace.revision`（任意 workspace patch CAS +1，与脚本版本无关）。
 - 非编辑态用内置轻量 Markdown 渲染（标题/列表/表格/加粗等）；不依赖 `@uiw/react-markdown-preview`（本地常未装齐会炸 Vite）。
 - 编辑态仍是纯文本 textarea。
-- 草稿底部固定「编辑 / 确认」；对话框「已更新脚本版本 N」经 `onOpenScriptPreview` 打开本面板。
+- 草稿底部固定「编辑 / 确认」；对话框「已更新脚本版本 N」经 `onOpenScriptPreview` 打开本面板（默认收起，见 `script-preview-collapsed-by-default.md`）。

@@ -8,6 +8,7 @@ import pytest
 
 from pixelflow.video_agent.contracts import VideoWorkspace
 from pixelflow.video_agent.tools import VideoToolContext
+from pixelflow.video_agent.tools.registry import VideoToolRegistry
 from pixelflow.video_agent.tools.scene_packages import (
     GenerateSceneAssetsTool,
     PrepareScenePackagesTool,
@@ -69,16 +70,51 @@ async def test_prepare_scene_packages_tool_writes_workspace_assets() -> None:
     tool = PrepareScenePackagesTool(operation_port=port)
     result = await tool.execute(
         _context(
-            script={"status": "ready", "content": "# 脚本\n镜头1"},
+            script={"status": "ready", "content": "# 脚本\n**时长**：60秒\n镜头1"},
             product_info={"name": "面霜"},
+            script_pipeline={
+                "characters": {
+                    "content": "## 角色设定\n### 安然\n女主\n## 场景设定\n### 酒店\n暖光\n## 道具与产品设定\n### 面霜\n玻璃瓶",
+                },
+                "export": {"content": "# 终稿\n镜头1 00:00-00:10\n镜头2 00:10-00:20"},
+            },
         ),
         {},
     )
     assert result.tool_name == "prepare_scene_packages"
     assert "安然" in str(result.workspace_patch.get("global_assets"))
     assert result.workspace_patch.get("script_plan_confirmed") is True
+    assert result.workspace_patch.get("target_duration_ms") == 60_000
     assert len(port.prepare_calls) == 1
-    assert "镜头1" in str(port.prepare_calls[0]["plan_markdown"])
+    assert port.prepare_calls[0]["target_duration_ms"] == 60_000
+    assert "角色设定" in str(port.prepare_calls[0]["plan_markdown"])
+    assert port.prepare_calls[0]["form_values"].get("video_duration_sec") == 60
+    assert isinstance(result.workspace_patch.get("creation_contract"), dict)
+
+
+@pytest.mark.asyncio
+async def test_prepare_scene_packages_registry_accepts_success_patch_roots() -> None:
+    """回归：成功 patch 含 scene_package_job 等根键时，不得再报「工具结果无效」。"""
+    port = FakePackagePort(
+        ScenePackageOperationJob(
+            job_id="job-prepare-registry-1",
+            status="succeeded",
+            result={
+                "message": "已生成资产包",
+                "global_assets": {"characters": [{"name": "安然"}]},
+                "scene_packages": [{"scene_id": "s1"}],
+                "creation_contract": {"image_model": "seeddream-5.0"},
+            },
+        )
+    )
+    registry = VideoToolRegistry([PrepareScenePackagesTool(operation_port=port)])
+    result = await registry.execute(
+        _context(script={"status": "ready", "content": "# 脚本\n镜头1"}),
+        "prepare_scene_packages",
+        {},
+    )
+    assert result.public_summary == "已生成资产包"
+    assert set(result.workspace_patch).issubset(set(PrepareScenePackagesTool.spec.workspace_mutations))
 
 
 @pytest.mark.asyncio
@@ -104,6 +140,33 @@ async def test_generate_scene_assets_tool_requires_confirmation_flag() -> None:
     )
     assert result.public_summary == "参考图完成"
     assert port.assets_calls[0]["image_model"] == "seeddream-5.0"
+
+
+@pytest.mark.asyncio
+async def test_generate_scene_assets_registry_accepts_success_patch_roots() -> None:
+    port = FakePackagePort(
+        ScenePackageOperationJob(
+            job_id="job-assets-registry-1",
+            status="succeeded",
+            result={
+                "message": "参考图完成",
+                "global_assets": {"characters": [{"name": "安然"}]},
+                "scene_packages": [],
+                "failed_assets": [],
+            },
+        )
+    )
+    registry = VideoToolRegistry([GenerateSceneAssetsTool(operation_port=port)])
+    result = await registry.execute(
+        _context(
+            global_assets={"characters": [{"name": "安然"}]},
+            scene_packages=[{"scene_id": "1"}],
+        ),
+        "generate_scene_assets",
+        {"image_model": "seeddream-5.0", "image_ratio": "9:16", "image_size": "2K"},
+    )
+    assert result.public_summary == "参考图完成"
+    assert set(result.workspace_patch).issubset(set(GenerateSceneAssetsTool.spec.workspace_mutations))
 
 
 @pytest.mark.asyncio

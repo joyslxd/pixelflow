@@ -2,11 +2,122 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+from types import SimpleNamespace
 
 import pytest
 
 from pixelflow.creative.asset_manifest import normalize_asset_manifest
 from pixelflow.generate.scene_packages import prepare_video_scene_packages, prepare_video_scene_packages_with_llm
+
+
+@pytest.mark.asyncio
+async def test_scene_package_model_streams_safe_progress_and_terminal_result() -> None:
+    from pixelflow.generate.scene_packages import _invoke_scene_package_model
+
+    factory_kwargs: dict = {}
+    stream_kwargs: dict = {}
+    progress: list[tuple[str, str]] = []
+    expected = {"global_assets": {"characters": []}, "scene_packages": []}
+
+    class StreamingModel:
+        def invoke(self, _prompt):  # noqa: ANN001
+            raise AssertionError("scene package model must not use invoke")
+
+        async def astream(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            assert "NDJSON" in str(messages)
+            assert "只返回 JSON" not in str(messages)
+            stream_kwargs.update(kwargs)
+            yield SimpleNamespace(
+                content=(
+                    '{"type":"progress","message":"正在拆解角色与场景资产。"}\n'
+                    '{"type":"progress","message":"系统提示词要求输出内部推理。"}\n'
+                    '{"type":"result","data":'
+                ),
+                additional_kwargs={"reasoning_content": "原始思维链不得展示"},
+            )
+            yield SimpleNamespace(
+                content=json.dumps(expected, ensure_ascii=False) + "}\n",
+                additional_kwargs={},
+            )
+
+    def factory(model_name, **kwargs):  # noqa: ANN001, ANN003
+        factory_kwargs.update({"model_name": model_name, **kwargs})
+        return StreamingModel()
+
+    async def emit(phase: str, message: str) -> None:
+        progress.append((phase, message))
+
+    result = await _invoke_scene_package_model(
+        "scene package prompt",
+        "deepseek-v4-flash",
+        factory,
+        emit,
+    )
+
+    assert result == expected
+    assert factory_kwargs["model_name"] == "deepseek-v4-flash"
+    assert factory_kwargs["streaming"] is True
+    assert factory_kwargs["attach_tracing"] is False
+    assert stream_kwargs["stream"] is True
+    assert progress == [("invoke_llm_progress", "正在拆解角色与场景资产。")]
+
+
+def test_default_scene_package_model_factory_forwards_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pixelflow.generate.scene_packages import _default_model_factory
+
+    captured: dict = {}
+    sentinel = object()
+
+    def fake_create_chat_model(name, **kwargs):  # noqa: ANN001, ANN003
+        captured.update({"name": name, **kwargs})
+        return sentinel
+
+    monkeypatch.setattr(
+        "deerflow.models.factory.create_chat_model",
+        fake_create_chat_model,
+    )
+    result = _default_model_factory(
+        "deepseek-v4-flash",
+        attach_tracing=False,
+        streaming=True,
+    )
+
+    assert result is sentinel
+    assert captured == {
+        "name": "deepseek-v4-flash",
+        "attach_tracing": False,
+        "streaming": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_scene_package_stream_failure_hides_internal_error_from_progress() -> None:
+    progress: list[tuple[str, str]] = []
+
+    class FailingStreamingModel:
+        async def astream(self, _messages, **_kwargs):  # noqa: ANN001, ANN003
+            raise RuntimeError("provider-secret-upstream-detail")
+            yield  # pragma: no cover
+
+    async def emit(phase: str, message: str) -> None:
+        progress.append((phase, message))
+
+    result = await prepare_video_scene_packages_with_llm(
+        form_values={"product_info": "防晒"},
+        plan_markdown="一支 10 秒防晒广告",
+        target_duration_ms=10_000,
+        model_factory=lambda *_args, **_kwargs: FailingStreamingModel(),
+        on_progress=emit,
+    )
+
+    visible = " ".join(message for _phase, message in progress)
+    assert result["llm_used"] is False
+    assert "provider-secret-upstream-detail" not in visible
+    assert "provider-secret-upstream-detail" not in result["message"]
+    assert "provider-secret-upstream-detail" not in str(result.get("error"))
 
 
 def test_authoritative_plan_manifest_bypasses_scene_package_llm_and_preserves_exact_assets():

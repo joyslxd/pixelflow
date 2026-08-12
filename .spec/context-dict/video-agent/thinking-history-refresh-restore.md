@@ -33,5 +33,5 @@ keywords:
 ## 注意事项
 
 - 勿再把 sessionStorage / 仅 React state 当思考历史权威
-- 多轮锚点优先 `thinking-answer` 前的用户消息，避免全部挂到最后一条用户输入
+- 多轮锚点必须绑定触发该 Turn 的用户消息（`thinkingTurnAnchorsRef` / pending runId），禁止一律挂到最后一条用户输入（见 `thinking-plan-same-anchor.md`）
 - 聊天正文消息本身已走 conversation messages；本修复补的是 Thought 活动块

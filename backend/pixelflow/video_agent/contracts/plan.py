@@ -14,6 +14,8 @@ class AgentPlanStatus(StrEnum):
     PLANNING = "planning"
     RUNNING = "running"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
+    # 已完成上下文判断，等待用户补充画幅/CTA 等；无任何可执行 Tool Step。
+    WAITING_FOR_INPUT = "waiting_for_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

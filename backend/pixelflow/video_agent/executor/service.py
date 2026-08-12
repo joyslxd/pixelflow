@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import NAMESPACE_URL, uuid5
 
 from pixelflow.agent_runtime.persistence.repositories import (
     AgentRuntimeRecordConflictError,
@@ -27,11 +28,14 @@ from pixelflow.video_agent.production_fields import (
     user_latest_input,
 )
 from pixelflow.video_agent.thinking_stream import ThinkingStreamPublisher
-from pixelflow.video_agent.tools import VideoToolContext, VideoToolRegistry
+from pixelflow.video_agent.tools import (
+    VideoToolContext,
+    VideoToolExecutionError,
+    VideoToolRegistry,
+)
 from pixelflow.video_agent.tools.script_skill_pipeline import (
     SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS,
 )
-from uuid import NAMESPACE_URL, uuid5
 
 if TYPE_CHECKING:
     from pixelflow.video_agent.workspace import VideoAgentRepository
@@ -40,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 # reload / 事件循环被堵死后，RUNNING 步骤可能无人续跑；超时后再进 executor 时允许重试。
 _STALE_RUNNING_GRACE_SECONDS = 30.0
+# 长耗时 Tool（场景包）执行期间其它 Turn 可能 bump revision；写回冲突时重读重试。
+_WORKSPACE_PATCH_MAX_ATTEMPTS = 3
 
 
 def _is_stale_running_step(step: AgentPlanStep, *, now: datetime) -> bool:
@@ -66,6 +72,44 @@ class VideoAgentExecutor:
         self._event_repository = event_repository
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    async def _apply_workspace_patch_resilient(
+        self,
+        *,
+        user_id: str,
+        workspace: VideoWorkspace,
+        patch: Mapping[str, object],
+        now: datetime,
+    ) -> VideoWorkspace:
+        """按最新 revision 写入 workspace；冲突则重读后重试。"""
+
+        current = workspace
+        last_error: AgentRuntimeRecordConflictError | None = None
+        for attempt in range(_WORKSPACE_PATCH_MAX_ATTEMPTS):
+            try:
+                return await self._repository.apply_workspace_patch(
+                    user_id,
+                    current.workspace_id,
+                    dict(patch),
+                    expected_revision=current.revision,
+                    now=now,
+                )
+            except AgentRuntimeRecordConflictError as exc:
+                last_error = exc
+                logger.warning(
+                    "executor workspace patch 冲突，重读后重试 workspace_id=%s attempt=%s",
+                    current.workspace_id,
+                    attempt + 1,
+                )
+                refreshed = await self._repository.get_workspace(
+                    user_id,
+                    current.workspace_id,
+                )
+                if refreshed is None:
+                    raise
+                current = refreshed
+        assert last_error is not None
+        raise last_error
+
     async def run_plan(
         self,
         user_id: str,
@@ -79,7 +123,9 @@ class VideoAgentExecutor:
             AgentPlanStatus.FAILED,
             AgentPlanStatus.CANCELLED,
             AgentPlanStatus.AWAITING_CONFIRMATION,
+            AgentPlanStatus.WAITING_FOR_INPUT,
         }:
+            # waiting_for_input：无 Tool 步，不进入 RUNNING，等用户下一轮 Turn。
             return plan
         if len(plan.steps) > 9:
             raise AgentRuntimeRecordConflictError("VideoAgent 单个计划不能超过九步")
@@ -332,19 +378,32 @@ class VideoAgentExecutor:
                     return
                 await thinking.push_delta(delta, channel="content")
 
-            result = await self._registry.execute(
-                VideoToolContext(
-                    user_id=user_id,
-                    workspace=workspace,
-                    plan_id=plan.plan_id,
-                    step_id=step.step_id,
-                    credential=credential,
-                    report_progress=report_progress,
-                    report_thinking=report_thinking,
-                ),
-                step.tool_name,
-                step.arguments,
-            )
+            try:
+                result = await self._registry.execute(
+                    VideoToolContext(
+                        user_id=user_id,
+                        workspace=workspace,
+                        plan_id=plan.plan_id,
+                        step_id=step.step_id,
+                        credential=credential,
+                        report_progress=report_progress,
+                        report_thinking=report_thinking,
+                    ),
+                    step.tool_name,
+                    step.arguments,
+                )
+            except VideoToolExecutionError as exc:
+                summary = str(exc).strip()[:2_000] or "工具执行失败，请稍后重试"
+                await self._repository.fail_step_with_event(
+                    user_id,
+                    plan.plan_id,
+                    step.step_id,
+                    reason_code="tool_execution_failed",
+                    public_summary=summary,
+                    run_id=plan.plan_id,
+                    now=self._clock(),
+                )
+                return await self._required_plan(user_id, plan.plan_id)
             plan = await self._required_plan(user_id, plan.plan_id)
             if plan.status is AgentPlanStatus.CANCELLED:
                 return plan
@@ -355,13 +414,34 @@ class VideoAgentExecutor:
             if current is None or current.status is not PlanStepStatus.RUNNING:
                 return plan
             if result.workspace_patch:
-                workspace = await self._repository.apply_workspace_patch(
-                    user_id,
-                    workspace.workspace_id,
-                    result.workspace_patch,
-                    expected_revision=workspace.revision,
-                    now=self._clock(),
-                )
+                try:
+                    workspace = await self._apply_workspace_patch_resilient(
+                        user_id=user_id,
+                        workspace=workspace,
+                        patch=result.workspace_patch,
+                        now=self._clock(),
+                    )
+                except AgentRuntimeRecordConflictError:
+                    # 工具已跑完却写不回：必须 fail_step，避免 RUNNING 僵尸计时到数十分钟。
+                    summary = (
+                        "工作区已被并发更新，本步结果未能落库。"
+                        "请刷新后重试该步骤。"
+                    )
+                    logger.exception(
+                        "executor workspace patch 重试耗尽 plan_id=%s step_id=%s",
+                        plan.plan_id,
+                        step.step_id,
+                    )
+                    await self._repository.fail_step_with_event(
+                        user_id,
+                        plan.plan_id,
+                        step.step_id,
+                        reason_code="workspace_revision_conflict",
+                        public_summary=summary,
+                        run_id=plan.plan_id,
+                        now=self._clock(),
+                    )
+                    return await self._required_plan(user_id, plan.plan_id)
             if result.pending_operation_job_ids:
                 return await self._required_plan(user_id, plan.plan_id)
             await self._repository.complete_step_with_event(
@@ -427,6 +507,15 @@ class VideoAgentExecutor:
                 preview=preview,
                 missing=analysis.missing,
                 duration_sec=analysis.duration_sec,
+            )
+        elif step.tool_name == "generate_scene_assets":
+            raw_args = step.arguments if isinstance(step.arguments, Mapping) else {}
+            model = str(raw_args.get("image_model") or "seeddream-5.0").strip() or "seeddream-5.0"
+            ratio = str(raw_args.get("image_ratio") or "9:16").strip() or "9:16"
+            size = str(raw_args.get("image_size") or "2K").strip() or "2K"
+            cost_summary = (
+                f"将使用生图模型 {model}（{ratio} / {size}）生成角色、场景与道具参考图，此步骤计费。\n"
+                "确认后开始生成。若要换模型，请先取消并在对话中说明要用的生图模型。"
             )
         else:
             cost_summary = "该步骤会修改项目或调用计费能力，请确认后继续。"

@@ -1,4 +1,11 @@
-export type VideoAgentPlanStatus = "planning" | "running" | "awaiting_confirmation" | "completed" | "failed" | "cancelled";
+export type VideoAgentPlanStatus =
+  | "planning"
+  | "running"
+  | "awaiting_confirmation"
+  | "waiting_for_input"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type VideoAgentStepStatus = "pending" | "running" | "awaiting_confirmation" | "completed" | "failed" | "skipped";
 

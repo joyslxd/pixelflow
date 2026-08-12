@@ -28,5 +28,4 @@ keywords:
 ## 注意事项
 
 - 历史方案锚点仍匹配「已收到创作请求」气泡文案，与思考区无关
-- 首 token 前可能短暂空白 Thought，属预期
----
+- 首 token 前只显示「思考中…」，不叠 Thinking… / 标题灰行 / Thinking 脚注（见 `thinking-ui-dedupe.md`）

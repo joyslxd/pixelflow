@@ -56,7 +56,7 @@ export function thinkingConclusionPreview(text: string, maxChars = 96): string {
   return `${first.slice(0, maxChars).trim()}…`;
 }
 
-/** 扁平思考块：Thought for Xs + 正文 + 灰状态行，无卡片边框。 */
+/** 扁平思考块：一行头（思考中… / Thought for Xs）+ 模型 reasoning 正文。 */
 export function AgentThinkingStream({
   thinking,
   now: nowProp,
@@ -160,8 +160,10 @@ export function AgentThinkingStream({
   const displayText = visibleText;
   const conclusion = thinkingConclusionPreview(thinking.text);
   const canToggle = thinking.status === "completed" && !catchingUp && Boolean(thinking.text.trim());
-  const headerLabel = thoughtForLabel(thinking.startedAt, now);
-  const statusLine = (thinking.title || thinking.subtitle || "").trim();
+  // 流式未出 token 时用「思考中…」，完成后保留 Thought for Xs；避免再叠 Thinking / 标题灰行。
+  const headerLabel = live && !displayText.trim()
+    ? "思考中…"
+    : thoughtForLabel(thinking.startedAt, now);
   const showBody = live || expanded || catchingUp;
 
   return (
@@ -194,30 +196,16 @@ export function AgentThinkingStream({
         </p>
       ) : null}
 
-      {showBody ? (
-        displayText.trim() ? (
-          <div className="mt-1.5">
-            <p className="whitespace-pre-wrap text-[14px] leading-6 text-[#1a1a1a]">
-              {displayText}
-              {showCaret ? (
-                <span className="ml-0.5 inline-block animate-pulse text-[#8b8b8b]">▍</span>
-              ) : null}
-            </p>
-          </div>
-        ) : (
-          <p className="mt-1.5 text-[13px] text-[#8b8b8b]">
-            {live || catchingUp ? "Thinking…" : "Connecting…"}
+      {/* 仅展示模型 reasoning；title/subtitle 留给事件元数据，不再当第二/第三行 Thinking。 */}
+      {showBody && displayText.trim() ? (
+        <div className="mt-1.5">
+          <p className="whitespace-pre-wrap text-[14px] leading-6 text-[#1a1a1a]">
+            {displayText}
+            {showCaret ? (
+              <span className="ml-0.5 inline-block animate-pulse text-[#8b8b8b]">▍</span>
+            ) : null}
           </p>
-        )
-      ) : null}
-
-      {/* 灰状态行：对应参考图里 Explored / Chat context summarized */}
-      {(live || expanded || catchingUp) && statusLine ? (
-        <p className="mt-2 text-[13px] leading-5 text-[#8b8b8b]">{statusLine}</p>
-      ) : null}
-
-      {live || catchingUp ? (
-        <p className="mt-2 text-[13px] leading-5 text-[#8b8b8b]">Thinking</p>
+        </div>
       ) : null}
     </section>
   );

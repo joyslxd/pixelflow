@@ -268,18 +268,16 @@ async def test_four_journey_inputs_select_different_registered_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_deepseek_boundary_uses_digest_without_hidden_workspace_payload() -> None:
+    from types import SimpleNamespace
+
     captured: dict[str, object] = {}
 
-    class StructuredModel:
-        async def ainvoke(self, messages):
-            captured["messages"] = messages
-            return proposal()
-
     class ChatModel:
-        def with_structured_output(self, schema, **kwargs):
-            captured["schema"] = schema
-            captured["structured_kwargs"] = kwargs
-            return StructuredModel()
+        async def astream(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            captured["messages"] = messages
+            captured["stream"] = kwargs.get("stream")
+            body = proposal().model_dump_json()
+            yield SimpleNamespace(content=body, additional_kwargs={})
 
     def model_factory(**kwargs):
         captured["factory"] = kwargs
@@ -306,6 +304,14 @@ async def test_deepseek_boundary_uses_digest_without_hidden_workspace_payload() 
         operation_summaries=(
             {"job_id": "job-1", "stage": "scene", "status": "polling", "attempt": 1},
         ),
+        intake_thinking={
+            "intent": "patch_scene",
+            "target_capability": "generate_scenes",
+            "readiness": "ready",
+            "current_state": {"scene_videos_available": True},
+            "scene_ids": ["scene-2"],
+            "constraints": {"dirty_scene_only": True},
+        },
     )
     model = DeepSeekVideoPlanningModel(model_factory=model_factory)
 
@@ -317,13 +323,11 @@ async def test_deepseek_boundary_uses_digest_without_hidden_workspace_payload() 
     )
 
     assert result == proposal()
-    assert captured["factory"] == {
-        "name": "deepseek-v4-pro",
-        "thinking_enabled": False,
-        "app_config": None,
-    }
-    assert captured["schema"] is VideoPlanProposal
-    assert captured["structured_kwargs"].get("method") == "json_schema"
+    assert captured["factory"]["name"] == "deepseek-v4-pro"
+    assert captured["factory"]["thinking_enabled"] is False
+    assert captured["factory"]["streaming"] is True
+    assert captured["factory"]["app_config"] is None
+    assert captured["stream"] is True
     payload = str(captured["messages"])
     assert "secret-value" not in payload
     assert "workspace_digest" in payload
@@ -331,6 +335,12 @@ async def test_deepseek_boundary_uses_digest_without_hidden_workspace_payload() 
     assert "最多 3" in payload
     assert "output_example" in payload
     assert "import_script" in payload
+    assert "target_capability" in payload
+    assert "readiness" in payload
+    assert "current_state" in payload
+    assert "scene_ids" in payload
+    assert "constraints" in payload
+    assert "诊断证据" in payload
 
 
 def test_workspace_digest_omits_secrets_and_counts_assets() -> None:
@@ -342,7 +352,14 @@ def test_workspace_digest_omits_secrets_and_counts_assets() -> None:
             created_at=datetime(2026, 8, 10, tzinfo=UTC),
             updated_at=datetime(2026, 8, 10, tzinfo=UTC),
             payload={
-                "script": {"status": "ready", "content": "hello world"},
+                "script": {
+                    "status": "ready",
+                    "content": "hello world",
+                    "source": "intake_draft",
+                    "missing_requirements": ["视频画幅"],
+                },
+                "awaiting_production_fields": True,
+                "script_plan_confirmed": False,
                 "script_pipeline": {"export": {"stage": "export", "content": "done"}},
                 "global_assets": {
                     "characters": [{"name": "安然"}, {"name": "Yann"}],
@@ -357,6 +374,12 @@ def test_workspace_digest_omits_secrets_and_counts_assets() -> None:
         )
     )
     assert digest["has_script"] is True
+    assert digest["script_source"] == "intake_draft"
+    assert digest["awaiting_production_fields"] is True
+    assert digest["script_plan_confirmed"] is False
+    assert digest["script_missing_requirements"] == ["视频画幅"]
+    assert digest["has_aspect_ratio"] is False
+    assert digest["has_ending_cta"] is False
     assert digest["character_count"] == 2
     assert digest["scene_asset_count"] == 1
     assert digest["prop_count"] == 1

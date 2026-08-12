@@ -616,6 +616,59 @@ test("thinking completed 写入 agentThinkingHistory 供刷新回显", () => {
   assert.equal(state.agentThinkingHistory[0].text, "先看脚本");
 });
 
+test("snapshot 可把本地仍 streaming 的思考收成 completed", () => {
+  let state = createSupervisorRuntimeState("conv-1");
+  state = supervisorRuntimeReducer(state, {
+    type: "connection.state_changed",
+    status: "connecting",
+  });
+  state = supervisorRuntimeReducer(state, {
+    type: "connection.state_changed",
+    status: "connected",
+  });
+  state = receive(state, event(1, "agent.thinking.started", {
+    turn_id: "turn-1",
+    title: "思考中",
+    started_at: "2026-08-12T06:00:00Z",
+  }));
+  state = receive(state, event(2, "agent.thinking.delta", {
+    turn_id: "turn-1",
+    delta: "正在核对工作区状态。",
+    channel: "reasoning",
+  }));
+  assert.equal(state.agentThinking?.status, "streaming");
+  state = supervisorRuntimeReducer(state, {
+    type: "snapshot.hydrated",
+    snapshot: {
+      conversationId: "conv-1",
+      run: { runId: null, status: "idle", updatedAt: null },
+      compression: {
+        status: "idle",
+        progressPercent: null,
+        queuedInputCount: 0,
+        lastOutcome: null,
+        updatedAt: null,
+      },
+      inputQueue: [],
+      resume: { cursor: "cursor-2", sequence: 2 },
+      agentThinkingHistory: [
+        {
+          turnId: "turn-1",
+          title: "思考中",
+          subtitle: "",
+          text: "正在核对工作区状态。",
+          answer: "",
+          startedAt: "2026-08-12T06:00:00Z",
+          status: "completed",
+        },
+      ],
+    },
+  });
+  assert.equal(state.connection.status, "connected");
+  assert.equal(state.agentThinking?.status, "completed");
+  assert.equal(state.agentThinking?.text, "正在核对工作区状态。");
+});
+
 test("conversation reset 原子清空上一对话四维状态", () => {
   let state = createSupervisorRuntimeState("conv-1");
   state = supervisorRuntimeReducer(state, {

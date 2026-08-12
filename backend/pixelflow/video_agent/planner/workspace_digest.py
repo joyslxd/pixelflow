@@ -8,6 +8,43 @@ from typing import Any
 from pixelflow.agent_runtime.contracts.enums import ExternalJobStatus
 from pixelflow.agent_runtime.persistence.repositories import OperationRecord
 from pixelflow.video_agent.contracts import AgentPlan, PlanStepStatus, VideoWorkspace
+from pixelflow.video_agent.production_fields import (
+    workspace_has_ending_cta,
+    workspace_resolved_aspect_ratio,
+)
+
+
+def _asset_has_image_url(item: Any) -> bool:
+    if not isinstance(item, Mapping):
+        return False
+    for key in ("image_url", "url", "generation_reference_url"):
+        raw = item.get(key)
+        if isinstance(raw, str) and raw.strip().startswith(("http://", "https://", "asset://")):
+            return True
+    for key in ("images", "three_view_images"):
+        images = item.get(key)
+        if isinstance(images, list):
+            for image in images:
+                if isinstance(image, str) and image.strip().startswith(("http://", "https://", "asset://")):
+                    return True
+                if isinstance(image, Mapping):
+                    url = image.get("url") or image.get("image_url")
+                    if isinstance(url, str) and url.strip().startswith(("http://", "https://", "asset://")):
+                        return True
+    return False
+
+
+def workspace_has_scene_asset_images(payload: Mapping[str, Any] | None) -> bool:
+    """全局资产是否已有至少一张参考图 URL。"""
+
+    if not isinstance(payload, Mapping):
+        return False
+    global_assets = _as_mapping(payload.get("global_assets")) or {}
+    for bucket in ("characters", "scenes", "props"):
+        for item in _as_list(global_assets.get(bucket)):
+            if _asset_has_image_url(item):
+                return True
+    return False
 
 _TERMINAL_OPERATION_STATUSES = {
     ExternalJobStatus.SUCCEEDED,
@@ -78,6 +115,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
         if not any(fragment in str(key).lower() for fragment in _SECRET_KEY_FRAGMENTS)
         and key in {"name", "category", "brand"}
     }
+    resolved_ratio = workspace_resolved_aspect_ratio(payload)
     return {
         key: value
         for key, value in {
@@ -85,10 +123,21 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "revision": workspace.revision,
             "has_script": bool(script_content) or bool(pipeline_stages),
             "script_status": str(script.get("status") or "") or None,
+            "script_source": str(script.get("source") or "") or None,
             "script_chars": _safe_len(script_content),
             "script_pipeline_stages": pipeline_stages,
             "script_entry_path": str(payload.get("script_entry_path") or "") or None,
             "script_plan_confirmed": bool(payload.get("script_plan_confirmed")),
+            "awaiting_production_fields": bool(payload.get("awaiting_production_fields")),
+            "has_aspect_ratio": resolved_ratio is not None,
+            "video_ratio": resolved_ratio,
+            "has_ending_cta": workspace_has_ending_cta(payload),
+            "script_missing_requirements": [
+                str(item).strip()
+                for item in (_as_list(script.get("missing_requirements")))
+                if str(item).strip()
+            ][:8]
+            or None,
             "character_count": _count_named_items(global_assets.get("characters")),
             "scene_asset_count": _count_named_items(global_assets.get("scenes")),
             "prop_count": _count_named_items(global_assets.get("props")),
@@ -100,6 +149,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "pending_confirmations": bool(payload.get("pending_confirmations")),
             "failed_scene_asset_count": _safe_len(payload.get("scene_asset_failures")),
             "has_scene_packages": bool(scenes),
+            "has_scene_asset_images": workspace_has_scene_asset_images(payload),
             "product_info": safe_product or None,
             "latest_input_chars": _safe_len(payload.get("latest_input")),
             "has_materials": bool(_as_list(payload.get("materials"))),

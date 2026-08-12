@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import JsonValue
 
@@ -30,6 +31,8 @@ _TERMINAL_FAILURES = frozenset(
         ExternalJobStatus.EXPIRED,
     }
 )
+# prepare 会同步跑 LLM（常超过 1 分钟）；默认 30s start lease 会在终态落库时判租约失效。
+_SCENE_PACKAGE_START_LEASE = timedelta(minutes=15)
 
 
 class M06ScenePackageOperationPort:
@@ -45,6 +48,7 @@ class M06ScenePackageOperationPort:
         clock: Callable[[], datetime] | None = None,
         job_id_factory: Callable[[], str] | None = None,
         authorization_provider: Callable[[VideoToolContext], str] | None = None,
+        start_lease_duration: timedelta | None = None,
     ) -> None:
         if not isinstance(prepare_adapter, ProviderJobAdapter):
             raise TypeError("prepare_adapter 必须是 ProviderJobAdapter")
@@ -60,6 +64,11 @@ class M06ScenePackageOperationPort:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._job_id_factory = job_id_factory
         self._authorization_provider = authorization_provider or _context_authorization
+        self._start_lease_duration = (
+            start_lease_duration
+            if start_lease_duration is not None
+            else _SCENE_PACKAGE_START_LEASE
+        )
 
     async def start_prepare_scene_packages(
         self,
@@ -74,7 +83,15 @@ class M06ScenePackageOperationPort:
     ) -> ScenePackageOperationJob:
         if context.plan_id is None or context.step_id is None:
             raise VideoToolExecutionError("场景包 Operation 缺少计划身份")
-        digest = hashlib.sha256(plan_markdown.encode()).hexdigest()[:16]
+        # stage 指纹含 form/时长，避免补画幅后再启时与旧 request_hash 冲突。
+        digest = _request_digest(
+            {
+                "plan_markdown": plan_markdown,
+                "form_values": form_values,
+                "selected_direction": selected_direction,
+                "target_duration_ms": target_duration_ms,
+            }
+        )
         provider_request: dict[str, JsonValue] = {
             "plan_markdown": plan_markdown,
             "form_values": form_values,
@@ -150,6 +167,7 @@ class M06ScenePackageOperationPort:
             conversation_id=context.workspace.conversation_id,
             clock=self._clock,
             job_id_factory=self._job_id_factory,
+            lease_duration=self._start_lease_duration,
         )
         try:
             operation = await coordinator.start(
@@ -164,7 +182,10 @@ class M06ScenePackageOperationPort:
                 status="start_paused_quota",
             )
         except OperationConflictError as exc:
-            raise VideoToolExecutionError("场景包/参考图 Operation 启动失败") from exc
+            detail = str(exc).strip()[:200] or "未知冲突"
+            raise VideoToolExecutionError(
+                f"场景包/参考图 Operation 启动失败：{detail}"
+            ) from exc
 
         if operation.status in {ExternalJobStatus.CREATED, ExternalJobStatus.POLLING}:
             return ScenePackageOperationJob(job_id=operation.job_id, status="polling")
@@ -196,6 +217,11 @@ class M06ScenePackageOperationPort:
         if not isinstance(result, Mapping):
             raise VideoToolExecutionError("场景包/参考图 Operation 缺少安全结果")
         return dict(result)
+
+
+def _request_digest(payload: Mapping[str, JsonValue]) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _context_authorization(context: VideoToolContext) -> str:

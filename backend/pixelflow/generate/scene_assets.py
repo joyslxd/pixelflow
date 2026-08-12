@@ -787,6 +787,25 @@ async def generate_scene_assets(
         ]
 
     total = len(asset_jobs)
+    if total == 0:
+        # 无作业且无「缺提示词」失败项：旧逻辑会 ok=True 假成功（0 秒「参考图生成完成」）。
+        if not failed_assets:
+            failed_assets.append(
+                {
+                    "error": "没有可生成的参考图素材（工作区缺少角色/场景/道具或生图提示词）",
+                    "error_code": "scene_asset_jobs_empty",
+                    "quota_insufficient": False,
+                }
+            )
+        return {
+            "ok": False,
+            "endpoint": resolve_scene_asset_endpoint(generation_modes),
+            "global_assets": assets,
+            "scene_packages": enriched,
+            "failed_assets": failed_assets,
+            "quota_insufficient": False,
+            "message": "没有可生成的参考图素材，请先确认资产包结构完整",
+        }
 
     async def emit_progress(
         *,

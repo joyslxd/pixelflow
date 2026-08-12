@@ -153,6 +153,7 @@ export function ChatPanel({
     ? latestAssistantMessage.id
     : undefined;
   const firstUserMessageId = messages.find((message) => message.role === "user")?.id;
+  const latestUserMessageId = [...messages].reverse().find((message) => message.role === "user")?.id;
   const activityBlocksByMessageId = new Map<string, ReactNode[]>();
   const orphanActivityBlocks: ReactNode[] = [];
   const messageIds = new Set(messages.map((message) => message.id));
@@ -166,10 +167,11 @@ export function ChatPanel({
     current.push(block.content);
     activityBlocksByMessageId.set(block.afterMessageId, current);
   }
-  // 锚点消息已不存在时，挂到首条用户消息后，避免沉到对话底部看起来像“消失”。
-  if (orphanActivityBlocks.length > 0 && firstUserMessageId) {
-    const current = activityBlocksByMessageId.get(firstUserMessageId) || [];
-    activityBlocksByMessageId.set(firstUserMessageId, [...current, ...orphanActivityBlocks]);
+  // 锚点消息已不存在时，挂到最近用户消息后，避免「生成资产包」等进行中卡片被顶到对话前段。
+  const orphanAnchorId = latestUserMessageId || firstUserMessageId;
+  if (orphanActivityBlocks.length > 0 && orphanAnchorId) {
+    const current = activityBlocksByMessageId.get(orphanAnchorId) || [];
+    activityBlocksByMessageId.set(orphanAnchorId, [...current, ...orphanActivityBlocks]);
     orphanActivityBlocks.length = 0;
   }
   // 兼容旧用法：未显式锚定时，执行方案跟在首条用户消息后，避免被后续轮次顶到最底部。

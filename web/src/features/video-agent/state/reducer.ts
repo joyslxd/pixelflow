@@ -36,7 +36,15 @@ function asTextList(value: unknown): string[] {
 }
 
 function asPlanStatus(value: unknown): VideoAgentPlanStatus | null {
-  return ["planning", "running", "awaiting_confirmation", "completed", "failed", "cancelled"].includes(String(value))
+  return [
+    "planning",
+    "running",
+    "awaiting_confirmation",
+    "waiting_for_input",
+    "completed",
+    "failed",
+    "cancelled",
+  ].includes(String(value))
     ? value as VideoAgentPlanStatus
     : null;
 }

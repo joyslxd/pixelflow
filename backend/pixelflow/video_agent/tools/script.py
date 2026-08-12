@@ -10,7 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, f
 
 from pixelflow.video_agent.adapters import PixelFlowVideoDomainAdapter, VideoDomainAdapter
 from pixelflow.video_agent.contracts import VideoToolResult
-from pixelflow.video_agent.production_fields import analyze_production_fields_with_llm
+from pixelflow.video_agent.production_fields import (
+    analyze_production_fields_with_llm,
+    apply_production_fields_to_script,
+)
 
 from .registry import (
     VideoToolContext,
@@ -105,7 +108,14 @@ class ImportScriptTool:
         confirmation_required=False,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("script", "script_versions"),
+        workspace_mutations=(
+            "script",
+            "script_versions",
+            "script_pipeline",
+            "script_entry_path",
+            "form_values",
+            "awaiting_production_fields",
+        ),
     )
 
     async def execute(
@@ -142,31 +152,99 @@ class ImportScriptTool:
 
         versions = _script_versions(context.workspace.payload)
         version = _next_version(versions)
-        analysis = await analyze_production_fields_with_llm(text=request.markdown)
-        missing = list(analysis.missing)
-        duration_sec = analysis.duration_sec
+        # 成稿正文往往不含画幅/CTA；必须合并工作区与【本轮指令】再判定，避免覆盖用户已补字段。
+        field_text = request.markdown
+        latest = context.workspace.payload.get("latest_input")
+        if isinstance(latest, str) and "【本轮指令】" in latest:
+            field_text = f"{request.markdown}\n\n{latest.strip()[-1_200:]}"
+        analysis = await analyze_production_fields_with_llm(text=field_text)
         artifact_ref = _artifact_ref(context.workspace.workspace_id, fingerprint)
+        script_payload = apply_production_fields_to_script(
+            {
+                "artifact_ref": artifact_ref,
+                "source": "user_import",
+                "version": version,
+                "status": "ready",
+                "review_required": False,
+                "content": request.markdown,
+                "request_fingerprint": fingerprint,
+            },
+            analysis,
+            workspace_payload=context.workspace.payload,
+        )
         script: dict[str, JsonValue] = {
-            "artifact_ref": artifact_ref,
-            "source": "user_import",
-            "version": version,
-            "status": "ready",
-            "review_required": False,
-            "content": request.markdown,
-            "missing_requirements": missing,
-            "request_fingerprint": fingerprint,
+            str(key): value  # type: ignore[misc]
+            for key, value in script_payload.items()
         }
-        if duration_sec is not None:
-            script["duration_sec"] = duration_sec
+        missing = [
+            str(item)
+            for item in (script.get("missing_requirements") or [])
+            if str(item).strip()
+        ]
+        duration_sec = script.get("duration_sec")
+        if not isinstance(duration_sec, int):
+            duration_sec = analysis.duration_sec
         summary = f"已导入脚本版本 {version}"
-        if duration_sec is not None:
+        if isinstance(duration_sec, int):
             summary += f"（已识别时长 {duration_sec} 秒）"
         if missing:
             summary += f"；仍缺少：{'、'.join(missing)}"
+
+        workspace_patch: dict[str, JsonValue] = {
+            "script": script,
+            "script_versions": [*versions, script],
+        }
+        form_values = context.workspace.payload.get("form_values")
+        next_form = dict(form_values) if isinstance(form_values, dict) else {}
+        ratio = script.get("aspect_ratio") or script.get("video_ratio")
+        if isinstance(ratio, str) and ratio.strip():
+            next_form["video_ratio"] = ratio.strip()
+        cta = script.get("ending_cta")
+        if isinstance(cta, str) and cta.strip():
+            next_form["ending_cta"] = cta.strip()
+        if next_form:
+            workspace_patch["form_values"] = next_form
+        if not missing:
+            workspace_patch["awaiting_production_fields"] = False
+        # 成稿导入后必须走结构化拆解 Tool 逻辑：角色/场景/道具 + 分镜提示词。
+        # 禁止只靠 Intake 自然语言「看起来完整」就宣称可推进。
+        try:
+            await context.emit_progress(
+                "正在拆解角色、场景、道具与分镜提示词…",
+                phase="import_structure_extract",
+            )
+            from pixelflow.video_agent.tools.script_skill_pipeline import (
+                extract_imported_script_structure,
+            )
+
+            structure_stages = await extract_imported_script_structure(
+                markdown=request.markdown,
+                workspace_id=context.workspace.workspace_id,
+                on_token=context.emit_thinking_delta,
+            )
+            prior_pipeline = context.workspace.payload.get("script_pipeline")
+            pipeline: dict[str, JsonValue] = (
+                dict(prior_pipeline) if isinstance(prior_pipeline, dict) else {}
+            )
+            # 用户成稿进 episode，拆解结果进 characters/outline。
+            pipeline["episode"] = {
+                "stage": "episode",
+                "title": "用户成稿 /episode",
+                "content": request.markdown,
+                "source": "user_complete_script",
+                "change_summary": "导入用户成稿作为 episode 权威正文",
+            }
+            pipeline.update(structure_stages)
+            workspace_patch["script_pipeline"] = pipeline
+            workspace_patch["script_entry_path"] = "polish"
+            summary += "；已拆解角色/场景/道具与分镜提示词"
+        except Exception as exc:  # noqa: BLE001
+            # 拆解失败不回滚导入；公开摘要提示需重试拆解。
+            summary += f"；结构化拆解未完成（{type(exc).__name__}），可继续补字段或重试导入"
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=summary,
-            workspace_patch={"script": script, "script_versions": [*versions, script]},
+            workspace_patch=workspace_patch,
             artifact_refs=(artifact_ref,),
         )
 
@@ -180,7 +258,14 @@ class BrainstormScriptTool:
         confirmation_required=False,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("script", "script_versions"),
+        workspace_mutations=(
+            "script",
+            "script_versions",
+            "script_pipeline",
+            "script_entry_path",
+            "form_values",
+            "awaiting_production_fields",
+        ),
     )
 
     def __init__(self, *, adapter: VideoDomainAdapter | None = None) -> None:

@@ -558,10 +558,10 @@ function applyAgentEvent(
           turnId,
           title: typeof event.payload.title === "string" && event.payload.title.trim()
             ? event.payload.title
-            : "正在分析素材，提炼电商属性并构思方向…",
+            : "思考中",
           subtitle: typeof event.payload.subtitle === "string" && event.payload.subtitle.trim()
             ? event.payload.subtitle
-            : "AI 编剧思考中…",
+            : "",
           text: "",
           answer: "",
           startedAt: typeof event.payload.started_at === "string"
@@ -1095,11 +1095,32 @@ export function supervisorRuntimeReducer(
         historyByTurn.set(item.turnId, preferLocal ? { ...local, status: item.status } : item);
       }
       const nextThinkingHistory = [...historyByTurn.values()];
-      const liveFromSnapshot = nextThinkingHistory.find((item) => item.status === "streaming")
-        ?? null;
-      const nextLiveThinking = state.agentThinking?.status === "streaming"
-        ? state.agentThinking
-        : (liveFromSnapshot ?? state.agentThinking);
+      const historyForLive = nextThinkingHistory.find(
+        (item) => item.turnId === state.agentThinking?.turnId,
+      );
+      // 本地仍 streaming 但 Snapshot 已 completed 时，以 Snapshot 为准，避免闪烁光标卡死。
+      let nextLiveThinking = state.agentThinking;
+      if (
+        state.agentThinking?.status === "streaming"
+        && historyForLive
+        && historyForLive.status !== "streaming"
+      ) {
+        nextLiveThinking = {
+          ...state.agentThinking,
+          ...historyForLive,
+          text: (state.agentThinking.text?.length || 0) >= (historyForLive.text?.length || 0)
+            ? state.agentThinking.text
+            : historyForLive.text,
+          answer: (state.agentThinking.answer?.length || 0) >= (historyForLive.answer?.length || 0)
+            ? state.agentThinking.answer
+            : historyForLive.answer,
+          status: historyForLive.status,
+        };
+      } else if (state.agentThinking?.status !== "streaming") {
+        const liveFromSnapshot = nextThinkingHistory.find((item) => item.status === "streaming")
+          ?? null;
+        nextLiveThinking = liveFromSnapshot ?? state.agentThinking;
+      }
       return {
         ...projection,
         videoAgentWorkspace,

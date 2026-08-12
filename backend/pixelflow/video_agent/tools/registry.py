@@ -168,10 +168,7 @@ class VideoToolRegistry:
                 ),
             )
         except VideoToolExecutionError:
-            return VideoToolResult(
-                tool_name=tool.spec.name,
-                public_summary="工具执行失败，请稍后重试",
-            )
+            raise
         allowed_roots = {
             mutation.split(".", maxsplit=1)[0]
             for mutation in tool.spec.workspace_mutations
@@ -180,8 +177,5 @@ class VideoToolRegistry:
             result.tool_name != tool.spec.name
             or not set(result.workspace_patch).issubset(allowed_roots)
         ):
-            return VideoToolResult(
-                tool_name=tool.spec.name,
-                public_summary="工具结果无效，请稍后重试",
-            )
+            raise VideoToolExecutionError("工具结果无效，请稍后重试")
         return result

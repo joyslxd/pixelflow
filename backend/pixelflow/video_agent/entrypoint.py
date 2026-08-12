@@ -7,13 +7,16 @@ import hashlib
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pixelflow.agent_runtime.persistence.repositories import AgentRuntimeRepository
+from pixelflow.agent_runtime.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
+    AgentRuntimeRepository,
+)
 from pixelflow.video_agent.contracts import (
     AgentPlan,
     AgentPlanStatus,
@@ -24,6 +27,10 @@ from pixelflow.video_agent.contracts import (
 from pixelflow.video_agent.executor.events import (
     build_plan_created_event,
     build_plan_updated_event,
+)
+from pixelflow.video_agent.operations.projector import (
+    ScenePackageCompletionProjector,
+    workspace_has_scene_packages as _workspace_has_scene_packages,
 )
 from pixelflow.video_agent.planner import (
     VideoAgentPlanner,
@@ -38,13 +45,19 @@ from pixelflow.video_agent.planner.workspace_digest import (
     blocking_confirmation_from_plan,
     build_workspace_digest,
     summarize_operations,
+    workspace_has_scene_asset_images,
 )
 from pixelflow.video_agent.production_fields import (
     analyze_production_fields_with_llm,
+    apply_production_fields_to_script,
     format_production_fields_update_notice,
     looks_like_production_field_reply,
     normalize_user_text,
+    production_fields_form_patch,
+    reconcile_missing_with_workspace,
     workspace_missing_requirements,
+    workspace_resolved_aspect_ratio,
+    workspace_resolved_ending_cta,
 )
 from pixelflow.video_agent.thinking_stream import (
     IntakeThinkingResult,
@@ -57,7 +70,9 @@ logger = logging.getLogger(__name__)
 
 # V2.1：Planner 主路径超时后降级为 inspect，避免 turns/start 无限挂起。
 # DeepSeek 结构化规划单次常需 5–12s，且最多 3 次修复重试，10s 极易误降级。
-_DEFAULT_PLANNING_TIMEOUT_SEC = 45.0
+_DEFAULT_PLANNING_TIMEOUT_SEC = 90.0
+# 思考流耗时期间确认脚本/旧 Plan 执行器可能已 bump revision；冲突时重读再写。
+_WORKSPACE_PATCH_MAX_ATTEMPTS = 3
 
 
 
@@ -188,17 +203,6 @@ def _looks_like_creative_followup(content: str) -> bool:
         return True
     narrative = ("故事", "朋友", "人物", "场景", "旁白", "画面", "以前", "现在")
     return len(text) >= 40 and any(token in text for token in narrative)
-
-
-def _pipeline_stage_content(workspace: VideoWorkspace, stage: str) -> str:
-    pipeline = workspace.payload.get("script_pipeline")
-    if not isinstance(pipeline, Mapping):
-        return ""
-    item = pipeline.get(stage)
-    if not isinstance(item, Mapping):
-        return ""
-    content = item.get("content")
-    return content.strip() if isinstance(content, str) else ""
 
 
 def _workspace_creative_brief(workspace: VideoWorkspace) -> str:
@@ -672,6 +676,14 @@ def _seed_script_draft_payload(
         next_script["missing_requirements"] = list(missing)
         if duration_sec is not None:
             next_script["duration_sec"] = duration_sec
+        # 历史 intake_draft 可能缺 artifact_ref，补齐以免前端投影丢脚本。
+        if not str(next_script.get("artifact_ref") or "").strip():
+            body = str(next_script.get("content") or "")
+            version = next_script.get("version")
+            ver = version if isinstance(version, int) and version >= 1 else 1
+            digest = hashlib.sha256(body.encode()).hexdigest()[:16]
+            next_script["artifact_ref"] = f"artifact:script:intake_draft:v{ver}:{digest}"
+            next_script["version"] = ver
         return next_script
 
     body = _script_body_from_turn_text(text)
@@ -689,6 +701,9 @@ def _seed_script_draft_payload(
         "content": body,
         "version": 1,
         "source": "intake_draft",
+        "status": "draft",
+        # 前端 projectScript 依赖 artifact_ref；缺省会导致右侧脚本预览整块消失。
+        "artifact_ref": f"artifact:script:intake_draft:v1:{hashlib.sha256(body.encode()).hexdigest()[:16]}",
         "missing_requirements": list(missing),
     }
     if duration_sec is not None:
@@ -716,6 +731,9 @@ def merge_video_turn_content_with_history(
         return raw
     # 短跟进才归一全角冒号（如 9：16 → 9:16），不改写长脚本正文。
     text = normalize_user_text(raw)
+    # 「确认脚本并生成资产包」等成片确认短令不得拼回整篇脚本，否则 Intake 会误判 clarify。
+    if _is_continue_video_generation(text) or _is_confirm_script_plan(text):
+        return text
     if (
         not is_short_video_followup_instruction(text)
         and not _looks_like_creative_followup(text)
@@ -748,6 +766,77 @@ def merge_video_turn_content_with_history(
     return f"{best}\n\n【本轮指令】{text}"
 
 
+def _ready_to_prepare_scene_packages(
+    *,
+    instruction: str,
+    workspace: VideoWorkspace,
+) -> bool:
+    """可推进 prepare 的工作区事实闸门（脚本齐、未出包、无缺项）。"""
+
+    if not _workspace_has_generatable_script(workspace):
+        return False
+    if _workspace_has_scene_packages(workspace):
+        return False
+    if workspace_missing_requirements(workspace.payload):
+        return False
+    return True
+
+
+def _is_confirmed_asset_generation_instruction(instruction: str) -> bool:
+    """本轮是否为确认脚本/生成资产包短令。"""
+
+    return _is_confirm_script_plan(instruction) or _is_continue_video_generation(
+        instruction
+    )
+
+
+def _should_skip_intake_for_confirmed_assets(
+    *,
+    instruction: str,
+    workspace: VideoWorkspace,
+) -> bool:
+    """仅当结构化确认已落库时跳过长思考；避免抢在 confirm_for_generation 写 flag 之前短路。"""
+
+    if workspace.payload.get("script_plan_confirmed") is not True:
+        return False
+    if not _is_confirmed_asset_generation_instruction(instruction):
+        return False
+    return _ready_to_prepare_scene_packages(
+        instruction=instruction,
+        workspace=workspace,
+    )
+
+
+def _should_force_prepare_intake_evidence(
+    *,
+    instruction: str,
+    workspace: VideoWorkspace,
+) -> bool:
+    """确认短令或已确认 flag：纠正 Intake 误报的 clarify/inspect。"""
+
+    if not _ready_to_prepare_scene_packages(
+        instruction=instruction,
+        workspace=workspace,
+    ):
+        return False
+    if workspace.payload.get("script_plan_confirmed") is True:
+        return _is_confirmed_asset_generation_instruction(instruction)
+    return _is_confirm_script_plan(instruction)
+
+
+def _confirmed_assets_thinking_result() -> IntakeThinkingResult:
+    """已确认脚本生成资产包：跳过长思考，直接给 Planner 明确证据。"""
+
+    return IntakeThinkingResult(
+        user_message="已确认脚本方案，开始生成视频资产包。",
+        entry_path="continue",
+        intent="continue_assets",
+        target_capability="prepare_scene_packages",
+        needs_user_reply=False,
+        missing_requirements=(),
+    )
+
+
 def _workspace_script_markdown(workspace: VideoWorkspace) -> str:
     script = workspace.payload.get("script")
     if isinstance(script, dict):
@@ -770,6 +859,16 @@ def _workspace_script_markdown(workspace: VideoWorkspace) -> str:
 
 def _workspace_has_generatable_script(workspace: VideoWorkspace) -> bool:
     return bool(_workspace_script_markdown(workspace))
+
+
+def _default_generate_scene_assets_arguments() -> dict[str, Any]:
+    """规划失败降级用的参考图默认参数；正常主链路由 Registry/Planner 决定。"""
+
+    return {
+        "image_model": "seeddream-5.0",
+        "image_ratio": "9:16",
+        "image_size": "2K",
+    }
 
 
 def _resolve_script_entry_path(
@@ -822,6 +921,9 @@ def _looks_like_confirmation_response(content: str) -> bool:
     text = content.strip().casefold()
     if not text or len(text) > 80:
         return False
+    # 「继续资产 / 继续生成视频」含「继续」，不得误判为确认闸门回执。
+    if _is_continue_video_generation(content) or is_short_video_followup_instruction(content):
+        return False
     markers = (
         "同意",
         "确认",
@@ -858,15 +960,19 @@ def _thinking_facts_workspace_patch(
     thinking: IntakeThinkingResult,
     workspace: VideoWorkspace,
 ) -> dict[str, Any]:
-    """把思考流已确认事实写入 workspace，供后续 Tool 消费。"""
+    """把思考流已确认事实写入 workspace，供后续 Tool 消费。
+
+    不擅自清空工作区已有的 missing / awaiting；缺项由后续 field_followup 或
+    reconcile 基于落库事实处理。
+    """
 
     patch: dict[str, Any] = {
         "last_intake_thinking": thinking.as_planner_digest(),
-        "awaiting_production_fields": False,
     }
     if thinking.entry_path is not None:
         patch["script_entry_path"] = thinking.entry_path
 
+    prior_missing = workspace_missing_requirements(workspace.payload)
     has_facts = (
         thinking.duration_sec is not None
         or bool(thinking.aspect_ratio)
@@ -882,7 +988,17 @@ def _thinking_facts_workspace_patch(
             next_script["video_ratio"] = thinking.aspect_ratio
         if thinking.ending_cta is not None:
             next_script["ending_cta"] = thinking.ending_cta
-        next_script["missing_requirements"] = list(thinking.missing_requirements)
+        if thinking.missing_requirements or thinking.needs_user_reply:
+            next_script["missing_requirements"] = list(thinking.missing_requirements)
+        elif has_facts:
+            next_script["missing_requirements"] = reconcile_missing_with_workspace(
+                prior_missing,
+                {
+                    "script": next_script,
+                    "form_values": workspace.payload.get("form_values"),
+                    "creation_contract": workspace.payload.get("creation_contract"),
+                },
+            )
         if next_script:
             patch["script"] = next_script
             versions = workspace.payload.get("script_versions")
@@ -893,10 +1009,28 @@ def _thinking_facts_workspace_patch(
             elif next_script.get("content"):
                 patch["script_versions"] = [next_script]
 
+    if thinking.needs_user_reply or thinking.missing_requirements:
+        patch["awaiting_production_fields"] = True
+    elif has_facts:
+        script_after = patch.get("script")
+        gaps = (
+            workspace_missing_requirements({"script": script_after})
+            if isinstance(script_after, dict)
+            else prior_missing
+        )
+        patch["awaiting_production_fields"] = bool(gaps)
+
     if thinking.aspect_ratio:
         form_values = workspace.payload.get("form_values")
         next_form = dict(form_values) if isinstance(form_values, dict) else {}
         next_form["video_ratio"] = thinking.aspect_ratio
+        if thinking.ending_cta is not None:
+            next_form["ending_cta"] = thinking.ending_cta
+        patch["form_values"] = next_form
+    elif thinking.ending_cta is not None:
+        form_values = workspace.payload.get("form_values")
+        next_form = dict(form_values) if isinstance(form_values, dict) else {}
+        next_form["ending_cta"] = thinking.ending_cta
         patch["form_values"] = next_form
     return patch
 
@@ -923,10 +1057,11 @@ class VideoAgentSubmission:
 
 
 class VideoAgentEntrypoint:
-    """把一个已登记的用户 Turn 转换为可恢复的 VideoAgent 短计划。
+    """Turn 入口协调器：登记上下文、运行 Intake、调用 Planner、持久化短 Plan。
 
-    V2.1：入场思考流只产出上下文事实；Planner 独占可执行 steps 的选择（最多 3 步）。
-    Planner 缺失/超时/失败时仅降级为单步 `inspect_video_workspace`。
+    V2.1：Intake 只产出上下文事实；确定性代码只做允许/禁止闸门。
+    Planner 独占可执行 Tool 选择（最多 3 步）；缺失/超时/失败时仅允许严格单步降级。
+    入口不得根据关键词直接写确认事实或硬编码业务 Tool 步骤。
     """
 
     def __init__(
@@ -946,6 +1081,51 @@ class VideoAgentEntrypoint:
         self._entry_path_model = entry_path_model
         self._clock = clock or (lambda: datetime.now(UTC))
         self._planning_timeout_sec = max(0.1, float(planning_timeout_sec))
+
+    async def _apply_workspace_patch_resilient(
+        self,
+        *,
+        owner: str,
+        workspace: VideoWorkspace,
+        patch: Mapping[str, Any],
+        now: datetime,
+    ) -> VideoWorkspace:
+        """按最新 revision 写入 workspace；冲突则重读后重试。"""
+
+        current = workspace
+        last_error: AgentRuntimeRecordConflictError | None = None
+        for attempt in range(_WORKSPACE_PATCH_MAX_ATTEMPTS):
+            try:
+                return await self._video_repository.apply_workspace_patch(
+                    owner,
+                    current.workspace_id,
+                    dict(patch),
+                    expected_revision=current.revision,
+                    now=now,
+                )
+            except AgentRuntimeRecordConflictError as exc:
+                last_error = exc
+                logger.warning(
+                    "workspace patch 冲突，重读后重试 workspace_id=%s attempt=%s",
+                    current.workspace_id,
+                    attempt + 1,
+                )
+                refreshed = await self._video_repository.get_workspace(
+                    owner,
+                    current.workspace_id,
+                )
+                if refreshed is None:
+                    raise
+                current = refreshed
+        assert last_error is not None
+        raise last_error
+
+    def _scene_package_projector(self) -> ScenePackageCompletionProjector:
+        return ScenePackageCompletionProjector(
+            runtime_repository=self._runtime_repository,
+            video_repository=self._video_repository,
+            apply_patch=self._apply_workspace_patch_resilient,
+        )
 
     async def submit_turn(
         self,
@@ -1006,7 +1186,6 @@ class VideoAgentEntrypoint:
             workspace,
             materials=safe_materials,
         )
-        # 先完成上下文理解，再由唯一 Planner 落库执行方案；禁止并行「规划中」卡。
         thinking = ThinkingStreamPublisher(
             repository=self._runtime_repository,
             user_id=owner,
@@ -1014,18 +1193,29 @@ class VideoAgentEntrypoint:
             turn_id=turn_id,
             clock=self._clock,
         )
-        state_before = await self._video_repository.load_conversation_state(
-            owner,
-            conversation_id,
-        )
-        latest_before = state_before[1] if state_before is not None else None
-        thinking_result = await stream_intake_thinking(
-            publisher=thinking,
-            content=text,
-            materials=safe_materials,
-            workspace_digest=build_workspace_digest(workspace),
-            blocking_confirmation=blocking_confirmation_from_plan(latest_before),
-        )
+        # 结构化确认已落库后的短令：跳过长 Intake，避免拼回整篇脚本后误判 clarify。
+        if _should_skip_intake_for_confirmed_assets(
+            instruction=original_instruction,
+            workspace=workspace,
+        ):
+            thinking_result = _confirmed_assets_thinking_result()
+            try:
+                await thinking.complete()
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            state_before = await self._video_repository.load_conversation_state(
+                owner,
+                conversation_id,
+            )
+            latest_before = state_before[1] if state_before is not None else None
+            thinking_result = await stream_intake_thinking(
+                publisher=thinking,
+                content=text,
+                materials=safe_materials,
+                workspace_digest=build_workspace_digest(workspace),
+                blocking_confirmation=blocking_confirmation_from_plan(latest_before),
+            )
         return await self._submit_turn_after_thinking(
             owner=owner,
             conversation_id=conversation_id,
@@ -1057,6 +1247,62 @@ class VideoAgentEntrypoint:
         occurred_at: datetime,
         thinking_result: IntakeThinkingResult,
     ) -> VideoAgentSubmission:
+        # 思考流可能很长：期间确认脚本/旧执行器会 bump revision，必须先重读。
+        refreshed = await self._video_repository.get_workspace(
+            owner,
+            workspace.workspace_id,
+        )
+        if refreshed is not None:
+            workspace = refreshed
+        # Intake 可能误报画幅/CTA；用工作区已落库事实剔除，避免确认脚本后假卡 waiting。
+        original_missing = tuple(thinking_result.missing_requirements)
+        reconciled_missing = tuple(
+            reconcile_missing_with_workspace(original_missing, workspace.payload)
+        )
+        thinking_patch: dict[str, Any] = {
+            "missing_requirements": reconciled_missing,
+        }
+        if thinking_result.aspect_ratio is None:
+            ratio = workspace_resolved_aspect_ratio(workspace.payload)
+            if ratio is not None:
+                thinking_patch["aspect_ratio"] = ratio
+        if thinking_result.ending_cta is None:
+            cta = workspace_resolved_ending_cta(workspace.payload)
+            if cta is not None:
+                thinking_patch["ending_cta"] = cta
+        if (
+            thinking_result.needs_user_reply
+            and original_missing
+            and not reconciled_missing
+        ):
+            thinking_patch["needs_user_reply"] = False
+        thinking_result = replace(thinking_result, **thinking_patch)
+        # 确认生成资产包：即便 Intake 误报 clarify/inspect，也用工作区事实纠正证据。
+        if _should_force_prepare_intake_evidence(
+            instruction=original_instruction,
+            workspace=workspace,
+        ):
+            thinking_result = replace(
+                thinking_result,
+                entry_path="continue",
+                intent="continue_assets",
+                target_capability="prepare_scene_packages",
+                needs_user_reply=False,
+                missing_requirements=(),
+                user_message=(
+                    thinking_result.user_message.strip()
+                    or "已确认脚本方案，开始生成视频资产包。"
+                ),
+            )
+        # 思考流已确认的画幅/CTA 等事实尽早写入，避免后续 import 只看正文又判缺。
+        facts_patch = _thinking_facts_workspace_patch(thinking_result, workspace)
+        if facts_patch:
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch=facts_patch,
+                now=occurred_at,
+            )
         continue_generation = (
             _workspace_has_generatable_script(workspace)
             and _is_continue_video_generation(original_instruction)
@@ -1084,14 +1330,13 @@ class VideoAgentEntrypoint:
             }
             if not continue_generation:
                 patch["latest_input"] = text
-            workspace = await self._video_repository.apply_workspace_patch(
-                owner,
-                workspace.workspace_id,
-                patch,
-                expected_revision=workspace.revision,
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch=patch,
                 now=occurred_at,
             )
-        # 缺字段追问：只写 workspace + 思考流气泡，禁止落 Plan（避免与气泡文案重复）。
+        # 缺字段追问：持久化 WAITING_FOR_INPUT Plan（无 Tool 步），前端可展示等待态。
         if thinking_result.needs_user_reply or thinking_result.missing_requirements:
             seeded = _seed_script_draft_payload(
                 text=text,
@@ -1128,57 +1373,76 @@ class VideoAgentEntrypoint:
                 )
             elif thinking_result.entry_path is not None:
                 patch["script_entry_path"] = thinking_result.entry_path
-            workspace = await self._video_repository.apply_workspace_patch(
-                owner,
-                workspace.workspace_id,
-                patch,
-                expected_revision=workspace.revision,
-                now=occurred_at,
-            )
-            return VideoAgentSubmission(workspace=workspace, plan=None)
-        # 思考流明确 inspect：落最小核对计划。
-        if thinking_result.entry_path == "inspect":
-            workspace = await self._video_repository.apply_workspace_patch(
-                owner,
-                workspace.workspace_id,
-                _thinking_facts_workspace_patch(thinking_result, workspace),
-                expected_revision=workspace.revision,
-                now=occurred_at,
-            )
-            goal = _thinking_public_goal(
-                thinking_result,
-                fallback="先读取项目资料",
-            )
-            plan = self._inspect_fallback_plan(
-                conversation_id=conversation_id,
-                content=text,
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
                 workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                public_goal=goal,
+                patch=patch,
+                now=occurred_at,
             )
-            return await self._persist_and_publish_plan(
+            return await self._persist_waiting_for_input_plan(
                 owner=owner,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 workspace=workspace,
-                plan=plan,
+                plan_id=plan_id,
                 occurred_at=occurred_at,
+                thinking_result=thinking_result,
             )
-        # 思考流未给出入口裁决时：仅短补丁 + 已有缺项/追问态才走补字段降级。
+        # 可推进执行前，取消会话里旧的等待补充 Plan。
+        await self._video_repository.cancel_waiting_for_input_plans(
+            owner,
+            conversation_id,
+            now=occurred_at,
+            exclude_plan_id=plan_id,
+        )
+        # completion_dispatch 失败时资产包可能只在完成事件里：规划前由 projector 对账回填。
+        workspace = await self._scene_package_projector().hydrate_if_missing(
+            owner=owner,
+            conversation_id=conversation_id,
+            workspace=workspace,
+            occurred_at=occurred_at,
+        )
+        # 补生产字段降级：仅结构门闩 + 工作区缺项态；话术语义看 Intake。
+        # 场景包已出、参考图未出时禁止补字段降级吞回合（交给 Planner）。
+        intake_wants_assets = (
+            thinking_result.target_capability == "generate_scene_assets"
+            or thinking_result.intent == "continue_images"
+        )
+        intake_wants_video = (
+            thinking_result.target_capability == "generate_scenes"
+            or thinking_result.intent == "continue_video"
+        )
+        scene_assets_pending = (
+            _workspace_has_scene_packages(workspace)
+            and not workspace_has_scene_asset_images(workspace.payload)
+        )
+        logger.info(
+            "思考后裁决 turn_id=%s intent=%s has_packages=%s assets_pending=%s "
+            "wants_assets=%s wants_video=%s",
+            turn_id,
+            thinking_result.intent,
+            _workspace_has_scene_packages(workspace),
+            scene_assets_pending,
+            intake_wants_assets,
+            intake_wants_video,
+        )
         field_followup = (
-            thinking_result.entry_path is None
-            and len(original_instruction.strip()) <= 80
+            len(original_instruction.strip()) <= 80
             and looks_like_production_field_reply(
                 original_instruction,
                 workspace_payload=workspace.payload,
             )
+            and not scene_assets_pending
+            and not intake_wants_assets
+            and not intake_wants_video
             and not _is_continue_video_generation(original_instruction)
             and not _looks_like_confirmation_response(original_instruction)
+            and not _is_confirm_script_plan(original_instruction)
             and (
-                workspace.payload.get("awaiting_production_fields") is True
+                thinking_result.needs_user_reply
+                or bool(thinking_result.missing_requirements)
+                or workspace.payload.get("awaiting_production_fields") is True
                 or bool(workspace_missing_requirements(workspace.payload))
-                or _workspace_has_generatable_script(workspace)
             )
         )
         if field_followup and (
@@ -1194,7 +1458,11 @@ class VideoAgentEntrypoint:
             )
             script_version: int | None = None
             if seeded is not None:
-                next_script = seeded
+                next_script = apply_production_fields_to_script(
+                    seeded,
+                    analysis,
+                    workspace_payload=workspace.payload,
+                )
                 raw_version = next_script.get("version")
                 if isinstance(raw_version, int) and not isinstance(raw_version, bool):
                     script_version = raw_version
@@ -1203,12 +1471,7 @@ class VideoAgentEntrypoint:
                 if next_versions and isinstance(next_versions[-1], dict):
                     next_versions[-1] = {
                         **dict(next_versions[-1]),
-                        "missing_requirements": list(analysis.missing),
-                        **(
-                            {"duration_sec": analysis.duration_sec}
-                            if analysis.duration_sec is not None
-                            else {}
-                        ),
+                        **next_script,
                     }
                 elif not next_versions:
                     next_versions = [next_script]
@@ -1216,96 +1479,68 @@ class VideoAgentEntrypoint:
                     analysis,
                     script_version=script_version,
                 )
-                workspace = await self._video_repository.apply_workspace_patch(
-                    owner,
-                    workspace.workspace_id,
-                    {
-                        "script": next_script,
-                        "script_versions": next_versions,
-                        "script_entry_path": "inspect",
-                        "awaiting_production_fields": bool(analysis.missing),
-                        "last_production_fields_notice": notice,
-                        "last_intake_thinking": thinking_result.as_planner_digest(),
-                    },
-                    expected_revision=workspace.revision,
+                form_patch = production_fields_form_patch(analysis)
+                form_values = workspace.payload.get("form_values")
+                next_form = dict(form_values) if isinstance(form_values, dict) else {}
+                next_form.update(form_patch)
+                patch: dict[str, Any] = {
+                    "script": next_script,
+                    "script_versions": next_versions,
+                    "script_entry_path": thinking_result.entry_path or "inspect",
+                    "awaiting_production_fields": bool(next_script.get("missing_requirements")),
+                    "last_production_fields_notice": notice,
+                    "last_intake_thinking": thinking_result.as_planner_digest(),
+                }
+                if next_form:
+                    patch["form_values"] = next_form
+                workspace = await self._apply_workspace_patch_resilient(
+                    owner=owner,
+                    workspace=workspace,
+                    patch=patch,
                     now=occurred_at,
                 )
             else:
                 notice = format_production_fields_update_notice(analysis)
-            # 补字段后仍缺项：只更新 workspace，不落 Plan（结论走思考流/通知气泡）。
-            if analysis.missing:
-                return VideoAgentSubmission(workspace=workspace, plan=None)
-            plan = self._inspect_fallback_plan(
-                conversation_id=conversation_id,
-                content=text,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                public_goal=_thinking_public_goal(
-                    thinking_result,
-                    fallback=notice.split("\n", 1)[0][:500],
-                ),
+            # 补字段后仍缺项：落 WAITING_FOR_INPUT；已齐则继续走下方 Planner。
+            remaining = reconcile_missing_with_workspace(
+                workspace_missing_requirements(workspace.payload) or analysis.missing,
+                workspace.payload,
             )
-            return await self._persist_and_publish_plan(
-                owner=owner,
-                conversation_id=conversation_id,
-                turn_id=turn_id,
-                workspace=workspace,
-                plan=plan,
-                occurred_at=occurred_at,
-            )
-        # 无待确认闸门、脚本与生产字段已齐时：「同意创作」确认脚本方案，禁止再排 import+confirm。
-        state_for_confirm = await self._video_repository.load_conversation_state(
-            owner,
-            conversation_id,
-        )
-        latest_for_confirm = state_for_confirm[1] if state_for_confirm is not None else None
-        if (
-            blocking_confirmation_from_plan(latest_for_confirm) is None
-            and _looks_like_confirmation_response(original_instruction)
-            and not _is_continue_video_generation(original_instruction)
-            and not looks_like_production_field_reply(
-                original_instruction,
-                workspace_payload=workspace.payload,
-            )
-            and _workspace_has_generatable_script(workspace)
-            and not workspace_missing_requirements(workspace.payload)
-        ):
-            notice = (
-                "已确认当前脚本方案。可继续生成视频资产包，或告诉我还要改哪里。"
-            )
-            workspace = await self._video_repository.apply_workspace_patch(
-                owner,
-                workspace.workspace_id,
-                {
-                    "script_plan_confirmed": True,
-                    "last_script_plan_confirm_notice": notice,
-                    "last_intake_thinking": thinking_result.as_planner_digest(),
-                },
-                expected_revision=workspace.revision,
-                now=occurred_at,
-            )
-            plan = self._inspect_fallback_plan(
-                conversation_id=conversation_id,
-                content=text,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                public_goal=_thinking_public_goal(thinking_result, fallback=notice),
-            )
-            return await self._persist_and_publish_plan(
-                owner=owner,
-                conversation_id=conversation_id,
-                turn_id=turn_id,
-                workspace=workspace,
-                plan=plan,
-                occurred_at=occurred_at,
-            )
+            if remaining:
+                return await self._persist_waiting_for_input_plan(
+                    owner=owner,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    workspace=workspace,
+                    plan_id=plan_id,
+                    occurred_at=occurred_at,
+                    thinking_result=thinking_result,
+                    public_goal=notice.split("\n", 1)[0][:500],
+                    missing=tuple(remaining),
+                )
+        # 确定性闸门：只负责允许/禁止，不负责选择 Tool。
+        # Intake 要参考图但工作区尚无资产包 → 禁止进 Planner 静默挂起。
+        if intake_wants_assets and not intake_wants_video:
+            if not _workspace_has_scene_packages(workspace):
+                return await self._persist_waiting_for_input_plan(
+                    owner=owner,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    workspace=workspace,
+                    plan_id=plan_id,
+                    occurred_at=occurred_at,
+                    thinking_result=thinking_result,
+                    public_goal=(
+                        "当前工作区尚未写入视频资产包。若对话里已有资产包结果，"
+                        "请刷新后再试；否则请先确认生成资产包。"
+                    ),
+                    missing=(),
+                )
         continue_generation = (
             _workspace_has_generatable_script(workspace)
             and _is_continue_video_generation(original_instruction)
         )
-        # 入口路径优先采用思考流裁决；仅缺裁决时再降级规则/短 LLM。
+        # entry_path 仅作 Planner 诊断上下文；失败降级才可当路径展开。
         if thinking_result.entry_path is not None:
             entry_path = thinking_result.entry_path
         else:
@@ -1325,6 +1560,7 @@ class VideoAgentEntrypoint:
                 has_generatable_script=_workspace_has_generatable_script,
             )
         # 推进资产/成片前确保成稿种子在 workspace，避免 Plan 执行时「脚本 0 份」。
+        # 长期应由 import_script Tool 写入；此处仅补空工作区的只读前置。
         if entry_path in ("polish", "continue") and not _workspace_has_generatable_script(workspace):
             seeded = _seed_script_draft_payload(
                 text=text,
@@ -1333,75 +1569,84 @@ class VideoAgentEntrypoint:
                 duration_sec=thinking_result.duration_sec,
             )
             if seeded is not None:
-                workspace = await self._video_repository.apply_workspace_patch(
-                    owner,
-                    workspace.workspace_id,
-                    {
+                workspace = await self._apply_workspace_patch_resilient(
+                    owner=owner,
+                    workspace=workspace,
+                    patch={
                         "script": seeded,
                         "script_versions": [seeded],
                         "awaiting_production_fields": False,
                     },
-                    expected_revision=workspace.revision,
                     now=occurred_at,
                 )
-        workspace = await self._video_repository.apply_workspace_patch(
-            owner,
-            workspace.workspace_id,
-            {
-                "last_intake_thinking": thinking_result.as_planner_digest(),
-                "awaiting_production_fields": False,
-            },
-            expected_revision=workspace.revision,
-            now=occurred_at,
-        )
-        if entry_path == "create":
-            script_md = _workspace_script_markdown(workspace)
-            readiness = analyze_script_character_readiness(script_md or text, workspace=workspace)
-            if script_needs_full_character_plan(script_md or text, workspace=workspace):
-                story = script_md or str(workspace.payload.get("latest_input") or text)
-                hints = "；".join(readiness["missing_hints"][:2]) or "角色设定不完整"
-                enriched = (
-                    f"{story.strip()}\n\n"
-                    f"【本轮指令】当前脚本角色设定不清晰（{hints}）。"
-                    "请走全流程补充角色/场景/道具设定，再导出可拍摄终稿；"
-                    "不要只保留单一主角。"
-                )
-                workspace = await self._video_repository.apply_workspace_patch(
-                    owner,
-                    workspace.workspace_id,
-                    {
-                        "latest_input": enriched,
-                        "script_entry_path": "create",
-                        "script_plan_confirmed": False,
-                        "character_plan_required": True,
-                    },
-                    expected_revision=workspace.revision,
-                    now=occurred_at,
-                )
+        intake_digest = thinking_result.as_planner_digest()
+        if entry_path == "create" and script_needs_full_character_plan(
+            _workspace_script_markdown(workspace) or text,
+            workspace=workspace,
+        ):
+            readiness = analyze_script_character_readiness(
+                _workspace_script_markdown(workspace) or text,
+                workspace=workspace,
+            )
+            hints = "；".join(readiness["missing_hints"][:2]) or "角色设定不完整"
+            # 角色完整度只作为 Planner 证据，不改写 latest_input / 确认位。
+            prior_constraints = intake_digest.get("constraints")
+            next_constraints: dict[str, Any] = (
+                dict(prior_constraints) if isinstance(prior_constraints, dict) else {}
+            )
+            next_constraints["character_plan"] = (
+                f"角色设定不清晰（{hints}）；优先走全流程补设定，勿只保留单一主角。"
+            )
+            intake_digest = {
+                **intake_digest,
+                "character_plan_required": True,
+                "character_missing_hints": readiness["missing_hints"][:4],
+                "constraints": next_constraints,
+            }
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch={
+                    "last_intake_thinking": intake_digest,
+                    "script_entry_path": "create",
+                    "character_plan_required": True,
+                    "awaiting_production_fields": False,
+                },
+                now=occurred_at,
+            )
+        else:
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch={
+                    "last_intake_thinking": intake_digest,
+                    "awaiting_production_fields": False,
+                },
+                now=occurred_at,
+            )
         if entry_path == "polish":
+            # 兼容：润色 Skill 仍读 script_pipeline.episode；正式迁移到 import_script 后删除。
             existing_pipeline = workspace.payload.get("script_pipeline")
             pipeline: dict[str, Any] = (
                 dict(existing_pipeline) if isinstance(existing_pipeline, dict) else {}
             )
             pipeline["episode"] = _user_episode_pipeline_item(text)
-            workspace = await self._video_repository.apply_workspace_patch(
-                owner,
-                workspace.workspace_id,
-                {
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch={
                     "script_pipeline": pipeline,
                     "script_entry_path": "polish",
                     "latest_input": text,
                 },
-                expected_revision=workspace.revision,
                 now=occurred_at,
             )
         elif entry_path in ("create", "continue", "inspect"):
             if workspace.payload.get("script_entry_path") != entry_path:
-                workspace = await self._video_repository.apply_workspace_patch(
-                    owner,
-                    workspace.workspace_id,
-                    {"script_entry_path": entry_path},
-                    expected_revision=workspace.revision,
+                workspace = await self._apply_workspace_patch_resilient(
+                    owner=owner,
+                    workspace=workspace,
+                    patch={"script_entry_path": entry_path},
                     now=occurred_at,
                 )
 
@@ -1416,7 +1661,54 @@ class VideoAgentEntrypoint:
             plan_id=plan_id,
             occurred_at=occurred_at,
             entry_path=entry_path,
-            intake_thinking=thinking_result.as_planner_digest(),
+            intake_thinking=intake_digest,
+        )
+        return await self._persist_and_publish_plan(
+            owner=owner,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            workspace=workspace,
+            plan=plan,
+            occurred_at=occurred_at,
+        )
+
+    async def _persist_waiting_for_input_plan(
+        self,
+        *,
+        owner: str,
+        conversation_id: str,
+        turn_id: str,
+        workspace: VideoWorkspace,
+        plan_id: str,
+        occurred_at: datetime,
+        thinking_result: IntakeThinkingResult,
+        public_goal: str | None = None,
+        missing: tuple[str, ...] | None = None,
+    ) -> VideoAgentSubmission:
+        """持久化无 Tool 步的等待补充 Plan，并取消会话内旧等待卡。"""
+
+        await self._video_repository.cancel_waiting_for_input_plans(
+            owner,
+            conversation_id,
+            now=occurred_at,
+            exclude_plan_id=plan_id,
+        )
+        missing_items = missing if missing is not None else thinking_result.missing_requirements
+        goal = (public_goal or thinking_result.user_message or "").strip()
+        if not goal:
+            if missing_items:
+                goal = f"请补充：{'、'.join(missing_items)}"
+            else:
+                goal = "请补充继续创作所需信息"
+        plan = AgentPlan(
+            plan_id=plan_id,
+            workspace_id=workspace.workspace_id,
+            conversation_id=conversation_id,
+            status=AgentPlanStatus.WAITING_FOR_INPUT,
+            public_goal=goal[:2_000],
+            steps=(),
+            created_at=occurred_at,
+            updated_at=occurred_at,
         )
         return await self._persist_and_publish_plan(
             owner=owner,
@@ -1527,7 +1819,10 @@ class VideoAgentEntrypoint:
 
         operation_summaries: list[dict[str, Any]] = []
         try:
-            operations = await self._runtime_repository.list_operations(owner, conversation_id)
+            operations = await asyncio.wait_for(
+                self._runtime_repository.list_operations(owner, conversation_id),
+                timeout=5.0,
+            )
             operation_summaries = summarize_operations(operations)
         except Exception:  # noqa: BLE001 — Operation 读取失败不得阻断规划
             logger.exception("VideoAgent list_operations failed; planning without ops")
@@ -1562,36 +1857,39 @@ class VideoAgentEntrypoint:
             )
         except TimeoutError:
             logger.warning(
-                "VideoAgent planner timed out after %.1fs; falling back to inspect",
+                "VideoAgent planner timed out after %.1fs; using safe fallback",
                 self._planning_timeout_sec,
             )
-            return self._inspect_fallback_plan(
+            return self._planning_failure_fallback_plan(
                 conversation_id=conversation_id,
                 content=content,
                 workspace=workspace,
                 plan_id=plan_id,
                 occurred_at=occurred_at,
-                public_goal="规划超时，先读取项目资料",
+                intake_thinking=intake_thinking,
+                inspect_goal="规划超时，先读取项目资料",
             )
         except VideoAgentPlanningError as exc:
             logger.warning("VideoAgent planner rejected proposal: %s", exc)
-            return self._inspect_fallback_plan(
+            return self._planning_failure_fallback_plan(
                 conversation_id=conversation_id,
                 content=content,
                 workspace=workspace,
                 plan_id=plan_id,
                 occurred_at=occurred_at,
-                public_goal="规划失败，先读取项目资料",
+                intake_thinking=intake_thinking,
+                inspect_goal="规划失败，先读取项目资料",
             )
         except Exception:  # noqa: BLE001
             logger.exception("VideoAgent planner failed; falling back to inspect")
-            return self._inspect_fallback_plan(
+            return self._planning_failure_fallback_plan(
                 conversation_id=conversation_id,
                 content=content,
                 workspace=workspace,
                 plan_id=plan_id,
                 occurred_at=occurred_at,
-                public_goal="规划异常，先读取项目资料",
+                intake_thinking=intake_thinking,
+                inspect_goal="规划异常，先读取项目资料",
             )
 
         # 保证 plan_id 与 Turn 派生一致（幂等回放依赖）。
@@ -1601,6 +1899,124 @@ class VideoAgentEntrypoint:
             )
             plan = plan.model_copy(update={"plan_id": plan_id, "steps": remapped_steps})
         return plan
+
+    def _planning_failure_fallback_plan(
+        self,
+        *,
+        conversation_id: str,
+        content: str,
+        workspace: VideoWorkspace,
+        plan_id: str,
+        occurred_at: datetime,
+        intake_thinking: Mapping[str, Any] | None,
+        inspect_goal: str,
+    ) -> AgentPlan:
+        """Planner 故障时只恢复 Intake 已裁决且无参数的安全单步。"""
+
+        intake = intake_thinking or {}
+        missing = intake.get("missing_requirements")
+        can_import = (
+            (
+                intake.get("target_capability") == "import_script"
+                or looks_like_complete_shooting_script(content)
+            )
+            and intake.get("needs_user_reply") is not True
+            and not missing
+            and _workspace_has_generatable_script(workspace)
+            and not workspace_missing_requirements(workspace.payload)
+        )
+        if can_import:
+            return AgentPlan(
+                plan_id=plan_id,
+                workspace_id=workspace.workspace_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.PLANNING,
+                public_goal="导入完整分镜脚本并结构化",
+                steps=(
+                    AgentPlanStep(
+                        step_id=_stable_id("video_step", plan_id, "1"),
+                        plan_id=plan_id,
+                        sequence=1,
+                        tool_name="import_script",
+                        title="导入脚本",
+                        status=PlanStepStatus.PENDING,
+                    ),
+                ),
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            )
+        can_assets = (
+            (
+                intake.get("target_capability") == "generate_scene_assets"
+                or intake.get("intent") == "continue_images"
+            )
+            and _workspace_has_scene_packages(workspace)
+            and not workspace_has_scene_asset_images(workspace.payload)
+            and intake.get("needs_user_reply") is not True
+        )
+        if can_assets:
+            return AgentPlan(
+                plan_id=plan_id,
+                workspace_id=workspace.workspace_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.PLANNING,
+                public_goal="生成角色、场景与道具参考图",
+                steps=(
+                    AgentPlanStep(
+                        step_id=_stable_id("video_step", plan_id, "1"),
+                        plan_id=plan_id,
+                        sequence=1,
+                        tool_name="generate_scene_assets",
+                        title="生成参考图",
+                        status=PlanStepStatus.PENDING,
+                        confirmation_required=True,
+                        arguments=_default_generate_scene_assets_arguments(),
+                    ),
+                ),
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            )
+        can_prepare = (
+            (
+                intake.get("target_capability") == "prepare_scene_packages"
+                or intake.get("intent") == "continue_assets"
+                or _is_confirm_script_plan(content)
+                or _is_continue_video_generation(content)
+            )
+            and workspace.payload.get("script_plan_confirmed") is True
+            and _workspace_has_generatable_script(workspace)
+            and not _workspace_has_scene_packages(workspace)
+            and not workspace_missing_requirements(workspace.payload)
+            and intake.get("needs_user_reply") is not True
+        )
+        if can_prepare:
+            return AgentPlan(
+                plan_id=plan_id,
+                workspace_id=workspace.workspace_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.PLANNING,
+                public_goal="生成视频场景资产包",
+                steps=(
+                    AgentPlanStep(
+                        step_id=_stable_id("video_step", plan_id, "1"),
+                        plan_id=plan_id,
+                        sequence=1,
+                        tool_name="prepare_scene_packages",
+                        title="生成资产包",
+                        status=PlanStepStatus.PENDING,
+                    ),
+                ),
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            )
+        return self._inspect_fallback_plan(
+            conversation_id=conversation_id,
+            content=content,
+            workspace=workspace,
+            plan_id=plan_id,
+            occurred_at=occurred_at,
+            public_goal=inspect_goal,
+        )
 
     def _inspect_fallback_plan(
         self,

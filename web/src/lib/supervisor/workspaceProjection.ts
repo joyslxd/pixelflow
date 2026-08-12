@@ -454,10 +454,10 @@ export function projectSupervisorSnapshot(
       turnId,
       title: typeof item.title === "string" && item.title.trim()
         ? item.title
-        : "正在分析素材，提炼电商属性并构思方向…",
+        : "思考中",
       subtitle: typeof item.subtitle === "string" && item.subtitle.trim()
         ? item.subtitle
-        : "AI 编剧思考中…",
+        : "",
       text: typeof item.text === "string" ? item.text : "",
       answer: typeof item.answer === "string" ? item.answer : "",
       startedAt: typeof item.startedAt === "string" ? item.startedAt : null,
