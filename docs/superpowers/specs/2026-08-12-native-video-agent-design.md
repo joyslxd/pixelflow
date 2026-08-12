@@ -36,12 +36,12 @@
 - 在对话中展示安全思考摘要、短计划、步骤耗时和结果；
 - 在右侧 Canvas 持续编辑脚本、场景包、参考图、分镜视频和成片。
 
-成功标志不是代码中出现 create_agent()，而是“下一步做什么”只由原生 Agent 根据上下文和 Tool Result 判断，其他组件只负责安全、执行和持久化。
+成功标志不是代码中出现 create_deerflow_agent()，而是“下一步做什么”只由原生 Agent 根据上下文和 Tool Result 判断，其他组件只负责安全、执行和持久化。
 
 ## 3. 架构原则
 
 1. **单一原生 Agent 控制面。** 删除 Intake Agent、JSON Planner、Plan Runner 和前端 Workflow 的决策权。
-2. **模型原生选择 Tool。** Tool Call 由 create_agent() 绑定模型直接生成，不经自定义 JSON Plan 翻译。
+2. **模型原生选择 Tool。** Tool Call 由 DeerFlow 的 create_deerflow_agent() 构造并由底层 create_agent() 绑定模型直接生成，不经自定义 JSON Plan 翻译。
 3. **Registry 只定义能力。** 它管理 Tool、schema 和 mutation 边界，不决定调用顺序。
 4. **Executor 单次执行。** 一次只执行一个 Tool Call，不遍历 Plan。
 5. **Plan 只用于观察。** Plan/Step 记录目标、活动、结果和耗时，不驱动执行。
@@ -56,7 +56,7 @@
 ~~~mermaid
 flowchart LR
   U["自然语言 / 工作台命令"] --> T["Thin Entrypoint"]
-  T --> A["create_video_agent()"]
+  T --> A["create_video_agent() / create_deerflow_agent()"]
   W["VideoWorkspace"] --> C["Context Middleware"]
   O["Operation / Confirmation"] --> C
   H["历史 / 附件"] --> C
@@ -88,23 +88,40 @@ def create_video_agent(
     video_repository,
     runtime_repository,
     skill_catalog,
+    checkpointer,
 ):
-    return create_agent(
+    return create_deerflow_agent(
+        name="pixelflow-video-agent",
         model=model,
         system_prompt=VIDEO_AGENT_SYSTEM_PROMPT,
         tools=build_video_agent_tools(registry),
         middleware=[
+            DanglingToolCallMiddleware(),
+            ToolErrorHandlingMiddleware(),
+            DynamicContextMiddleware(
+                agent_name="pixelflow-video-agent",
+                app_config=app_config,
+            ),
             VideoWorkspaceContextMiddleware(...),
             VideoPlanMiddleware(...),
             VideoToolGatewayMiddleware(...),
             VideoProgressMiddleware(...),
+            LoopDetectionMiddleware(...),
             VideoLoopLimitMiddleware(max_business_tools=3),
+            MemoryMiddleware(
+                agent_name="pixelflow-video-agent",
+                memory_config=app_config.memory,
+            ),
+            ClarificationMiddleware(),
         ],
         state_schema=VideoAgentState,
+        checkpointer=checkpointer,
     )
 ~~~
 
 打开该文件应能直接看到模型、Prompt、Tools、Middleware 和 State 的装配关系。
+
+create_video_agent() 是 PixelFlow 的领域装配入口；它不重复实现 LangGraph Agent loop，而是调用 DeerFlow SDK 级工厂 create_deerflow_agent()。不直接复用配置完整的 make_lead_agent()，因为后者会装配通用 Prompt、Sandbox、文件/Shell/MCP Tool、通用 Todo 和可选 Subagent，超出视频 Agent 的受控能力面。
 
 ### 4.2 保留组件的责任
 
@@ -120,6 +137,30 @@ def create_video_agent(
 | Operation | 保留 | 异步任务和恢复事实 | 编排后续 Tool |
 | 领域实现 | 保留 | 场景包、生图、生视频、合成 | 回调旧 HTTP API |
 | LegacyWorkspace | 保留并拆分 | 对话、编辑和 Canvas | 启动 Job、推导流程 |
+
+### 4.3 DeerFlow 复用边界
+
+| DeerFlow 能力 | 决策 | 使用方式 |
+|---|---|---|
+| create_deerflow_agent | 直接复用 | 作为 Video Agent 的 LangGraph/Agent 构造工厂 |
+| LangGraph Agent loop | 直接复用 | 模型原生 Tool Call、Tool Result 回注和循环终止 |
+| Checkpointer | 直接复用 | 保存消息、图状态、中断点和多轮 Agent 上下文 |
+| 模型工厂 | 直接复用 | 统一创建 DeepSeek 模型、流式配置和 tracing |
+| Streaming Runtime | 直接复用 | 输出模型回答、Tool 生命周期和运行事件 |
+| DanglingToolCallMiddleware | 直接复用 | 修复不完整 Tool Call/ToolMessage 历史 |
+| ToolErrorHandlingMiddleware | 直接复用 | 将 Tool 异常转换为模型可处理的安全 ToolMessage |
+| LoopDetectionMiddleware | 配置复用 | 与 VideoLoopLimitMiddleware 共同阻止重复调用 |
+| ClarificationMiddleware / interrupt | 定制复用 | 用作澄清和暂停底层机制；不能替代业务 Confirmation |
+| DynamicContextMiddleware | 定制复用 | 注入日期与用户 Memory；VideoWorkspace 由视频 Middleware 注入 |
+| MemoryMiddleware | 启用并复用 | 按用户和 pixelflow-video-agent 隔离保存长期偏好 |
+| Summarization | 按上下文长度启用 | 压缩对话历史；压缩前触发 Memory flush |
+| TodoMiddleware | 不直接复用 | 使用符合 AgentPlan/Step 合同的 VideoPlanMiddleware |
+| 通用 Lead Prompt | 不复用 | 使用 VIDEO_AGENT_SYSTEM_PROMPT |
+| Sandbox/File/Bash/MCP Tool | 默认不复用 | 不向视频 Agent 暴露 Registry 之外的执行能力 |
+| task Subagent Tool | P0 不启用 | 后续仅对独立模型分析任务单独设计 |
+| 完整 make_lead_agent() | 不复用 | 它是 DeerFlow 通用产品 Agent，不是领域 Agent SDK |
+
+LangGraph Checkpointer 与 VideoWorkspace/Operation 同时存在但职责不同：Checkpointer 保存 Agent 图和消息状态；VideoWorkspace/Operation 保存资产版本、dirty_scene_ids、Provider job、费用、QC 和交付物等业务事实。两者不能互相替代。
 
 ## 5. Tool 与 Executor 改造
 
@@ -189,10 +230,40 @@ Context Middleware 在每次模型调用前注入：
 - dirty_scene_ids、variants 和 QC；
 - 未完成 Confirmation 和 Operation；
 - 权限、可用能力和适用 Skill 指引。
+- DeerFlow Memory 中与当前用户相关的稳定偏好和已确认长期背景。
 
 删除独立 Intake、IntakeThinkingResult 机器块和 Intake 到 Planner 的中间翻译。
 
 Skill 保留为模型可读的业务指引，不是状态机。P0 不引入 Sub-agent。
+
+### 6.1 Memory 设计
+
+Video Agent 默认启用 DeerFlow MemoryMiddleware 和 DynamicContextMiddleware，并使用固定 agent_name=pixelflow-video-agent，实现“同一用户、同一领域 Agent”隔离。Memory 异步读取与更新，不阻塞当前 Tool 执行。
+
+允许写入 Memory：
+
+- 用户长期稳定的视频偏好，例如常用画幅、语言、内容风格和品牌语气；
+- 用户反复确认的制作习惯，例如偏好先看参考图、默认希望局部重生；
+- 用户明确要求记住的长期信息；
+- 用户对 Agent 判断的明确纠正和强化反馈。
+
+禁止写入 Memory：
+
+- Workspace 当前脚本、分镜正文、素材内容和临时产品信息；
+- dirty_scene_ids、Plan/Step、Confirmation、Quota 和 Operation 状态；
+- Provider job handle、Artifact URL、凭证、Authorization 和内部错误；
+- 未经用户确认的模型推测；
+- 应由 Workspace revision 或业务数据库管理的任何执行事实。
+
+Memory 读取规则：
+
+1. 按 user_id 和 agent_name 隔离，禁止跨租户读取。
+2. 通过 DynamicContextMiddleware 注入受 token 上限约束的摘要，不直接拼接完整历史。
+3. Memory 与当前 Workspace 冲突时，以 Workspace 和本轮明确指令为准。
+4. Memory 只能影响模型偏好判断，不能绕过 Tool schema、确认、额度或 revision。
+5. 用户明确纠正时，异步更新旧记忆；用户必须能够删除单条或清空 Video Agent Memory。
+
+复用 DeerFlow 现有过滤策略，只将用户输入和最终 Assistant 回答送入 Memory 更新队列，排除 Tool Call 和 ToolMessage。实施时需要为视频业务增加敏感字段过滤测试，并确认生产存储后端支持多实例一致性；不能把仅适合本地开发的 memory.json 当作生产唯一存储。
 
 ## 7. Plan 生命周期
 
@@ -416,7 +487,9 @@ Snapshot 恢复事实，事件提供实时体验。前端 reducer 必须幂等�
 
 **业务效果：** 单一 Agent 读取 Workspace、原生选 Tool，结果回到同一模型循环。
 
-- 新建 Agent、Prompt、State、Tool adapter 和 Middleware；
+- 基于 create_deerflow_agent 新建 Agent、Prompt、State、Tool adapter 和 Middleware；
+- 接入 DeerFlow Checkpointer、模型工厂、Tool 错误处理和 Dangling Tool Call 修复；
+- 启用按 user_id 和 pixelflow-video-agent 隔离的 Memory 读取与异步更新；
 - Registry 映射 StructuredTool；
 - Executor 提供 execute_tool_call；
 - 重写 Thin Entrypoint 和 Gateway 装配；
@@ -474,6 +547,8 @@ Snapshot 恢复事实，事件提供实时体验。前端 reducer 必须幂等�
 6. 确认和额度无法由 Prompt 绕过。
 7. 模型失败不会进入旧 Planner 或旧 HTTP Job。
 8. 历史升级失败时不部分写入。
+9. Memory 按用户和 Agent 隔离，不写入 Tool Call、凭证或 Workspace 执行事实。
+10. Memory 与当前 Workspace 冲突时，模型上下文明确以 Workspace 和本轮指令为准。
 
 ### 15.2 前端
 
@@ -507,6 +582,19 @@ backend/pixelflow/video_agent/tool_adapter.py
 backend/pixelflow/video_agent/middleware/
 ~~~
 
+### 直接复用的 DeerFlow 模块
+
+~~~text
+backend/packages/harness/deerflow/agents/factory.py
+backend/packages/harness/deerflow/agents/middlewares/memory_middleware.py
+backend/packages/harness/deerflow/agents/middlewares/dynamic_context_middleware.py
+backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py
+backend/packages/harness/deerflow/agents/middlewares/dangling_tool_call_middleware.py
+backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py
+backend/packages/harness/deerflow/runtime/checkpointer/
+backend/packages/harness/deerflow/models/
+~~~
+
 ### 后端主要修改
 
 ~~~text
@@ -538,7 +626,7 @@ web/src/lib/supervisor/
 
 以下条件全部满足才算完成：
 
-1. 存在唯一易定位的 create_video_agent()。
+1. 存在唯一易定位的 create_video_agent()，且内部复用 create_deerflow_agent()。
 2. Tool Call 由模型原生产生，不经 JSON Planner。
 3. Tool Result 回到同一 Agent 循环。
 4. Registry、Executor、Plan、Operation 没有隐式 Workflow。
@@ -547,3 +635,4 @@ web/src/lib/supervisor/
 7. 对话稳定展示思考摘要、短计划、步骤、耗时和结果卡。
 8. Canvas 保留场景包和单分镜编辑等核心体验。
 9. Golden Journey、后端合同、前端状态和桌面/移动视觉验收全部通过。
+10. Memory 默认启用、可删除、按租户隔离，并且不成为第二个 Workspace。
