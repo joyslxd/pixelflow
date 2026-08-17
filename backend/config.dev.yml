@@ -174,15 +174,15 @@ deerflow:
 # LLM 模型配置；DeerFlow Agent 使用。这里直接写明文值，不再依赖 .env。
 models:
   # 默认聊天模型；代码未显式指定 model_name 时会使用列表中的第一个模型。
-  - name: "deepseek-v4-pro"  # 用途：命名默认模型配置；影响：未指定模型时优先选择该项。
+  - name: "gemini-3.5-flash"  # 用途：命名默认模型配置；影响：未指定模型时优先选择该项。
     # LangChain 模型 Provider；必须用可解析 reasoning_content 的补丁类，标准 ChatOpenAI 会丢掉思维链。
     use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"  # 用途：选择模型适配器；影响：流式保留 DeepSeek reasoning_content。
     # 实际请求给模型供应商的模型名称；需要和供应商控制台支持的名称一致。
-    model: "deepseek-v4-pro-202606"  # 用途：指定供应商模型名；影响：实际推理请求使用该模型。
+    model: "gemini-3.5-flash"  # 用途：指定供应商模型名；影响：实际推理请求使用该模型。
     # 模型 API Key；开发环境可直接写明文。
-    api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"  # 用途：鉴权模型供应商；影响：错误值会拒绝推理；敏感值由模型管理员提供。
+    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT" #"sk-168bc06b8049ecaf15e49519a02ac34f"  # 用途：鉴权模型供应商；影响：错误值会拒绝推理；敏感值由模型管理员提供。
     # 模型 API Base；这里使用 AIRouter 的 OpenAI 兼容接口地址。
-    base_url: "https://chaomengai.com/v1"  # 用途：配置模型 API 地址；影响：推理请求发送到该兼容端点。
+    base_url: "https://yunwu.site/v1"  #"https://chaomengai.com/v1"  # 用途：配置模型 API 地址；影响：推理请求发送到该兼容端点。
     # 用途：声明模型支持思维链；布尔值，true 时 create_chat_model(thinking_enabled=True) 才注入思考参数。
     # 修改后需重启；影响：入场思考流能否拿到 reasoning_content；回滚改 false 并去掉 when_thinking_enabled。
     supports_thinking: true
@@ -220,13 +220,15 @@ models:
       # 修改后需重启；不改变数值但用于审计，回滚恢复本次说明。
       # 影响：空值会被视为未验证并拒绝实际流程启动；不得填写 token、密钥或账号。
       source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"  # 用途：记录能力证据；影响：空值会拒绝启动。
-  # 场景包结构生成用 Flash；比 Pro 更快，供 prepare-scene-packages 结构阶段。
+  # 场景包结构生成用 Flash 槽位；配置名须唯一（context_profile 按 name 去重）。
+  # 当前供应商模型仍走 gemini-3.5-flash；代码里 create_chat_model("deepseek-v4-flash") 仍命中本项。
   - name: "deepseek-v4-flash"
     # 用途：Flash 同样走 reasoning 补丁类，避免场景包等路径丢掉思维链字段。
     use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"
-    model: "deepseek-v4-flash-202605"
-    api_key: "sk-168bc06b8049ecaf15e49519a02ac34f"
-    base_url: "https://chaomengai.com/v1"
+    model: "gemini-3.5-flash"
+    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT" #"sk-168bc06b8049ecaf15e49519a02ac34f"  # 用途：鉴权模型供应商；影响：错误值会拒绝推理；敏感值由模型管理员提供。
+    # 模型 API Base；这里使用 AIRouter 的 OpenAI 兼容接口地址。
+    base_url: "https://yunwu.site/v1"  #"https://chaomengai.com/v1"  # 用途：配置模型 API 地址；影响：推理请求发送到该兼容端点。
     # 用途：声明 Flash 支持思维链；true 时才允许 thinking_enabled。
     supports_thinking: true
     # 用途：声明 Flash 支持 reasoning_effort。

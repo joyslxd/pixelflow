@@ -163,6 +163,48 @@ async def test_event_sequence_and_cursor_query_are_contiguous_and_owner_scoped(
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
+async def test_create_event_heals_stale_sequence_from_concurrent_writers(
+    kind: RepositoryKind,
+) -> None:
+    """锁外预读的 sequence 过期时，create_event 锁内自愈，避免 tool/确认事件全丢。"""
+
+    async with _repository(kind) as repository:
+        await repository.create_event(OWNER_A, _event("event-1", 1))
+        await repository.create_event(OWNER_A, _event("event-2", 2))
+        healed = await repository.create_event(
+            OWNER_A,
+            _event("event-stale", 2, cursor="cursor-stale"),
+        )
+        assert healed.sequence == 3
+        events = await repository.list_events(OWNER_A, CONVERSATION_ID)
+        assert [item.sequence for item in events] == [1, 2, 3]
+        assert events[-1].event_id == "event-stale"
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_concurrent_create_event_does_not_drop_on_sequence_race(
+    kind: RepositoryKind,
+) -> None:
+    async with _repository(kind) as repository:
+        await repository.create_event(OWNER_A, _event("event-seed", 1))
+
+        async def _append(index: int) -> AgentEvent:
+            # 故意全部声称 sequence=2，模拟并发 TOCTOU。
+            return await repository.create_event(
+                OWNER_A,
+                _event(f"event-race-{index}", 2, cursor=f"cursor-race-{index}"),
+            )
+
+        results = await asyncio.gather(*[_append(index) for index in range(5)])
+        sequences = sorted(item.sequence for item in results)
+        assert sequences == [2, 3, 4, 5, 6]
+        listed = await repository.list_events(OWNER_A, CONVERSATION_ID)
+        assert [item.sequence for item in listed] == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
 async def test_event_cursor_query_rejects_invalid_limit(
     kind: RepositoryKind,
 ) -> None:
@@ -373,9 +415,11 @@ async def test_event_claim_and_completion_hide_other_owner(
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
-async def test_concurrent_event_append_keeps_one_contiguous_sequence(
+async def test_concurrent_event_append_heals_stale_sequence_contiguously(
     kind: RepositoryKind,
 ) -> None:
+    """两路并发都声称 sequence=2 时，锁内自愈为 2、3，不得整条丢掉。"""
+
     async with _repository(kind) as repository:
         first = _event("event-1", 1)
         await repository.create_event(OWNER_A, first)
@@ -402,12 +446,12 @@ async def test_concurrent_event_append_keeps_one_contiguous_sequence(
             for result in results
             if isinstance(result, AgentRuntimeRecordConflictError)
         ]
-        assert len(created) == 1
-        assert len(conflicts) == 1
-        assert await repository.list_events(
-            OWNER_A,
-            CONVERSATION_ID,
-        ) == [first, created[0]]
+        assert len(created) == 2
+        assert conflicts == []
+        assert sorted(item.sequence for item in created) == [2, 3]
+        listed = await repository.list_events(OWNER_A, CONVERSATION_ID)
+        assert [item.sequence for item in listed] == [1, 2, 3]
+        assert listed[0] == first
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

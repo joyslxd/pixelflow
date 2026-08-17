@@ -364,27 +364,43 @@ export function resolveGeneratableScriptMarkdown(input: {
 }
 
 /**
- * 资产包专用正文：终稿 + 设定集阶段，避免只传 episode/export 时丢掉角色/道具。
+ * 资产包专用正文：脚本预览分阶段产物（characters + outline）+ 终稿。
+ * 避免只传 episode/export 时丢掉角色/道具/分镜提示词。
  */
 export function buildAssetPackagePlanMarkdown(input: ScriptReadinessInput): string {
   const base = resolveGeneratableScriptMarkdown(input);
   const stages = input.stages ?? [];
   const characters = stages.find((stage) => stage.stageId === "characters")?.content?.trim() ?? "";
+  const outline = stages.find((stage) => stage.stageId === "outline")?.content?.trim() ?? "";
   const exportStage = stages.find((stage) => stage.stageId === "export")?.content?.trim() ?? "";
-  const primary = exportStage || base;
+  const episode = stages.find((stage) => stage.stageId === "episode")?.content?.trim() ?? "";
+  const primary = exportStage || episode || base;
   const needsSettings = !/#{1,3}\s*[^\n]*角色设定/u.test(primary)
     || !/#{1,3}\s*[^\n]*场景设定/u.test(primary)
     || !/#{1,3}\s*[^\n]*道具/u.test(primary);
-  if (characters && needsSettings) {
-    return `${characters}\n\n---\n\n${primary}`.trim();
+  const hasShotSection = /#{1,3}\s*[^\n]*(?:分镜提示词|镜头列表|分镜大纲)/u.test(primary);
+  const parts: string[] = [];
+  if (
+    characters
+    && (
+      needsSettings
+      || (primary && !primary.includes(characters.slice(0, Math.min(60, characters.length))))
+    )
+  ) {
+    parts.push(characters);
   }
-  if (characters && primary && !primary.includes(characters.slice(0, Math.min(60, characters.length)))) {
-    // 终稿有设定标题但可能很薄：仍附上 characters 阶段全文，便于后端确定性抽取
-    if ((primary.match(/#{1,3}\s*[^\n]*角色设定/gu) || []).length > 0) {
-      return `${characters}\n\n---\n\n${primary}`.trim();
-    }
+  if (
+    outline
+    && (
+      !hasShotSection
+      || (primary && !primary.includes(outline.slice(0, Math.min(60, outline.length))))
+    )
+  ) {
+    parts.push(outline);
   }
-  return primary || base || characters;
+  if (primary) parts.push(primary);
+  if (parts.length > 0) return parts.join("\n\n---\n\n").trim();
+  return primary || base || characters || outline;
 }
 
 export function workspaceHasGeneratableScript(input: {
@@ -430,8 +446,9 @@ export function buildSilentImportScriptNotice(
   ].join("\n");
 }
 
-/** 对话框里「已更新/已导入脚本版本 N」可点开右侧脚本预览。 */
-export const SCRIPT_VERSION_PREVIEW_LINK_RE = /已(?:更新|导入)脚本版本\s*\d+/g;
+/** 对话框里可点开右侧脚本预览的文案锚点。 */
+export const SCRIPT_VERSION_PREVIEW_LINK_RE =
+  /已(?:更新|导入)脚本版本\s*\d+|在右侧查看脚本/g;
 
 export type ScriptVersionPreviewPart =
   | { kind: "text"; text: string }

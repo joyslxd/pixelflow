@@ -1002,7 +1002,6 @@ class MemoryAgentRuntimeRepository:
     async def create_event(self, user_id: str, record: AgentEvent) -> AgentEvent:
         owner = _require_text("user_id", user_id, 64)
         normalized = _normalize_event(record)
-        sequence_key = (normalized.conversation_id, normalized.sequence)
         cursor_key = (normalized.conversation_id, normalized.cursor)
         async with self._event_write_lock:
             authority_owners = self._conversation_authority_owners(
@@ -1016,8 +1015,13 @@ class MemoryAgentRuntimeRepository:
             if any(record_owner != owner for record_owner, _ in conversation_records):
                 raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
             expected_sequence = 1 if not conversation_records else max(existing.sequence for _, existing in conversation_records) + 1
-            if normalized.sequence != expected_sequence:
+            if normalized.sequence > expected_sequence:
+                # 跳号禁止：只允许连续追加。
                 raise AgentRuntimeRecordConflictError("AgentEvent sequence 必须连续递增")
+            if normalized.sequence < expected_sequence:
+                # 调用方在锁外读到的 next sequence 已过期（并发 append）；锁内改写为期望值。
+                normalized = normalized.model_copy(update={"sequence": expected_sequence})
+            sequence_key = (normalized.conversation_id, normalized.sequence)
             if normalized.event_id in self._event_ids or sequence_key in self._event_sequence_keys or cursor_key in self._event_cursor_keys:
                 raise AgentRuntimeRecordConflictError("AgentEvent 记录已存在")
             owner_key = (owner, normalized.event_id)
@@ -2819,8 +2823,14 @@ class SQLAgentRuntimeRepository:
                     if last_row is not None and last_row.user_id != owner:
                         raise AgentRuntimeRecordConflictError("AgentEvent conversation 已被其他所有者占用")
                     expected_sequence = 1 if last_row is None else last_row.sequence + 1
-                    if normalized.sequence != expected_sequence:
+                    if normalized.sequence > expected_sequence:
+                        # 跳号禁止：只允许连续追加。
                         raise AgentRuntimeRecordConflictError("AgentEvent sequence 必须连续递增")
+                    if normalized.sequence < expected_sequence:
+                        # 锁外预读的 sequence 过期（工具进度 / 确认 / Operation 回写并发）；锁内自愈。
+                        normalized = normalized.model_copy(
+                            update={"sequence": expected_sequence}
+                        )
                     session.add(
                         PixelFlowAgentEventRow(
                             schema_version=normalized.schema_version,

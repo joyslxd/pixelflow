@@ -94,6 +94,33 @@ function compileVideoAgentModules() {
   ]);
 }
 
+function compileNativeVideoAgentStateModules() {
+  run(process.execPath, [
+    tscEntry,
+    "src/features/native-video-agent/state/index.ts",
+    "src/features/native-video-agent/state/contracts.ts",
+    "src/features/native-video-agent/state/reducer.ts",
+    "src/features/native-video-agent/state/selectors.ts",
+    "src/lib/supervisor/contracts.ts",
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--rootDir",
+    "src",
+    "--outDir",
+    path.join(temporaryRoot, "native-video-agent"),
+    "--skipLibCheck",
+    "--strict",
+  ]);
+  writeFileSync(
+    path.join(temporaryRoot, "native-video-agent", "package.json"),
+    JSON.stringify({ type: "module" }),
+  );
+}
+
 function checkContractTypes() {
   run(process.execPath, [
     tscEntry,
@@ -195,6 +222,14 @@ function compileHookModule() {
     "src/lib/supervisor/contracts.ts",
     "src/lib/supervisor/events.ts",
     "src/lib/supervisor/reducer.ts",
+    "src/lib/supervisor/workspaceProjection.ts",
+    "src/lib/supervisor/runtimeNotice.ts",
+    "src/features/native-video-agent/state/contracts.ts",
+    "src/features/native-video-agent/state/reducer.ts",
+    "src/features/native-video-agent/state/selectors.ts",
+    "src/features/video-agent/state/contracts.ts",
+    "src/features/video-agent/state/reducer.ts",
+    "src/features/video-agent/state/workspace.ts",
     "--target",
     "ES2022",
     "--module",
@@ -242,6 +277,7 @@ try {
       "src/lib/planMessageRecovery.ts",
       "src/lib/reviewWindow.ts",
       "src/lib/sceneAssetFailures.ts",
+      "src/lib/sceneVideoFailures.ts",
       "src/lib/sceneAssetModelSelection.ts",
       "src/lib/sceneMentions.ts",
       "src/lib/scenePackageAssetUi.ts",
@@ -264,6 +300,7 @@ try {
     compileApiModule();
     compileHookModule();
     compileVideoAgentModules();
+    compileNativeVideoAgentStateModules();
   }
 
   const testFiles = contractOnly
@@ -289,6 +326,7 @@ try {
       PLAN_MESSAGE_RECOVERY_TEST_MODULE: standaloneModuleUrl("planMessageRecovery.js"),
       REVIEW_WINDOW_TEST_MODULE: standaloneModuleUrl("reviewWindow.js"),
       SCENE_ASSET_FAILURES_TEST_MODULE: path.join(moduleDirectory, "lib/sceneAssetFailures.js"),
+      SCENE_VIDEO_FAILURES_TEST_MODULE: path.join(moduleDirectory, "lib/sceneVideoFailures.js"),
       SCENE_ASSET_MODEL_SELECTION_TEST_MODULE: standaloneModuleUrl("sceneAssetModelSelection.js"),
       SCENE_MENTIONS_TEST_MODULE: standaloneModuleUrl("sceneMentions.js"),
       SCENE_PACKAGE_ASSET_UI_TEST_MODULE: standaloneModuleUrl("scenePackageAssetUi.js"),
@@ -320,6 +358,10 @@ try {
       TIME_TEST_MODULE: standaloneModuleUrl("time.js"),
       VIDEO_AGENT_TIMELINE_REDUCER_TEST_MODULE: moduleUrl(videoAgentModuleDirectory, "reducer.js"),
       VIDEO_AGENT_WORKSPACE_PROJECTION_TEST_MODULE: moduleUrl(videoAgentModuleDirectory, "workspace.js"),
+      NATIVE_VIDEO_AGENT_STATE_TEST_MODULE: moduleUrl(
+        path.join(temporaryRoot, "native-video-agent"),
+        "features/native-video-agent/state/index.js",
+      ),
       VIDEO_REQUIREMENT_CONFIG_TEST_MODULE: standaloneModuleUrl("videoRequirementConfig.js"),
       WORKFLOW_TASK_BOARD_TEST_MODULE: standaloneModuleUrl("workflowTaskBoard.js"),
     },

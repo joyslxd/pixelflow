@@ -49,6 +49,10 @@ from .script_skill_pipeline import (
     RunScriptSkillStageTool,
     ScriptSkillStageInput,
 )
+from .seedance_polish import (
+    PolishSeedanceShotPromptsInput,
+    PolishSeedanceShotPromptsTool,
+)
 
 __all__ = [
     "AnalyzeReferenceVideoTool",
@@ -67,6 +71,8 @@ __all__ = [
     "InspectSceneTool",
     "PatchSceneInput",
     "PatchSceneTool",
+    "PolishSeedanceShotPromptsInput",
+    "PolishSeedanceShotPromptsTool",
     "PrepareScenePackagesInput",
     "PrepareScenePackagesTool",
     "ReplaceProjectAssetsInput",

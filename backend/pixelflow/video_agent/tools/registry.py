@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -11,6 +12,8 @@ from pydantic import BaseModel, ValidationError
 
 from pixelflow.video_agent.contracts import VideoToolResult, VideoWorkspace
 from pixelflow.video_agent.credentials import TransientVideoAgentCredential
+
+logger = logging.getLogger(__name__)
 
 
 class VideoToolCostLevel(StrEnum):
@@ -152,9 +155,11 @@ class VideoToolRegistry:
                 public_summary="工具参数无效，请修正后重试",
             )
         try:
+            # 必须 exclude_unset：否则 Optional 字段被 dump 成 null，工具内二次校验会误报
+            # 「镜头补丁不能把字段写为 null」→「镜头补丁参数无效」。
             result = await tool.execute(
                 context,
-                validated.model_dump(mode="json"),
+                validated.model_dump(mode="json", exclude_unset=True),
             )
         except VideoToolValidationError as exc:
             # 业务校验文案已面向用户（如缺画幅），不要吞成笼统「工具参数无效」。
@@ -167,15 +172,52 @@ class VideoToolRegistry:
                     else "工具参数无效，请修正后重试"
                 ),
             )
-        except VideoToolExecutionError:
-            raise
+        except VideoToolExecutionError as exc:
+            # 业务侧已写好的中文失败原因可公开；其余只带工具名，避免泄漏供应商细节。
+            detail = str(exc).strip()
+            logger.warning(
+                "video tool business failure name=%s error_type=%s detail_prefix=%s",
+                tool.spec.name,
+                type(exc).__name__,
+                (detail[:80] if detail else ""),
+            )
+            if detail and (
+                detail.startswith(
+                    (
+                        "场景包",
+                        "参考图",
+                        "generate_scene_assets",
+                        "prepare_scene_packages",
+                        "视频交付",
+                        "视频合并",
+                        "剪映交付",
+                    )
+                )
+                or "不是可生成实体" in detail
+                or "缺少计划身份" in detail
+                or "缺少临时授权" in detail
+                or "尚未装配" in detail
+                or "校验失败" in detail
+            ):
+                summary = detail[:280]
+            else:
+                summary = f"{tool.spec.name} 执行失败，请稍后重试"
+            return VideoToolResult(
+                tool_name=tool.spec.name,
+                public_summary=summary,
+            )
         allowed_roots = {
             mutation.split(".", maxsplit=1)[0]
             for mutation in tool.spec.workspace_mutations
         }
-        if (
-            result.tool_name != tool.spec.name
-            or not set(result.workspace_patch).issubset(allowed_roots)
-        ):
+        patch_roots = set(result.workspace_patch)
+        if result.tool_name != tool.spec.name or not patch_roots.issubset(allowed_roots):
+            undeclared = sorted(patch_roots - allowed_roots)
+            # 用途：根键白名单失败时留下可诊断线索，不把完整 patch 打进公开文案。
+            logger.warning(
+                "工具结果根键校验失败 tool=%s undeclared=%s",
+                tool.spec.name,
+                undeclared,
+            )
             raise VideoToolExecutionError("工具结果无效，请稍后重试")
         return result

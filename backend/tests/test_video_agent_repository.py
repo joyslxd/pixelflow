@@ -287,6 +287,90 @@ async def test_workspace_patch_uses_revision_and_replays_same_snapshot(
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])
 @pytest.mark.asyncio
+async def test_apply_workspace_patch_merges_scenes_by_id_for_concurrent_generate(
+    kind: RepositoryKind,
+) -> None:
+    """并发生成：后到的单镜补丁不得整表覆盖另一镜已回填的 video_url。"""
+
+    async with repository(kind) as (store, _):
+        created = await store.create_workspace(
+            "user-a",
+            workspace().model_copy(
+                update={
+                    "payload": {
+                        "scenes": [
+                            {
+                                "scene_id": "scene-5",
+                                "scene_index": 5,
+                                "edit_status": "重新生成完成",
+                                "video_url": "https://cdn.example.invalid/5.mp4",
+                                "variants": [
+                                    {
+                                        "variant_id": "v5",
+                                        "artifact_ref": "artifact:5",
+                                        "video_url": "https://cdn.example.invalid/5.mp4",
+                                        "selected": True,
+                                    }
+                                ],
+                            },
+                            {
+                                "scene_id": "scene-6",
+                                "scene_index": 6,
+                                "edit_status": "重新生成中",
+                                "generation_jobs": [{"job_id": "j6", "status": "polling"}],
+                                "variants": [],
+                            },
+                        ],
+                        "scene_packages": [
+                            {"scene_id": "scene-5", "scene_index": 5},
+                            {"scene_id": "scene-6", "scene_index": 6},
+                        ],
+                    }
+                }
+            ),
+        )
+        updated = await store.apply_workspace_patch(
+            "user-a",
+            created.workspace_id,
+            {
+                "scenes": [
+                    {
+                        "scene_id": "scene-6",
+                        "scene_index": 6,
+                        "edit_status": "重新生成完成",
+                        "video_url": "https://cdn.example.invalid/6.mp4",
+                        "variants": [
+                            {
+                                "variant_id": "v6",
+                                "artifact_ref": "artifact:6",
+                                "video_url": "https://cdn.example.invalid/6.mp4",
+                                "selected": True,
+                            }
+                        ],
+                    }
+                ],
+                "scene_packages": [
+                    {
+                        "scene_id": "scene-6",
+                        "scene_index": 6,
+                        "edit_status": "重新生成完成",
+                        "video_url": "https://cdn.example.invalid/6.mp4",
+                    }
+                ],
+            },
+            expected_revision=created.revision,
+            now=T3,
+        )
+        scenes = updated.payload["scenes"]
+        assert isinstance(scenes, list)
+        assert len(scenes) == 2
+        by_id = {item["scene_id"]: item for item in scenes if isinstance(item, dict)}
+        assert by_id["scene-5"]["video_url"].endswith("5.mp4")
+        assert by_id["scene-6"]["video_url"].endswith("6.mp4")
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
 async def test_load_conversation_state_returns_latest_plan_with_ordered_steps(
     kind: RepositoryKind,
 ) -> None:
@@ -341,6 +425,63 @@ async def test_load_conversation_state_returns_latest_plan_with_ordered_steps(
         assert [item.plan_id for item in history] == ["plan-1", "plan-2"]
         assert [step.step_id for step in history[1].steps] == ["step-2a", "step-2b"]
         assert await store.list_conversation_plans("user-b", "conversation-1") == []
+
+
+@pytest.mark.parametrize("kind", ["memory", "sql"])
+@pytest.mark.asyncio
+async def test_load_conversation_state_heals_dual_workspace_orphans(
+    kind: RepositoryKind,
+) -> None:
+    """历史升级与 Entrypoint 双写时，Snapshot 应择权威并删除无 Plan 孤儿。"""
+
+    from pixelflow.video_agent.workspace.ids import video_workspace_id_for_conversation
+
+    conversation_id = "conversation-dual-ws"
+    preferred_id = video_workspace_id_for_conversation(conversation_id)
+    async with repository(kind) as (store, _):
+        await store.create_workspace(
+            "user-a",
+            VideoWorkspace(
+                workspace_id="b7a44e5b-dead-beef-0000-orphanlegacy0001",
+                conversation_id=conversation_id,
+                payload={"legacy_upgrade": {"from": "frontend_v2"}},
+                created_at=T0,
+                updated_at=T0,
+            ),
+        )
+        await store.create_workspace(
+            "user-a",
+            VideoWorkspace(
+                workspace_id=preferred_id,
+                conversation_id=conversation_id,
+                payload={"latest_input": "录入脚本", "native_agent": True},
+                created_at=T3,
+                updated_at=T3,
+            ),
+        )
+        await store.save_plan(
+            "user-a",
+            AgentPlan(
+                plan_id="plan-dual-1",
+                workspace_id=preferred_id,
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.RUNNING,
+                public_goal="处理视频请求",
+                created_at=T3,
+                updated_at=T3,
+            ),
+            [],
+        )
+
+        state = await store.load_conversation_state("user-a", conversation_id)
+        assert state is not None
+        loaded_workspace, loaded_plan = state
+        assert loaded_workspace.workspace_id == preferred_id
+        assert loaded_plan is not None and loaded_plan.plan_id == "plan-dual-1"
+        assert await store.get_workspace(
+            "user-a",
+            "b7a44e5b-dead-beef-0000-orphanlegacy0001",
+        ) is None
 
 
 @pytest.mark.parametrize("kind", ["memory", "sql"])

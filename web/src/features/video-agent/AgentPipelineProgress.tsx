@@ -1,10 +1,14 @@
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   CircleDashed,
   CircleX,
   LoaderCircle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+
+export { resolveNativeSceneVideoBatchTotal } from "@/features/video-agent/sceneVideoBatchTotal";
 
 export type AgentPipelineStepStatus = "pending" | "running" | "completed" | "failed";
 
@@ -33,6 +37,8 @@ interface AgentPipelineProgressProps {
   subtitle?: string;
   steps: AgentPipelineProgressStep[];
   now?: number;
+  /** 默认收起为底栏一行；点击标题区展开步骤。 */
+  defaultCollapsed?: boolean;
 }
 
 function StatusIcon({ status }: { status: AgentPipelineStepStatus }) {
@@ -109,13 +115,25 @@ function stampStepTransition(
   };
 }
 
+function collapsedHint(steps: AgentPipelineProgressStep[]): string {
+  const failed = steps.find((step) => step.status === "failed");
+  if (failed) return failed.detail || `${failed.title}失败`;
+  const running = steps.find((step) => step.status === "running");
+  if (running) return running.detail || `${running.title}进行中`;
+  const pending = steps.find((step) => step.status === "pending");
+  if (pending) return `下一步：${pending.title}`;
+  return "流程已完成，点击展开查看";
+}
+
 export function AgentPipelineProgress({
   title,
   subtitle,
   steps,
   now: nowProp,
+  defaultCollapsed = true,
 }: AgentPipelineProgressProps) {
   const [now, setNow] = useState(nowProp ?? Date.now());
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   useEffect(() => {
     if (nowProp != null) {
       setNow(nowProp);
@@ -127,52 +145,72 @@ export function AgentPipelineProgress({
   }, [nowProp, steps]);
   if (steps.length === 0) return null;
   const completedCount = steps.filter((step) => step.status === "completed").length;
+  const hint = collapsedHint(steps);
   return (
     <section
       aria-label={title}
-      className="mr-auto w-full max-w-[720px] rounded-2xl border border-slate-200 bg-[#fbfcfd] p-3 shadow-sm"
+      className="mr-auto w-full max-w-[720px] rounded-2xl border border-slate-200 bg-[#fbfcfd] shadow-sm"
     >
-      <header className="mb-3 flex flex-wrap items-center gap-2 border-b border-slate-100 pb-3">
-        <p className="text-[13px] font-semibold text-slate-900">{title}</p>
-        {subtitle ? (
-          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">
-            {subtitle}
-          </span>
-        ) : null}
-        <span className="text-[11px] text-slate-400">
-          已完成 {completedCount}/{steps.length}
-        </span>
-      </header>
-      <ol className="space-y-2">
-        {steps.map((step, index) => {
-          const durationLabel = displayedStepDuration(step, now);
-          return (
-            <li key={step.id}>
-              <article className={`rounded-xl border px-3 py-2.5 ${stepTone(step.status)}`}>
-                <div className="flex items-start gap-2">
-                  <StatusIcon status={step.status} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[13px] font-medium text-slate-800">
-                        {index + 1}. {step.title}
-                      </span>
-                      <span className="text-[11px] text-slate-500">{statusLabel[step.status]}</span>
-                      {durationLabel ? (
-                        <span className="text-[11px] text-slate-400">
-                          {step.status === "running" ? `已用时 ${durationLabel}` : `耗时 ${durationLabel}`}
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        className="flex w-full items-start gap-2 px-3 py-2.5 text-left"
+        onClick={() => setCollapsed((value) => !value)}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-[13px] font-semibold text-slate-900">{title}</p>
+            {subtitle ? (
+              <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">
+                {subtitle}
+              </span>
+            ) : null}
+            <span className="text-[11px] text-slate-400">
+              已完成 {completedCount}/{steps.length}
+            </span>
+          </div>
+          {collapsed ? (
+            <p className="mt-1 truncate text-[12px] leading-5 text-slate-600">{hint}</p>
+          ) : null}
+        </div>
+        {collapsed ? (
+          <ChevronDown className="mt-0.5 size-4 shrink-0 text-slate-400" aria-hidden />
+        ) : (
+          <ChevronUp className="mt-0.5 size-4 shrink-0 text-slate-400" aria-hidden />
+        )}
+      </button>
+      {!collapsed ? (
+        <ol className="space-y-2 border-t border-slate-100 px-3 pb-3 pt-3">
+          {steps.map((step, index) => {
+            const durationLabel = displayedStepDuration(step, now);
+            return (
+              <li key={step.id}>
+                <article className={`rounded-xl border px-3 py-2.5 ${stepTone(step.status)}`}>
+                  <div className="flex items-start gap-2">
+                    <StatusIcon status={step.status} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[13px] font-medium text-slate-800">
+                          {index + 1}. {step.title}
                         </span>
+                        <span className="text-[11px] text-slate-500">{statusLabel[step.status]}</span>
+                        {durationLabel ? (
+                          <span className="text-[11px] text-slate-400">
+                            {step.status === "running" ? `已用时 ${durationLabel}` : `耗时 ${durationLabel}`}
+                          </span>
+                        ) : null}
+                      </div>
+                      {step.detail ? (
+                        <p className="mt-1 text-[12px] leading-5 text-slate-600">{step.detail}</p>
                       ) : null}
                     </div>
-                    {step.detail ? (
-                      <p className="mt-1 text-[12px] leading-5 text-slate-600">{step.detail}</p>
-                    ) : null}
                   </div>
-                </div>
-              </article>
-            </li>
-          );
-        })}
-      </ol>
+                </article>
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
     </section>
   );
 }
@@ -228,12 +266,13 @@ export function applyAssetPackageJobStage(
         normalized === "generate_scene_assets"
         || normalized === "awaiting_image_model"
         || normalized === "completed"
+        || normalized === "generate_scene_assets_failed"
       ) {
         next = {
           ...step,
           status: "completed",
           detail: normalized === "awaiting_image_model"
-            ? "场景包结构已生成，请选择生图模型"
+            ? "场景包已生成，请选择生图模型"
             : "场景包结构已生成，可打开卡片查看详情",
         };
       } else {
@@ -246,6 +285,12 @@ export function applyAssetPackageJobStage(
     } else if (step.id === "assets") {
       if (normalized === "completed") {
         next = { ...step, status: "completed", detail: step.detail || "参考图已生成" };
+      } else if (normalized === "generate_scene_assets_failed") {
+        next = {
+          ...step,
+          status: "failed",
+          detail: "generate_scene_assets · 参考图生成失败，请检查场景包资产后重试",
+        };
       } else if (normalized === "generate_scene_assets") {
         next = {
           ...step,
@@ -258,7 +303,7 @@ export function applyAssetPackageJobStage(
         next = {
           ...step,
           status: "pending",
-          detail: "请选择生图模型（image-2 / Seedream 5.0）后再生成参考图",
+          detail: "请先选择生图模型，确认后再生成参考图",
         };
       } else {
         next = { ...step, status: "pending" };
@@ -344,6 +389,63 @@ export function failAssetPackageProgressSteps(
       ...step,
       status: "failed",
       detail,
+    };
+    return stampStepTransition(previousById.get(step.id), next, nowIso);
+  });
+}
+
+export interface SceneVideoGenerationProgress {
+  completed: number;
+  total: number;
+  scene_id?: string | null;
+  scene_index?: number | null;
+  ok?: boolean | null;
+}
+
+/** 分镜视频生成进度板（确认并生成后替换「视频资产包」进度）。 */
+export function createSceneVideoProgressSteps(
+  total: number,
+  nowIso = new Date().toISOString(),
+): AgentPipelineProgressStep[] {
+  const safeTotal = Number.isFinite(total) && total > 0 ? Math.floor(total) : 0;
+  return [
+    {
+      id: "videos",
+      title: "生成分镜视频",
+      status: "running",
+      detail: safeTotal > 0
+        ? `generate_scenes · 已启动 ${safeTotal} 个分镜视频，完成后回填预览`
+        : "generate_scenes · 正在启动分镜视频生成",
+      startedAt: nowIso,
+      completedAt: null,
+      durationMs: null,
+    },
+  ];
+}
+
+export function applySceneVideoProgress(
+  steps: AgentPipelineProgressStep[],
+  progress: SceneVideoGenerationProgress | null | undefined,
+  nowIso = new Date().toISOString(),
+): AgentPipelineProgressStep[] {
+  if (!progress || progress.total <= 0) return steps;
+  const completed = Math.max(0, Math.min(progress.completed, progress.total));
+  const sceneLabel = progress.scene_index
+    ? `第 ${progress.scene_index} 镜`
+    : (progress.scene_id || "分镜");
+  const statusText = progress.ok === false ? "失败" : "已完成，可预览";
+  const detail = completed > 0
+    ? `分镜视频 ${completed}/${progress.total}：${sceneLabel}${statusText}`
+    : `分镜视频 0/${progress.total}：生成中，可打开「查看分镜」等待回填`;
+  const done = completed >= progress.total;
+  const base = steps.length > 0 ? steps : createSceneVideoProgressSteps(progress.total, nowIso);
+  const previousById = new Map(base.map((step) => [step.id, step]));
+  return base.map((step) => {
+    if (step.id !== "videos") return step;
+    const next: AgentPipelineProgressStep = {
+      ...step,
+      status: done ? "completed" : "running",
+      detail: done ? `分镜视频已全部完成（${completed}/${progress.total}）` : detail,
     };
     return stampStepTransition(previousById.get(step.id), next, nowIso);
   });

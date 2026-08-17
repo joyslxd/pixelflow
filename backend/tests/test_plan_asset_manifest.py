@@ -240,6 +240,114 @@ def test_extract_script_setting_assets_resolves_generic_core_product_heading() -
     assert [item["name"] for item in seed["props"]] == ["蓝妹啤酒", "旧相册"]
 
 
+def test_extract_script_setting_assets_skips_field_label_headings() -> None:
+    """设定模板字段名不能当成出场角色/场景/道具。"""
+
+    markdown = """
+## 角色设定
+### 从执行者成长为独立负责人的创意工作者
+- 视觉特征：短发利落
+### 视觉特征
+短发
+### 动作习惯
+常推眼镜
+### 安然（女1）
+短发主讲，利落职业装
+## 场景设定
+### 时段
+白天
+### 光线
+暖光
+### 办公室梳妆台
+暖光窗边
+## 道具与产品设定
+### 分镜提示词
+不要当道具
+### 氧气防晒
+白色瓶身
+## 分镜提示词
+0—10秒｜开场
+安然：今天讲防晒
+"""
+    seed = extract_script_setting_assets(markdown)
+    assert [item["name"] for item in seed["characters"]] == ["安然"]
+    assert [item["name"] for item in seed["scenes"]] == ["办公室梳妆台"]
+    assert [item["name"] for item in seed["props"]] == ["氧气防晒"]
+    assert "视觉特征" not in [item["name"] for item in seed["characters"]]
+    assert "分镜提示词" not in [item["name"] for item in seed["props"]]
+
+
+def test_extract_script_setting_assets_rebuckets_flat_combined_cast() -> None:
+    """合并设定扁平混写：地点/道具不能进出场角色，叙事段名不能进场景。"""
+
+    markdown = """
+## 角色/场景/道具设定
+### 安然
+- 视觉形象：短发主讲
+### Yann
+- 身份：闺蜜
+### 联名方代表
+- 核心标签：品牌背书
+### 办公室梳妆台
+- 时空背景：白天办公室
+### 剪辑工作室
+- 陈设细节：双屏工作台
+### 窗边拍摄区
+- 光线氛围：自然光
+### 最终提案室
+- 可拍要点：会议桌
+### 氧气防晒
+- 外观材质：白色瓶身
+### 手机
+- 使用动作：滑动对比
+### 反光板
+- 品牌露出：无
+## 分镜大纲
+### 开场钩子
+0-5秒
+### 补充证明 1
+5-10秒
+"""
+    seed = extract_script_setting_assets(markdown)
+    assert [item["name"] for item in seed["characters"]] == ["安然", "Yann", "联名方代表"]
+    assert [item["name"] for item in seed["scenes"]] == [
+        "办公室梳妆台",
+        "剪辑工作室",
+        "窗边拍摄区",
+        "最终提案室",
+    ]
+    assert [item["name"] for item in seed["props"]] == ["氧气防晒", "手机", "反光板"]
+    assert "开场钩子" not in [item["name"] for item in seed["scenes"]]
+    assert "补充证明 1" not in [item["name"] for item in seed["scenes"]]
+    assert "{}" not in [item["name"] for item in seed["props"]]
+
+
+def test_extract_script_setting_assets_nested_under_combined_heading() -> None:
+    """导入路径常见：外层合并 H2 + 内层角色/场景/道具 H2。"""
+
+    markdown = """
+## 角色/场景/道具设定
+## 角色设定
+### 安然
+短发主讲
+### Yann
+闺蜜
+## 场景设定
+### 办公室梳妆台
+暖光
+## 道具与产品设定
+### 氧气防晒
+白瓶
+## 分镜大纲
+### 开场钩子
+钩子镜
+"""
+    seed = extract_script_setting_assets(markdown)
+    assert [item["name"] for item in seed["characters"]] == ["安然", "Yann"]
+    assert [item["name"] for item in seed["scenes"]] == ["办公室梳妆台"]
+    assert [item["name"] for item in seed["props"]] == ["氧气防晒"]
+
+
 def test_extract_script_setting_assets_skips_character_relationship_heading() -> None:
     """Skill 常把「角色关系」写成容器标题；不能当唯一出场角色。"""
 

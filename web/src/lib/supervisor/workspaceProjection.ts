@@ -462,6 +462,16 @@ export function projectSupervisorSnapshot(
       answer: typeof item.answer === "string" ? item.answer : "",
       startedAt: typeof item.startedAt === "string" ? item.startedAt : null,
       status,
+      afterMessageId: typeof item.afterMessageId === "string" && item.afterMessageId.trim()
+        ? item.afterMessageId.trim()
+        : (
+          typeof item.clientInputId === "string" && item.clientInputId.trim()
+            ? item.clientInputId.trim()
+            : null
+        ),
+      clientInputId: typeof item.clientInputId === "string" && item.clientInputId.trim()
+        ? item.clientInputId.trim()
+        : null,
     });
   }
   if (value.videoAgent !== null && value.videoAgent !== undefined) {
@@ -503,18 +513,23 @@ export function projectSupervisorSnapshot(
         (step) => step.status === "awaiting_confirmation",
       )
       : [];
-    if (
-      waitingSteps.length > 1
-      || (waitingSteps.length === 1 && !videoAgentConfirmation)
-      || (
-        videoAgentConfirmation
-        && (
-          !videoAgentPlan
-          || videoAgentConfirmation.planId !== videoAgentPlan.planId
-          || waitingSteps[0]?.stepId !== videoAgentConfirmation.stepId
-        )
-      )
-    ) return fail();
+    // 旧 Plan 步骤确认：必须与 confirmation 一一对应。
+    // 原生 native_pending：Snapshot 有 confirmation、Plan 可无 waiting step（tool_call_id ≠ step_id）。
+    if (waitingSteps.length > 1) return fail();
+    if (waitingSteps.length === 1) {
+      if (!videoAgentConfirmation) return fail();
+      if (
+        !videoAgentPlan
+        || videoAgentConfirmation.planId !== videoAgentPlan.planId
+        || waitingSteps[0]?.stepId !== videoAgentConfirmation.stepId
+      ) return fail();
+    } else if (
+      videoAgentConfirmation
+      && videoAgentPlan
+      && videoAgentConfirmation.planId !== videoAgentPlan.planId
+    ) {
+      return fail();
+    }
     if (
       videoAgentQuota
       && (

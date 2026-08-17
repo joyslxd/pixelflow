@@ -519,6 +519,41 @@ async def test_merge_service_returns_safe_synchronous_terminal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_merge_service_maps_transport_disconnect_to_timeout() -> None:
+    """网关掐断长连接时不得抛 ProviderJobCallError，应落 timeout 终态。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise httpx.RemoteProtocolError("server disconnected without sending a response")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        completed = await ProviderJobAdapter(
+            make_merge_video_job_service(
+                client=client,
+                base_url="https://content-app.invalid/api",
+            )
+        ).start(
+            {
+                "video_urls": [
+                    "https://cdn.example.invalid/scene-1.mp4",
+                    "https://cdn.example.invalid/scene-2.mp4",
+                ],
+                "scene_videos": [],
+                "duration": 10,
+                "size": "720p",
+                "model": "seedance-2.0",
+            },
+            authorization=AUTHORIZATION,
+            idempotency_key="operation:v1:merge-transport-test",
+        )
+
+    assert completed.outcome is ProviderJobOutcome.TIMEOUT
+    assert completed.provider_job_id.startswith("sync-merge-")
+
+
+@pytest.mark.asyncio
 async def test_single_scene_merge_finishes_without_provider_call() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(

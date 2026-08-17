@@ -88,6 +88,15 @@ class RecordingDeliveryOperationPort:
                 if self.status == "succeeded"
                 else None
             ),
+            delivery_url=(
+                f"https://cdn.example.invalid/final-{output_type}.mp4"
+                if self.status == "succeeded" and output_type == "mp4"
+                else (
+                    "https://cdn.example.invalid/jianying.zip"
+                    if self.status == "succeeded"
+                    else None
+                )
+            ),
         )
 
 
@@ -126,7 +135,29 @@ async def test_export_rejects_unresolved_qc_or_unapproved_variant() -> None:
         await ComposeOrExportVideoTool(operation_port=port).execute(
             _context(
                 {
-                    "scenes": [_scene("scene-1", 1, approved=False)],
+                    "scenes": [
+                        {
+                            "scene_id": "scene-1",
+                            "scene_index": 1,
+                            "approved_variant_id": None,
+                            "variants": [
+                                {
+                                    "variant_id": "scene-1-v1",
+                                    "artifact_ref": "artifact:scene-1-v1",
+                                    "video_url": "https://cdn.example.invalid/a.mp4",
+                                    "review_status": "pending",
+                                    "selected": False,
+                                },
+                                {
+                                    "variant_id": "scene-1-v2",
+                                    "artifact_ref": "artifact:scene-1-v2",
+                                    "video_url": "https://cdn.example.invalid/b.mp4",
+                                    "review_status": "pending",
+                                    "selected": False,
+                                },
+                            ],
+                        }
+                    ],
                     "dirty_scene_ids": [],
                 }
             ),
@@ -134,6 +165,36 @@ async def test_export_rejects_unresolved_qc_or_unapproved_variant() -> None:
         )
 
     assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mp4_export_accepts_single_ready_variant_without_approved_id() -> None:
+    port = RecordingDeliveryOperationPort()
+    result = await ComposeOrExportVideoTool(operation_port=port).execute(
+        _context(
+            {
+                "scenes": [
+                    {
+                        "scene_id": "scene-1",
+                        "scene_index": 1,
+                        "variants": [
+                            {
+                                "variant_id": "scene-1-v1",
+                                "artifact_ref": "artifact:scene-1-v1",
+                                "video_url": "https://cdn.example.invalid/a.mp4",
+                                "review_status": "pending",
+                                "selected": False,
+                            }
+                        ],
+                    }
+                ],
+                "dirty_scene_ids": [],
+            }
+        ),
+        {"output_type": "mp4"},
+    )
+    assert port.calls[0]["scenes"][0]["variant_id"] == "scene-1-v1"
+    assert result.artifact_refs
 
 
 @pytest.mark.asyncio
@@ -153,6 +214,14 @@ async def test_mp4_export_orders_approved_variants_and_persists_artifact() -> No
     assert result.workspace_patch["outputs"][0]["artifact_ref"] == (
         "artifact:delivery-mp4-1"
     )
+    assert result.workspace_patch["outputs"][0]["video_url"] == (
+        "https://cdn.example.invalid/final-mp4.mp4"
+    )
+    assert result.workspace_patch["merged_video"] == {
+        "ok": True,
+        "merged_video_url": "https://cdn.example.invalid/final-mp4.mp4",
+        "task_id": "job-mp4-1",
+    }
     assert result.artifact_refs == ("artifact:delivery-mp4-1",)
     assert result.requires_confirmation is True
 

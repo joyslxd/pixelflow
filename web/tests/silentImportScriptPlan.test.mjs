@@ -25,8 +25,10 @@ test("script version preview link helpers remain available", () => {
     path.resolve("src/features/video-agent/scriptSkillStages.ts"),
     "utf8",
   );
+  assert.match(stages, /SCRIPT_VERSION_PREVIEW_LINK_RE/);
   assert.match(stages, /export function splitScriptVersionPreviewParts/);
-  assert.match(stages, /已(?:更新|导入)脚本版本/);
+  assert.ok(stages.includes("已(?:更新|导入)脚本版本"));
+  assert.ok(stages.includes("在右侧查看脚本"));
 });
 
 test("script preview panel keeps edit and confirm at draft footer", () => {
@@ -38,6 +40,17 @@ test("script preview panel keeps edit and confirm at draft footer", () => {
   assert.match(source, /confirming \? "确认中…" : "确认"/);
   assert.match(source, /PencilLine/);
   assert.match(source, /border-t border-slate-100 pt-3/);
+  // 未编辑确认不得把 script.content 原文塞回拆解 episode
+  assert.match(source, /dirty \? draft\.trim\(\) : ""/);
+});
+
+test("confirm script prefers structured stages over raw script content", () => {
+  const workspace = fs.readFileSync(
+    path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"),
+    "utf8",
+  );
+  assert.match(workspace, /preferStages/);
+  assert.match(workspace, /scriptContent: preferStages \? "" :/);
 });
 
 test("message bubble opens script preview from version phrase", () => {
@@ -51,9 +64,12 @@ test("message bubble opens script preview from version phrase", () => {
   );
   assert.match(bubble, /splitScriptVersionPreviewParts/);
   assert.match(bubble, /onOpenScriptPreview/);
-  assert.match(workspace, /onOpenScriptPreview=\{\(\) => \{/);
+  assert.match(workspace, /openScriptPreviewFromChat/);
+  assert.match(workspace, /onOpenScriptPreview=\{openScriptPreviewFromChat\}/);
   assert.match(workspace, /setScriptPreviewOpen\(true\)/);
   assert.match(workspace, /scriptPreviewOpen && \(/);
+  assert.match(workspace, /onOpenScriptPreview=\{nativeScriptPreviewOpener\}/);
+  assert.match(workspace, /AgentTurnGroup/);
 });
 
 test("script preview panel stays closed until chat opens it", () => {
@@ -133,4 +149,20 @@ test("intake_draft script projects without artifact_ref; preview stays user-open
   );
   assert.match(legacy, /scriptPreviewOpen/);
   assert.match(legacy, /waiting_for_input/);
+});
+
+test("asset package markdown merges script preview characters and outline", () => {
+  const stages = fs.readFileSync(
+    path.resolve("src/features/video-agent/scriptSkillStages.ts"),
+    "utf8",
+  );
+  const prompts = fs.readFileSync(
+    path.resolve("../backend/pixelflow/video_agent/prompts.py"),
+    "utf8",
+  );
+  assert.match(stages, /export function buildAssetPackagePlanMarkdown/);
+  assert.match(stages, /stageId === "outline"/);
+  assert.match(stages, /分镜提示词|镜头列表|分镜大纲/);
+  assert.match(prompts, /prepare_scene_packages/);
+  assert.match(prompts, /script_pipeline\.characters\/outline|优先投影 script_pipeline/);
 });

@@ -242,9 +242,9 @@ def test_prepare_video_scene_packages_splits_plan_into_confirmable_scenes():
     assert "scene_images" not in first_scene
     assert "prop_images" not in first_scene
     assert first_scene["reference_asset_ids"][:1] == [character_assets[0]["asset_id"]]
-    assert "scene-opening" in first_scene["reference_asset_ids"]
+    assert "scene-main" in first_scene["reference_asset_ids"]
     assert "prop-product" in first_scene["reference_asset_ids"]
-    assert first_scene["reference_asset_ids"].index("scene-opening") == 1
+    assert first_scene["reference_asset_ids"].index("scene-main") == 1
     assert set(first_scene["shot_description"]) == {"text", "mentions"}
     assert "地点:@" in first_scene["shot_description"]["text"]
     assert "角色:@" in first_scene["shot_description"]["text"]
@@ -597,33 +597,7 @@ def test_authoritative_blueprint_normalizes_asset_name_mentions_to_asset_ids():
 
 
 def test_authoritative_blueprint_preserves_existing_asset_id_mentions():
-    class FakeMessage:
-        def __init__(self, content: str) -> None:
-            self.content = content
-
-    class FakeModel:
-        def invoke(self, _prompt):
-            return FakeMessage(
-                __import__("json").dumps(
-                    {
-                        "global_assets": {
-                            "characters": [
-                                {
-                                    "asset_id": "Lin-v1",
-                                    "name": "Lin",
-                                    "description": "通勤女性",
-                                    "three_view_prompt": "Lin 正面、侧面、背面三视图",
-                                }
-                            ],
-                            "scenes": [],
-                            "props": [],
-                            "visual_style": {"asset_id": "style-main", "name": "写实风", "description": "写实风"},
-                        },
-                        "scene_packages": [],
-                    },
-                    ensure_ascii=False,
-                )
-            )
+    """镜头正文已是 @asset_id 时，不得再被展示名替换成 character-xxx-v1。"""
 
     blueprint = {
         "scene_id": "scene-1",
@@ -639,22 +613,44 @@ def test_authoritative_blueprint_preserves_existing_asset_id_mentions():
         "transition": "跟随脚步结束。",
         "asset_requirements": {"characters": ["Lin"], "scenes": [], "props": []},
     }
+    manifest = {
+        "characters": [
+            {
+                "asset_id": "Lin-v1",
+                "name": "Lin",
+                "description": "通勤女性",
+                "three_view_prompt": "Lin 正面、侧面、背面三视图",
+            }
+        ],
+        "scenes": [],
+        "props": [],
+        "visual_style": {
+            "asset_id": "style-main",
+            "name": "写实风",
+            "description": "写实风",
+            "prompt": "写实风",
+        },
+    }
 
-    result = __import__("asyncio").run(
-        prepare_video_scene_packages_with_llm(
-            form_values={"product_info": "通勤服务"},
-            plan_markdown="## 权威分镜\n通勤开场。",
-            target_duration_ms=10_000,
-            scene_blueprints=[blueprint],
-            model_factory=lambda *_args, **_kwargs: FakeModel(),
-        )
+    result = prepare_video_scene_packages(
+        form_values={"product_info": "通勤服务"},
+        plan_markdown="## 权威分镜\n通勤开场。",
+        target_duration_ms=10_000,
+        scene_blueprints=[blueprint],
+        asset_manifest=manifest,
     )
 
     scene = result["scene_packages"][0]
-    assert "@Lin-v1 " in scene["shot_description"]["text"]
-    assert "@Lin-v1-v1" not in scene["shot_description"]["text"]
-    assert scene["reference_asset_ids"] == ["Lin-v1"]
-    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == ["Lin-v1"]
+    shot_text = scene["shot_description"]["text"]
+    # manifest 归一化后正式 ID 可能是 character-lin；正文旧 @Lin-v1 应被原地替换，勿再挂「参考素材」。
+    assert "@Lin-v1" not in shot_text
+    assert "@Lin-v1-v1" not in shot_text
+    assert "参考素材：" not in shot_text
+    assert scene["reference_asset_ids"]
+    assert all(f"@{asset_id}" in shot_text for asset_id in scene["reference_asset_ids"])
+    assert [mention["asset_id"] for mention in scene["shot_description"]["mentions"]] == scene[
+        "reference_asset_ids"
+    ]
 
 
 def test_authoritative_blueprint_prefers_final_form_visual_style_over_llm_style():

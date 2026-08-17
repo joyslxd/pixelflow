@@ -23,6 +23,15 @@ export function preferRicherVideoAgentPlan(
   if (!local) return incoming ?? null;
   if (!incoming) return local;
   if (local.planId !== incoming.planId) return incoming;
+  const incomingStatus = String(incoming.status || "").toLowerCase();
+  // 服务端终态优先：避免 confirmation.requested 本地 upsert 步骤盖住 completed。
+  if (
+    incomingStatus === "completed"
+    || incomingStatus === "failed"
+    || incomingStatus === "cancelled"
+  ) {
+    return incoming;
+  }
   return stepCount(local) > stepCount(incoming) ? local : incoming;
 }
 

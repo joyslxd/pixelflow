@@ -183,7 +183,7 @@ async def test_registry_maps_reference_provider_failure_to_fixed_summary() -> No
         {"reference_asset_ref": "artifact:ref-1"},
     )
 
-    assert result.public_summary == "工具执行失败，请稍后重试"
+    assert result.public_summary == "analyze_reference_video 执行失败，请稍后重试"
     assert result.workspace_patch == {}
     assert "secret-value" not in result.model_dump_json()
 

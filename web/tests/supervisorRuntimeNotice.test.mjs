@@ -32,3 +32,20 @@ test("Turn 处理中显示等待提示", () => {
   assert.equal(notice?.tone, "working");
   assert.match(notice?.title || "", /正在处理中/);
 });
+
+test("Turn completed 移出队列后不再显示处理中", () => {
+  const notice = resolveSupervisorRuntimeNotice({
+    enabled: true,
+    runStatus: "idle",
+    runUpdatedAt: "2026-08-13T00:43:20Z",
+    compression: {
+      status: "idle",
+      progressPercent: null,
+      queuedInputCount: 0,
+      lastOutcome: null,
+      updatedAt: null,
+    },
+    inputQueue: [],
+  });
+  assert.equal(notice, null);
+});

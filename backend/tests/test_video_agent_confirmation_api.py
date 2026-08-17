@@ -201,8 +201,8 @@ async def _create_waiting_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_confirmation_controller_resumes_original_plan_and_discards_credential() -> None:
-    """确认必须继续同一个持久化步骤，并在请求结束后销毁临时凭据。"""
+async def test_legacy_step_confirmation_is_rejected_after_hard_delete() -> None:
+    """P0-5：旧 Plan 步骤确认已删除，必须走 native_pending_confirmation。"""
 
     app, _, repository, tool = await _make_confirmation_app()
     transport = httpx.ASGITransport(app=app)
@@ -217,205 +217,38 @@ async def test_confirmation_controller_resumes_original_plan_and_discards_creden
             headers={"Authorization": AUTHORIZATION},
             json={"step_id": "step-confirmation", "decision": "confirm"},
         )
-        restored = await client.get(
-            f"/agent/conversations/{conversation_id}/agent-snapshot"
-        )
 
-    assert response.status_code == 200
-    assert response.json()["plan_status"] == "completed"
-    assert response.json()["step_status"] == "completed"
+    assert response.status_code in {409, 400, 422}
+    assert tool.calls == 0
+    body = response.text.lower()
+    assert "secret" not in body
     assert AUTHORIZATION not in response.text
-    assert tool.calls == 1
-    assert restored.json()["videoAgent"]["confirmation"] is None
-    assert tool.credential is not None
-    with pytest.raises(VideoAgentCredentialUnavailableError):
-        tool.credential.borrow_authorization()
 
 
 @pytest.mark.asyncio
-async def test_confirmation_schedules_background_continue_for_followup_steps() -> None:
-    """创意确认后 HTTP 立即返回；后续步由后台 resume 推进。"""
+async def test_legacy_background_continue_after_step_confirm_is_removed() -> None:
+    """P0-5：确认后续步由原生 Agent resume，不再调度 executor.resume_plan。"""
 
-    class ConfirmThenFollowTool:
-        spec = VideoToolSpec(
-            name="confirm_script_creative",
-            description="确认创意",
-            input_model=EmptyInput,
-            cost_level=VideoToolCostLevel.NONE,
-            confirmation_required=True,
-            idempotency_mode=VideoToolIdempotencyMode.REQUEST,
-            recovery_mode=VideoToolRecoveryMode.REPLAY,
-            workspace_mutations=("script_pipeline",),
-        )
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def execute(self, context: VideoToolContext, arguments):
-            del context, arguments
-            self.calls += 1
-            return VideoToolResult(
-                tool_name=self.spec.name,
-                public_summary="创意已确认",
-            )
-
-    class FollowupTool:
-        spec = VideoToolSpec(
-            name="inspect_video_workspace",
-            description="后续阶段",
-            input_model=EmptyInput,
-            cost_level=VideoToolCostLevel.NONE,
-            confirmation_required=False,
-            idempotency_mode=VideoToolIdempotencyMode.REQUEST,
-            recovery_mode=VideoToolRecoveryMode.REPLAY,
-            workspace_mutations=(),
-        )
-
-        def __init__(self) -> None:
-            self.calls = 0
-            self.gate = asyncio.Event()
-
-        async def execute(self, context: VideoToolContext, arguments):
-            del context, arguments
-            await self.gate.wait()
-            self.calls += 1
-            return VideoToolResult(
-                tool_name=self.spec.name,
-                public_summary="后续完成",
-            )
-    confirm_tool = ConfirmThenFollowTool()
-    followup_tool = FollowupTool()
-    task_store = MemoryPixelFlowTaskStore()
-    runtime_repository = MemoryCompactionQueueRepository()
-    video_repository = MemoryVideoAgentRepository(
-        event_repository=runtime_repository,
-    )
-    ticks = iter(NOW + timedelta(seconds=value) for value in range(1, 40))
-    executor = VideoAgentExecutor(
-        repository=video_repository,
-        registry=VideoToolRegistry([confirm_tool, followup_tool]),
-        clock=lambda: next(ticks),
-    )
-    service = AgentRuntimeService(
-        config=AgentRuntimeConfig(
-            mode="assist",
-            enabled_intents=(),
-            new_conversation_rollout_percent=100,
-            context_compaction_enabled=True,
-        ),
-        repository=runtime_repository,
-        task_store=task_store,
-        video_agent_repository=video_repository,
-        video_agent_executor=executor,
-        clock=lambda: NOW,
-    )
-    app = make_authed_test_app(
-        user_factory=lambda: _user(USER_ID, "task11-followup@example.com")
-    )
-    app.state.pixelflow_task_store = task_store
-    app.state.pixelflow_agent_runtime_service = service
-    app.include_router(pixelflow_conversations.router)
-
+    app, _, repository, tool = await _make_confirmation_app()
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://task11-followup.test"
-    ) as client:
-        created = await client.post(
-            "/agent/conversations",
-            json={"title": "确认后续续跑"},
+    async with httpx.AsyncClient(transport=transport, base_url="http://task11.test") as client:
+        conversation_id, confirmation_id = await _create_waiting_confirmation(
+            client,
+            repository,
         )
-        conversation_id = created.json()["conversation_id"]
-        workspace = await video_repository.create_workspace(
-            str(USER_ID),
-            VideoWorkspace(
-                workspace_id="workspace-confirm-followup",
-                conversation_id=conversation_id,
-                payload={},
-                created_at=NOW,
-                updated_at=NOW,
-            ),
-        )
-        steps = [
-            AgentPlanStep(
-                step_id="step-confirm",
-                plan_id="plan-confirm-followup",
-                sequence=1,
-                tool_name=confirm_tool.spec.name,
-                title="确认选题创意",
-                status=PlanStepStatus.PENDING,
-                arguments={},
-                confirmation_required=True,
-            ),
-            AgentPlanStep(
-                step_id="step-followup",
-                plan_id="plan-confirm-followup",
-                sequence=2,
-                tool_name=followup_tool.spec.name,
-                title="写三幕结构",
-                status=PlanStepStatus.PENDING,
-                arguments={},
-                confirmation_required=False,
-            ),
-        ]
-        await video_repository.save_plan(
-            str(USER_ID),
-            AgentPlan(
-                plan_id="plan-confirm-followup",
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.RUNNING,
-                public_goal="创意确认后继续",
-                created_at=NOW,
-                updated_at=NOW,
-            ),
-            steps,
-        )
-        await video_repository.request_step_confirmation(
-            str(USER_ID),
-            "plan-confirm-followup",
-            "step-confirm",
-        )
-        await video_repository.update_plan_status(
-            str(USER_ID),
-            "plan-confirm-followup",
-            AgentPlanStatus.AWAITING_CONFIRMATION,
-            now=NOW,
-        )
-        snapshot = await client.get(
-            f"/agent/conversations/{conversation_id}/agent-snapshot"
-        )
-        confirmation_id = snapshot.json()["videoAgent"]["confirmation"][
-            "confirmation_id"
-        ]
-
         response = await client.post(
             f"/agent/conversations/{conversation_id}/video-agent/confirmations/"
             f"{confirmation_id}/responses",
             headers={"Authorization": AUTHORIZATION},
-            json={"step_id": "step-confirm", "decision": "confirm"},
+            json={"step_id": "step-confirmation", "decision": "confirm"},
         )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["step_status"] == "completed"
-    assert body["plan_status"] == "running"
-    assert confirm_tool.calls == 1
-    assert followup_tool.calls == 0
-
-    followup_tool.gate.set()
-    pending = list(service._executor_notification_tasks)
-    if pending:
-        await asyncio.gather(*pending)
-
-    plan = await video_repository.get_plan(str(USER_ID), "plan-confirm-followup")
-    assert plan is not None
-    assert plan.status is AgentPlanStatus.COMPLETED
-    assert followup_tool.calls == 1
-
+    assert response.status_code in {409, 400, 422}
+    assert tool.calls == 0
 
 @pytest.mark.asyncio
 async def test_cancel_confirmation_never_executes_billable_tool() -> None:
-    """取消只终止当前计划，不调用待确认计费工具。"""
+    """P0-5：旧步骤取消同样关闭；不得执行计费工具。"""
 
     app, _, repository, tool = await _make_confirmation_app()
     transport = httpx.ASGITransport(app=app)
@@ -430,15 +263,8 @@ async def test_cancel_confirmation_never_executes_billable_tool() -> None:
             headers={"Authorization": AUTHORIZATION},
             json={"step_id": "step-confirmation", "decision": "cancel"},
         )
-        restored = await client.get(
-            f"/agent/conversations/{conversation_id}/agent-snapshot"
-        )
 
-    assert response.status_code == 200
-    assert response.json()["plan_status"] == "cancelled"
-    assert response.json()["step_status"] == "skipped"
-    assert restored.status_code == 200
-    assert restored.json()["videoAgent"]["confirmation"] is None
+    assert response.status_code in {409, 400, 422}
     assert tool.calls == 0
 
 
@@ -582,3 +408,445 @@ def test_transient_video_agent_credential_cannot_be_copied_or_serialized() -> No
         copy.copy(credential)
     with pytest.raises(TypeError):
         pickle.dumps(credential)
+
+
+@pytest.mark.asyncio
+async def test_save_video_agent_script_conflict_returns_current_revision() -> None:
+    """expected_revision 过期时 409 必须带回权威 current_revision，供前端重试。"""
+
+    app, task_store, video_repository, _tool = await _make_confirmation_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "脚本冲突测试"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-script-conflict",
+                conversation_id=conversation_id,
+                payload={
+                    "script": {
+                        "artifact_ref": "artifact:script-1",
+                        "source": "user_edit",
+                        "version": 1,
+                        "status": "ready",
+                        "content": "旧脚本",
+                    }
+                },
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        # 先 bump 一次，使 revision=2
+        await video_repository.apply_workspace_patch(
+            str(USER_ID),
+            workspace.workspace_id,
+            {"script": {**workspace.payload["script"], "content": "中间版"}},
+            expected_revision=workspace.revision,
+            now=NOW,
+        )
+        response = await client.put(
+            f"/agent/conversations/{conversation_id}/video-agent/script",
+            json={
+                "markdown": "新脚本",
+                "expected_revision": workspace.revision,
+                "confirm_for_generation": True,
+            },
+        )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "video_agent_script_conflict"
+    assert detail["current_revision"] == workspace.revision + 1
+    assert detail["workspace_id"] == workspace.workspace_id
+
+
+class _FakePreparePort:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def start_prepare_scene_packages(self, context, **kwargs):  # noqa: ANN001, ARG002
+        self.calls += 1
+        from pixelflow.video_agent.tools.scene_packages import ScenePackageOperationJob
+
+        return ScenePackageOperationJob(
+            job_id="job-confirm-prepare-1",
+            status="polling",
+            result={},
+        )
+
+
+async def _make_confirm_script_plan_app() -> tuple[
+    object,
+    MemoryVideoAgentRepository,
+    _FakePreparePort,
+]:
+    from pixelflow.video_agent.tools.scene_packages import PrepareScenePackagesTool
+
+    task_store = MemoryPixelFlowTaskStore()
+    runtime_repository = MemoryCompactionQueueRepository()
+    video_repository = MemoryVideoAgentRepository(
+        event_repository=runtime_repository,
+    )
+    port = _FakePreparePort()
+    ticks = iter(NOW + timedelta(seconds=value) for value in range(1, 40))
+    executor = VideoAgentExecutor(
+        repository=video_repository,
+        registry=VideoToolRegistry([PrepareScenePackagesTool(operation_port=port)]),
+        clock=lambda: next(ticks),
+    )
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="assist",
+            enabled_intents=(),
+            new_conversation_rollout_percent=100,
+            context_compaction_enabled=True,
+        ),
+        repository=runtime_repository,
+        task_store=task_store,
+        video_agent_repository=video_repository,
+        video_agent_executor=executor,
+        clock=lambda: NOW,
+    )
+    app = make_authed_test_app(
+        user_factory=lambda: _user(USER_ID, "confirm-script-plan@example.com")
+    )
+    app.state.pixelflow_task_store = task_store
+    app.state.pixelflow_agent_runtime_service = service
+    app.include_router(pixelflow_conversations.router)
+    return app, video_repository, port
+
+
+@pytest.mark.asyncio
+async def test_confirm_script_plan_command_starts_prepare() -> None:
+    app, video_repository, port = await _make_confirm_script_plan_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "确认脚本命令"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-confirm-cmd",
+                conversation_id=conversation_id,
+                payload={
+                    "script": {
+                        "content": "# 脚本\n0—10秒｜开场\n安然推门",
+                        "status": "ready",
+                        "version": 1,
+                        "aspect_ratio": "9:16",
+                        "ending_cta": "none",
+                        "missing_requirements": [],
+                    }
+                },
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/commands/confirm-script-plan",
+            json={
+                "expected_revision": workspace.revision,
+                "markdown": "# 脚本\n0—10秒｜开场\n安然推门\n确认正文",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job_id"] == "job-confirm-prepare-1"
+    assert port.calls == 1
+    stored = await video_repository.get_workspace(
+        str(USER_ID),
+        "workspace-confirm-cmd",
+    )
+    assert stored is not None
+    assert stored.payload.get("script_plan_confirmed") is True
+
+
+@pytest.mark.asyncio
+async def test_confirm_script_plan_command_rejects_missing_cta() -> None:
+    app, video_repository, port = await _make_confirm_script_plan_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "确认脚本缺 CTA"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-confirm-gap",
+                conversation_id=conversation_id,
+                payload={
+                    "script": {
+                        "content": "# 脚本\n镜头1",
+                        "status": "ready",
+                        "version": 1,
+                        "aspect_ratio": "9:16",
+                        "missing_requirements": ["结尾行动引导"],
+                    }
+                },
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/commands/confirm-script-plan",
+            json={"expected_revision": workspace.revision},
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "video_agent_script_not_ready"
+    assert "结尾行动引导" in detail["missing_fields"]
+    assert port.calls == 0
+
+
+def _shot_table_markdown(*, picture: str) -> str:
+    return (
+        "时长：20秒 画幅：16:9\n\n镜头列表：\n\n"
+        "| 时间 | 景别 | 运镜 | 画面 | 旁白/对白 | 屏幕文案 | 行动引导 |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        f"| 0-10秒 | 近景 | 推 | {picture} | 安然：开场 | 倒计时 | 无 |\n"
+        "| 10-20秒 | 中景 | 跟 | 第二镜画面 | Yann：接话 | 记忆点 | 无 |\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_script_plan_reuses_packages_when_script_unchanged() -> None:
+    """选模阶段再次确认且脚本未改：复用已有场景包，不重跑 prepare。"""
+
+    from pixelflow.creative.script_shots import compute_scene_packages_source_digest
+
+    app, video_repository, port = await _make_confirm_script_plan_app()
+    episode = _shot_table_markdown(picture="第一镜原画面")
+    payload = {
+        "script": {
+            "content": episode,
+            "status": "ready",
+            "version": 2,
+            "aspect_ratio": "16:9",
+            "ending_cta": "none",
+            "missing_requirements": [],
+        },
+        "script_pipeline": {
+            "episode": {"stage": "episode", "content": episode, "source": "import"},
+            "characters": {
+                "stage": "characters",
+                "content": "## 角色设定\n### 安然\n女主\n",
+            },
+        },
+        "script_plan_confirmed": True,
+        "scene_packages": [
+            {"scene_id": "scene-1", "scene_index": 1},
+            {"scene_id": "scene-2", "scene_index": 2},
+        ],
+    }
+    payload["scene_packages_source_digest"] = compute_scene_packages_source_digest(payload)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "确认脚本复用包"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-confirm-reuse",
+                conversation_id=conversation_id,
+                payload=payload,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/commands/confirm-script-plan",
+            json={
+                "expected_revision": workspace.revision,
+                "markdown": episode,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job_id"] is None
+    assert "可继续使用" in body["public_summary"]
+    assert port.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_script_plan_reprepares_when_script_edited() -> None:
+    """用户改了可抽镜正文再确认：必须重跑 prepare_scene_packages。"""
+
+    from pixelflow.creative.script_shots import compute_scene_packages_source_digest
+
+    app, video_repository, port = await _make_confirm_script_plan_app()
+    old_episode = _shot_table_markdown(picture="第一镜原画面")
+    new_episode = _shot_table_markdown(picture="第一镜已改成会议室对峙")
+    payload = {
+        "script": {
+            "content": old_episode,
+            "status": "ready",
+            "version": 2,
+            "aspect_ratio": "16:9",
+            "ending_cta": "none",
+            "missing_requirements": [],
+        },
+        "script_pipeline": {
+            "episode": {"stage": "episode", "content": old_episode, "source": "import"},
+            "characters": {
+                "stage": "characters",
+                "content": "## 角色设定\n### 安然\n女主\n",
+            },
+        },
+        "script_plan_confirmed": True,
+        "scene_packages": [
+            {"scene_id": "scene-1", "scene_index": 1},
+            {"scene_id": "scene-2", "scene_index": 2},
+        ],
+    }
+    payload["scene_packages_source_digest"] = compute_scene_packages_source_digest(payload)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "确认脚本重拆包"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-confirm-reprepare",
+                conversation_id=conversation_id,
+                payload=payload,
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/commands/confirm-script-plan",
+            json={
+                "expected_revision": workspace.revision,
+                "markdown": new_episode,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job_id"] == "job-confirm-prepare-1"
+    assert port.calls == 1
+    stored = await video_repository.get_workspace(
+        str(USER_ID),
+        "workspace-confirm-reprepare",
+    )
+    assert stored is not None
+    episode = stored.payload.get("script_pipeline", {}).get("episode", {})
+    assert "会议室对峙" in str(episode.get("content") or "")
+
+
+@pytest.mark.asyncio
+async def test_native_confirmation_accepts_pending_revision_after_persist_bump() -> None:
+    """pending 写入自身 +1 后，确认不得因 expected_revision 旧值 409。"""
+
+    from pixelflow.video_agent.confirmation import native_confirmation_id
+
+    app, _, repository, _tool = await _make_confirmation_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://task11.test") as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "原生确认 revision"},
+            headers={"Authorization": AUTHORIZATION},
+        )
+        conversation_id = created.json()["conversation_id"]
+        confirmation_id = native_confirmation_id(
+            plan_id="plan-native-merge",
+            tool_call_id="call-compose-1",
+        )
+        workspace = await repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-native-confirm",
+                conversation_id=conversation_id,
+                payload={},
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        # 模拟旧 bug：pending.expected_revision = 写入前，workspace 已因 persist +1
+        await repository.apply_workspace_patch(
+            str(USER_ID),
+            workspace.workspace_id,
+            {
+                "native_pending_confirmation": {
+                    "confirmation_id": confirmation_id,
+                    "tool_name": "compose_or_export_video",
+                    "tool_call_id": "call-compose-1",
+                    "expected_revision": workspace.revision,
+                    "plan_id": "plan-native-merge",
+                    "arguments": {"output_type": "mp4"},
+                }
+            },
+            expected_revision=workspace.revision,
+            now=NOW,
+        )
+        await repository.save_plan(
+            str(USER_ID),
+            AgentPlan(
+                plan_id="plan-native-merge",
+                workspace_id="workspace-native-confirm",
+                conversation_id=conversation_id,
+                status=AgentPlanStatus.RUNNING,
+                public_goal="合并分镜视频为成片",
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            [],
+        )
+        await repository.update_plan_status(
+            str(USER_ID),
+            "plan-native-merge",
+            AgentPlanStatus.AWAITING_CONFIRMATION,
+            now=NOW,
+        )
+        response = await client.post(
+            f"/agent/conversations/{conversation_id}/video-agent/confirmations/"
+            f"{confirmation_id}/responses",
+            headers={"Authorization": AUTHORIZATION},
+            json={"step_id": "call-compose-1", "decision": "confirm"},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["decision"] == "confirm"
+    stored = await repository.get_workspace(str(USER_ID), "workspace-native-confirm")
+    assert stored is not None
+    assert stored.payload.get("native_pending_confirmation") is None
+    approved = stored.payload.get("native_approved_confirmation")
+    assert isinstance(approved, dict)
+    assert approved["tool_name"] == "compose_or_export_video"

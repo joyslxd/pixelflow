@@ -6,8 +6,15 @@ export function resolveThinkingAfterMessageId(
   options?: {
     pendingTurns?: Array<{ clientInputId: string; runId?: string | null }>;
     knownAnchor?: string | null;
+    /** Snapshot thinkingHistory 带回的权威锚点（client_input_id）。 */
+    afterMessageId?: string | null;
   },
 ): string {
+  const preferred = String(options?.afterMessageId || "").trim();
+  if (preferred && messages.some((message) => message.id === preferred)) {
+    return preferred;
+  }
+
   const known = String(options?.knownAnchor || "").trim();
   if (known && messages.some((message) => message.id === known)) {
     return known;
@@ -45,7 +52,7 @@ export function resolveThinkingAfterMessageId(
     }
   }
 
-  // 无映射时才退回最近用户消息（仅 live 兜底）；历史 Turn 应靠 pending/knownAnchor。
+  // 无映射时才退回最近用户消息（仅 live 兜底）；历史 Turn 应靠 pending/knownAnchor/afterMessageId。
   return [...messages].reverse().find((message) => message.role === "user")?.id
     || messages[0]?.id
     || "";

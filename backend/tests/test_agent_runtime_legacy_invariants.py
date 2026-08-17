@@ -11,6 +11,7 @@ from copy import deepcopy
 
 import pytest
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 
 from app.gateway.routers.pixelflow_image import (
     _IMAGE_GENERATION_JOBS,
@@ -18,12 +19,20 @@ from app.gateway.routers.pixelflow_image import (
     get_generate_image_job,
 )
 from app.gateway.routers.pixelflow_planning import PlanMarkdownResponse
-from app.gateway.routers.pixelflow_video import PrepareScenePackagesResponse
 from pixelflow.tasks import (
     MemoryPixelFlowTaskStore,
     PixelFlowConversationMessageRecord,
     PixelFlowConversationRecord,
 )
+
+
+class _LegacyScenePackagesReviewContract(BaseModel):
+    """表征测试用：旧 PrepareScenePackagesResponse 的确认规则快照。"""
+
+    ok: bool = True
+    target_duration_ms: int = 0
+    requires_confirmation: bool = True
+    review_timeout_sec: int | None = Field(default=None)
 
 
 def test_legacy_review_contracts_keep_existing_manual_and_timed_confirmation_rules() -> None:
@@ -32,7 +41,7 @@ def test_legacy_review_contracts_keep_existing_manual_and_timed_confirmation_rul
         plan_markdown="# plan.md",
         template_path="templates/plan_image.md",
     )
-    scene_packages = PrepareScenePackagesResponse(ok=True, target_duration_ms=4_000)
+    scene_packages = _LegacyScenePackagesReviewContract(ok=True, target_duration_ms=4_000)
     image_result = ImagePrepareResponse(
         ok=True,
         method="text_to_image",

@@ -297,7 +297,8 @@ export function AgentScriptPreviewPanel({
     if (!onConfirmScript || !canConfirm) return;
     setError(null);
     try {
-      await onConfirmScript(draft.trim());
+      // 未编辑时传空串，让确认入口优先用 stages.episode/export，避免 script.content 原文盖回拆解稿。
+      await onConfirmScript(dirty ? draft.trim() : "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "确认失败，请稍后重试");
     }

@@ -334,8 +334,37 @@ class OperationCompletionCoordinator:
                 )
             )
         except AgentRuntimeRecordConflictError as exc:
+            # 幂等：同步终态若已落库（并发重试 / 完成事件已写），回读同一 Operation。
+            existing = await self._repository.get_operation(
+                self._user_id,
+                operation_id,
+            )
+            if (
+                existing is not None
+                and existing.conversation_id == self._conversation_id
+                and existing.status is terminal_status
+                and existing.provider_job_id == provider_job_id
+            ):
+                events = await self._repository.list_events(
+                    self._user_id,
+                    self._conversation_id,
+                )
+                matched = next(
+                    (
+                        item
+                        for item in events
+                        if item.event_id == event_record.event_id
+                    ),
+                    None,
+                )
+                if matched is not None:
+                    return OperationCompletionRecord(
+                        operation=existing,
+                        event=matched,
+                    )
+            detail = str(exc).strip()[:160] or "未知冲突"
             raise OperationCompletionConflictError(
-                "Operation同步终态或完成事件持久化冲突"
+                f"Operation同步终态或完成事件持久化冲突：{detail}"
             ) from exc
         return OperationCompletionRecord(
             operation=completed_operation,

@@ -198,6 +198,16 @@ export const EVENT_TYPE_VALUES = [
   "agent.thinking.started",
   "agent.thinking.delta",
   "agent.thinking.completed",
+  "agent.reasoning_summary.delta",
+  "agent.reasoning_summary.completed",
+  "agent.tool.started",
+  "agent.tool.progress",
+  "agent.tool.completed",
+  "agent.tool.failed",
+  "agent.operation.updated",
+  "agent.artifact.updated",
+  "agent.response.delta",
+  "agent.response.completed",
   "agent.confirmation.requested",
   "agent.route.decided",
   "error.raised",
@@ -249,6 +259,11 @@ export type VideoAgentScriptSaveRequest = Readonly<{
   markdown: string;
   expected_revision: number;
   confirm_for_generation?: boolean;
+}>;
+
+export type VideoAgentConfirmScriptPlanRequest = Readonly<{
+  expected_revision: number;
+  markdown?: string | null;
 }>;
 
 export type VideoAgentConfirmationResponseRequest = Readonly<{

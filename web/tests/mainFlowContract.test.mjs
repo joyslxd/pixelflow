@@ -4,6 +4,9 @@ import path from "node:path";
 import test from "node:test";
 
 const workspaceSource = fs.readFileSync(path.resolve("src/features/legacy-workspace/LegacyWorkspace.tsx"), "utf8");
+const legacyWorkspaceHelpersSource = fs.readFileSync(path.resolve("src/features/legacy-workspace/legacyWorkspaceHelpers.ts"), "utf8");
+const legacyWorkspaceTypesSource = fs.readFileSync(path.resolve("src/features/legacy-workspace/legacyWorkspaceTypes.ts"), "utf8");
+const legacyWorkspaceModuleSource = `${workspaceSource}\n${legacyWorkspaceHelpersSource}\n${legacyWorkspaceTypesSource}`;
 const genParamsDialogSource = fs.readFileSync(path.resolve("src/components/composer/GenParamsDialog.tsx"), "utf8");
 const chatPanelSource = fs.readFileSync(path.resolve("src/components/chat/ChatPanel.tsx"), "utf8");
 const messageBubbleSource = fs.readFileSync(path.resolve("src/components/chat/MessageBubble.tsx"), "utf8");
@@ -89,19 +92,17 @@ test("删除分镜素材必须持久化更新后的权威消息", () => {
   assert.notEqual(end, -1, "图片编辑参数处理器必须位于删除处理器之后");
   const handler = workspaceSource.slice(start, end);
   const revisionStart = startSceneGlobalAssetRevisionSource();
-  const revisionCompletion = handleCompletedSceneAssetRevisionJobSource();
   assert.match(handler, /startSceneGlobalAssetRevision\(reference, "delete"/, "删除必须进入统一的素材语义修订任务");
   assert.match(revisionStart, /operation:\s*"replace" \| "delete"/, "统一任务必须区分替换和删除");
-  assert.match(revisionCompletion, /const updatedSourceArtifact: ChatArtifact = \{[\s\S]*videoScenePackages: updatedPackages/, "任务完成后必须以当前消息构造完整更新 artifact");
-  assert.match(revisionCompletion, /await api\.updateConversationMessage/, "删除完成后必须更新权威消息，避免 Snapshot 用旧素材覆盖");
+  assert.match(revisionStart, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "旧 revision Job HTTP 已删除，须走 Turn 或 early return");
 });
 
 test("无图片的历史素材空壳仍可进入异步删除流程", () => {
-  const referenceStart = workspaceSource.indexOf("function sceneGlobalAssetReferenceFromMaterials");
-  const referenceEnd = workspaceSource.indexOf("function isGlobalSceneAssetGroup", referenceStart);
+  const referenceStart = legacyWorkspaceHelpersSource.indexOf("function sceneGlobalAssetReferenceFromMaterials");
+  const referenceEnd = legacyWorkspaceHelpersSource.indexOf("function isGlobalSceneAssetGroup", referenceStart);
   assert.notEqual(referenceStart, -1, "Workspace 必须解析场景包全局素材引用");
   assert.notEqual(referenceEnd, -1, "全局素材分组校验函数必须位于引用解析之后");
-  const referenceSource = workspaceSource.slice(referenceStart, referenceEnd);
+  const referenceSource = legacyWorkspaceHelpersSource.slice(referenceStart, referenceEnd);
   assert.match(referenceSource, /action !== "delete" && !sourceImageUrl/, "只有编辑操作必须要求原图片 URL");
   assert.doesNotMatch(storyboardPanelSource, /disabled=\{!image\}/, "无图片空壳仍必须允许打开详情");
   assert.match(storyboardPanelSource, /当前素材没有可用图片，可以直接删除后重新添加/, "空壳详情必须提示可直接删除");
@@ -125,11 +126,11 @@ test("QA 未定位分镜时保留并持久化同一视频修改上下文", () =>
 });
 
 test("刷新恢复不得用旧 Conversation context 覆盖权威分镜消息", () => {
-  const start = workspaceSource.indexOf("function restoreLatestVideoScenePackagesFromContext");
-  const end = workspaceSource.indexOf("function markLatestPptFileDoneFromContext", start);
+  const start = legacyWorkspaceHelpersSource.indexOf("function restoreLatestVideoScenePackagesFromContext");
+  const end = legacyWorkspaceHelpersSource.indexOf("function markLatestPptFileDoneFromContext", start);
   assert.notEqual(start, -1, "Workspace 必须提供历史场景包恢复函数");
   assert.notEqual(end, -1, "PPT 恢复函数必须位于场景包恢复函数之后");
-  const restoreSource = workspaceSource.slice(start, end);
+  const restoreSource = legacyWorkspaceHelpersSource.slice(start, end);
   assert.doesNotMatch(
     restoreSource,
     /global_assets:\s*\(globalAssets\s*\|\|/,
@@ -151,8 +152,18 @@ test("分镜画布缺少动作 Handler 时必须禁用按钮", () => {
   assert.match(storyboardPanelSource, /disabled=\{!onSave\}/, "没有保存 Handler 时保存按钮必须禁用");
   assert.match(
     storyboardPanelSource,
-    /disabled=\{sceneAssetQuotaPaused \? !onRetrySceneAssets : !onGenerateVideo\}/,
-    "没有生成或恢复 Handler 时主动作必须禁用",
+    /!onGenerateVideo/,
+    "没有生成 Handler 时主动作必须禁用",
+  );
+  assert.match(
+    storyboardPanelSource,
+    /!onRetrySceneAssets/,
+    "没有恢复 Handler 时继续生成参考图必须禁用",
+  );
+  assert.match(
+    storyboardPanelSource,
+    /generatingIdSet\.has\(selectedScene\.scene_id\)/,
+    "当前分镜生成中时确认按钮必须禁用，避免同镜重复提交",
   );
 });
 
@@ -263,9 +274,9 @@ function handleGenerateVideoFromScenePackagesSource() {
 
 function startAndResumeVideoMergeJobSource() {
   const start = workspaceSource.indexOf("const startAndResumeVideoMergeJob = async");
-  const end = workspaceSource.indexOf("const handleCompletedSceneGenerationJob = async", start);
+  const end = workspaceSource.indexOf("const resumePendingVideoJob = async", start);
   assert.notEqual(start, -1, "startAndResumeVideoMergeJob must exist");
-  assert.notEqual(end, -1, "handleCompletedSceneGenerationJob must follow video merge helper");
+  assert.notEqual(end, -1, "resumePendingVideoJob must follow video merge helper");
   return workspaceSource.slice(start, end);
 }
 
@@ -277,19 +288,11 @@ function handleRegenerateVideoWithRevisionSource() {
   return workspaceSource.slice(start, end);
 }
 
-function handleCompletedScenePackageJobSource() {
-  const start = workspaceSource.indexOf("const handleCompletedScenePackageJob = async");
-  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
-  assert.notEqual(start, -1, "handleCompletedScenePackageJob must exist");
-  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow scene package job completion");
-  return workspaceSource.slice(start, end);
-}
-
 function resumePendingScenePackageJobSource() {
   const start = workspaceSource.indexOf("const resumePendingScenePackageJob = async");
-  const end = workspaceSource.indexOf("const pushReviewArtifact =", start);
+  const end = workspaceSource.indexOf("const pollPptJobResult", start);
   assert.notEqual(start, -1, "resumePendingScenePackageJob must exist");
-  assert.notEqual(end, -1, "pushReviewArtifact must follow scene package resume");
+  assert.notEqual(end, -1, "pollPptJobResult must follow scene package resume");
   return workspaceSource.slice(start, end);
 }
 
@@ -343,9 +346,9 @@ function findStoryboardMessageForGlobalAssetSource() {
 
 function handleCompletedImageAssetEditJobSource() {
   const start = workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async");
-  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
+  const end = workspaceSource.indexOf("const startAndResumeVideoMergeJob = async", start);
   assert.notEqual(start, -1, "handleCompletedImageAssetEditJob must exist");
-  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow image asset edit completion");
+  assert.notEqual(end, -1, "startAndResumeVideoMergeJob must follow image asset edit completion");
   return workspaceSource.slice(start, end);
 }
 
@@ -366,11 +369,7 @@ function startSceneGlobalAssetRevisionSource() {
 }
 
 function handleCompletedSceneAssetRevisionJobSource() {
-  const start = workspaceSource.indexOf("const handleCompletedSceneAssetRevisionJob = async");
-  const end = workspaceSource.indexOf("const handleCompletedSceneAssetJob = async", start);
-  assert.notEqual(start, -1, "handleCompletedSceneAssetRevisionJob must exist");
-  assert.notEqual(end, -1, "handleCompletedSceneAssetJob must follow global asset revision completion");
-  return workspaceSource.slice(start, end);
+  throw new Error("handleCompletedSceneAssetRevisionJob removed with legacy video job HTTP");
 }
 
 test("new conversation stores the user message before agent replies", () => {
@@ -398,11 +397,11 @@ test("video requirement form collects and persists the complete creation contrac
   assert.match(genParamsDialogSource, /video_model_capabilities/, "selected video model generation capabilities must be submitted");
   assert.equal(genParamsDialogSource.includes('label="图片比例"'), false, "video form must not ask users for scene image ratio");
   assert.equal(genParamsDialogSource.includes('label="图片清晰度"'), false, "video form must not ask users for scene image quality");
-  assert.match(workspaceSource, /video_duration_sec:\s*form\.video_duration_sec/, "Workspace must persist confirmed video duration");
-  assert.match(workspaceSource, /video_model:\s*form\.video_model/, "Workspace must persist confirmed video model");
-  assert.match(workspaceSource, /video_model_capabilities:\s*form\.video_model_capabilities/, "Workspace must persist video model capabilities");
-  assert.match(workspaceSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
-  assert.match(workspaceSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
+  assert.match(legacyWorkspaceHelpersSource, /video_duration_sec:\s*form\.video_duration_sec/, "Workspace must persist confirmed video duration");
+  assert.match(legacyWorkspaceHelpersSource, /video_model:\s*form\.video_model/, "Workspace must persist confirmed video model");
+  assert.match(legacyWorkspaceHelpersSource, /video_model_capabilities:\s*form\.video_model_capabilities/, "Workspace must persist video model capabilities");
+  assert.match(legacyWorkspaceHelpersSource, /image_model:\s*form\.image_model/, "Workspace must persist confirmed image model");
+  assert.match(legacyWorkspaceHelpersSource, /image_model_capabilities:\s*form\.image_model_capabilities/, "Workspace must persist image model capabilities");
   assert.match(videoRequirementConfigSource, /filterSeedanceConfigs/, "video model filtering must remain centralized");
 });
 
@@ -725,27 +724,69 @@ test("new conversation route replacement does not clear the first intake progres
     restoreSource.indexOf("skipRouteRestoreConversationRef.current === conversationId") < restoreSource.indexOf("api.resumeConversation"),
     "skip check must happen before loading a stale server snapshot",
   );
+  assert.match(workspaceSource, /restoreTokenRef/, "会话恢复必须有世代令牌，避免未声明 ref 导致点击历史崩溃");
+  assert.match(
+    workspaceSource.slice(
+      workspaceSource.indexOf("void restoreConversation();"),
+      workspaceSource.indexOf("void restoreConversation();") + 280,
+    ),
+    /禁止在 cleanup 里 setActiveConversationId/,
+    "cleanup 不得清空 activeConversationId",
+  );
+  assert.doesNotMatch(
+    workspaceSource.slice(
+      workspaceSource.indexOf("void restoreConversation();"),
+      workspaceSource.indexOf("void restoreConversation();") + 280,
+    ),
+    /\n\s*setActiveConversationId\(""\)/,
+    "restore cleanup 不得把 activeConversationId 置空",
+  );
+  assert.match(
+    restoreSource,
+    /previousConversationId !== conversationId/,
+    "同会话重挂不得先 setMessages([])，否则未落库的视频场景包卡会丢且 revision 未变时无法重投",
+  );
+  assert.match(
+    restoreSource,
+    /setWorkspaceScenePackageReprojectEpoch/,
+    "video_agent_v2 resume 后必须 bump 场景包重投影世代",
+  );
+  assert.match(
+    workspaceSource,
+    /workspaceScenePackageReprojectEpoch/,
+    "场景包投影 effect 必须依赖重投影世代，缺卡时即使 revision 不变也能回显",
+  );
+  assert.match(
+    workspaceSource,
+    /insertBeforeId:\s*existing \? null : \(modelOptionsId \|\| null\)/,
+    "新建场景包卡应插到选模卡之前，避免回到对话开头或末尾错位",
+  );
+  assert.match(
+    workspaceSource,
+    /sceneAssetsAwaitingModel = Boolean\(\s*!hasImages && !sceneAssetsGenerating && !modelConfirmed/,
+    "已确认生图模型后不得把场景包卡打回 awaitingModel，否则会藏掉确认并生成视频",
+  );
 });
 
 test("persisted chat messages keep the optimistic client id for action dedupe", () => {
   const persistStart = workspaceSource.indexOf("const persistChatMessage = async");
   const persistEnd = workspaceSource.indexOf("const appendMessageForConversation", persistStart);
-  const responseStart = workspaceSource.indexOf("function messageFromResponse");
-  const responseEnd = workspaceSource.indexOf("export function WorkspacePage", responseStart);
+  const responseStart = legacyWorkspaceHelpersSource.indexOf("function messageFromResponse");
+  const responseEnd = legacyWorkspaceHelpersSource.indexOf("function hasMaterializedMessageJob", responseStart);
   assert.notEqual(persistStart, -1, "persistChatMessage must exist");
   assert.notEqual(persistEnd, -1, "appendMessageForConversation must follow persistChatMessage");
   assert.notEqual(responseStart, -1, "messageFromResponse must exist");
-  assert.notEqual(responseEnd, -1, "WorkspacePage must follow messageFromResponse");
+  assert.notEqual(responseEnd, -1, "hasMaterializedMessageJob must follow messageFromResponse");
   const persistSource = workspaceSource.slice(persistStart, persistEnd);
-  const responseSource = workspaceSource.slice(responseStart, responseEnd);
+  const responseSource = legacyWorkspaceHelpersSource.slice(responseStart, responseEnd);
   assert.match(persistSource, /client_message_id:\s*message\.id/, "persisted payload must include the frontend client message id");
   assert.match(persistSource, /id:\s*message\.id/, "saved optimistic message must keep the same id used by pending timers");
   assert.match(responseSource, /client_message_id/, "restored history must prefer the persisted client message id");
 });
 
 test("artifact action dedupe is scoped by conversation id", () => {
-  assert.match(workspaceSource, /function processedArtifactKey/, "WorkspacePage must build a stable artifact action key");
-  assert.match(workspaceSource, /conversationId \|\| "local"/, "artifact action key must include the owning conversation id");
+  assert.match(legacyWorkspaceHelpersSource, /function processedArtifactKey/, "Workspace must build a stable artifact action key");
+  assert.match(legacyWorkspaceHelpersSource, /conversationId \|\| "local"/, "artifact action key must include the owning conversation id");
   assert.match(workspaceSource, /beginArtifactAction\(msg,\s*targetConversationId\)/, "artifact actions must be guarded after resolving message conversation");
 });
 
@@ -761,8 +802,28 @@ test("V2.1 batch B asset package paths submit Turn instead of gateway jobs", () 
 
   const confirmSource = workspaceSource.slice(confirmStart, startPackage);
   assert.match(confirmSource, /orchestrationModeRef\.current === "video_agent_v2"/);
-  assert.match(confirmSource, /确认脚本并生成资产包/);
-  assert.match(confirmSource, /handleSupervisorTurn/);
+  assert.match(confirmSource, /confirmVideoAgentScriptPlanWithRevisionRetry/);
+  assert.match(confirmSource, /createAssetPackageProgressSteps/);
+  assert.doesNotMatch(confirmSource, /content: "确认脚本"/);
+  assert.doesNotMatch(
+    confirmSource.slice(
+      confirmSource.indexOf("video_agent_v2"),
+      confirmSource.indexOf("return;", confirmSource.indexOf("video_agent_v2")),
+    ),
+    /handleSupervisorTurn/,
+  );
+  assert.doesNotMatch(confirmSource, /已交给 VideoAgent 判断下一步/);
+  assert.doesNotMatch(confirmSource, /请根据工作区选择下一步/);
+  const v2Idx = confirmSource.indexOf('video_agent_v2');
+  const v2Return = confirmSource.indexOf("return;", v2Idx);
+  assert.notEqual(v2Idx, -1);
+  assert.notEqual(v2Return, -1);
+  const v2ConfirmBranch = confirmSource.slice(v2Idx, v2Return);
+  assert.doesNotMatch(
+    v2ConfirmBranch,
+    /ensureDurableScriptPlanMessage/,
+    "V2 confirm must not create legacy plan.md card",
+  );
   assert.equal(confirmSource.includes("api.startPrepareScenePackagesJob"), false, "V2 script confirm must not start prepare job inline");
 
   const packageEnd = workspaceSource.indexOf("const existing = pendingScenePackageJobRef.current", startPackage);
@@ -772,18 +833,16 @@ test("V2.1 batch B asset package paths submit Turn instead of gateway jobs", () 
   assert.equal(v2PackageBranch.includes("api.startPrepareScenePackagesJob"), false);
 
   const modelV2 = workspaceSource.indexOf("V2.1 批次 B：模型确认后提交 Turn", confirmModel);
-  const modelJob = workspaceSource.indexOf("api.startSceneAssetsJob", modelV2);
   assert.notEqual(modelV2, -1, "model confirm must have V2 Turn branch");
-  assert.ok(modelV2 < modelJob, "V2 model Turn branch must precede legacy startSceneAssetsJob");
-  const modelBranch = workspaceSource.slice(modelV2, modelJob);
+  assert.equal(workspaceSource.includes("api.startSceneAssetsJob"), false, "legacy startSceneAssetsJob must be removed from workspace");
+  const modelBranch = workspaceSource.slice(modelV2, modelV2 + 900);
   assert.match(modelBranch, /handleSupervisorTurn/);
   assert.match(modelBranch, /开始生成参考图/);
 
   const retryV2 = workspaceSource.indexOf("V2.1 批次 B：失败参考图重试走 Turn", retryStart);
-  const retryJob = workspaceSource.indexOf("api.startSceneAssetsJob", retryV2);
   assert.notEqual(retryV2, -1, "retry must have V2 Turn branch");
-  assert.ok(retryV2 < retryJob, "V2 retry Turn branch must precede legacy startSceneAssetsJob");
-  const retryBranch = workspaceSource.slice(retryV2, retryJob);
+  assert.equal(workspaceSource.slice(retryV2).includes("api.startSceneAssetsJob"), false, "legacy startSceneAssetsJob must be removed from retry path");
+  const retryBranch = workspaceSource.slice(retryV2, retryV2 + 700);
   assert.match(retryBranch, /继续生成失败的参考图/);
   assert.match(retryBranch, /handleSupervisorTurn/);
 });
@@ -797,24 +856,27 @@ test("V2.1 batch C scene patch and dirty regen submit Turn instead of scene vide
   assert.notEqual(revisionStart, -1);
 
   const updateSource = workspaceSource.slice(updateStart, generateStart);
-  assert.match(updateSource, /V2\.1 批次 C：工作台编辑提交 Turn/);
+  assert.match(updateSource, /仅在「保存」冲洗草稿时进入这里/);
   assert.match(updateSource, /修改分镜 \$\{sceneId\}/);
   assert.match(updateSource, /handleSupervisorTurn/);
+  assert.match(updateSource, /deferSceneUpdates/);
+  // V2 必须 defer：禁止按键即 Turn。
+  assert.match(
+    workspaceSource,
+    /deferSceneUpdates=\{\s*orchestrationMode === "video_agent_v2" \|\| Boolean\(supervisorVideoArtifact\)\s*\}/,
+  );
 
   const generateV2 = workspaceSource.indexOf("V2.1 批次 C：分镜视频生成/脏镜重生成走 Turn", generateStart);
-  const generateJob = workspaceSource.indexOf("api.startSceneVideosJob", generateV2);
   assert.notEqual(generateV2, -1);
-  assert.ok(generateV2 < generateJob);
-  const generateBranch = workspaceSource.slice(generateV2, generateJob);
+  assert.equal(workspaceSource.includes("api.startSceneVideosJob"), false, "legacy startSceneVideosJob must be removed from workspace");
+  const generateBranch = workspaceSource.slice(generateV2, generateV2 + 900);
   assert.match(generateBranch, /重新生成已修改的分镜视频/);
   assert.match(generateBranch, /确认并生成分镜视频/);
   assert.match(generateBranch, /handleSupervisorTurn/);
 
   const revisionV2 = workspaceSource.indexOf("V2.1 批次 C：QC/修改意见重生成走 Turn", revisionStart);
-  const revisionJob = workspaceSource.indexOf("api.startSceneVideosJob", revisionV2);
   assert.notEqual(revisionV2, -1);
-  assert.ok(revisionV2 < revisionJob);
-  assert.match(workspaceSource.slice(revisionV2, revisionJob), /handleSupervisorTurn/);
+  assert.match(workspaceSource.slice(revisionV2, revisionV2 + 700), /handleSupervisorTurn/);
 });
 
 test("V2.1 batch D closes workflow shadow progress and actions for video_agent_v2", () => {
@@ -830,11 +892,11 @@ test("V2.1 batch D closes workflow shadow progress and actions for video_agent_v
 });
 
 test("image form values preserve requested multi-image count", () => {
-  const valuesStart = workspaceSource.indexOf("function valuesFromForm");
-  const valuesEnd = workspaceSource.indexOf("function formatSceneIndexesForMessage", valuesStart);
+  const valuesStart = legacyWorkspaceHelpersSource.indexOf("function valuesFromForm");
+  const valuesEnd = legacyWorkspaceHelpersSource.indexOf("function formatSceneIndexesForMessage", valuesStart);
   assert.notEqual(valuesStart, -1, "valuesFromForm must exist");
   assert.notEqual(valuesEnd, -1, "formatSceneIndexesForMessage must follow valuesFromForm");
-  const source = workspaceSource.slice(valuesStart, valuesEnd);
+  const source = legacyWorkspaceHelpersSource.slice(valuesStart, valuesEnd);
   assert.match(source, /image_count:\s*form\.image_count/);
 });
 
@@ -853,10 +915,10 @@ test("video product category is editable text initialized from intake industry t
   assert.equal(genParamsDialogSource.includes("const VIDEO_CATEGORIES"), false, "video product category must not use fixed radio choices");
   assert.match(genParamsDialogSource, /product_category:\s*textValue\(values,\s*"product_category"\)/, "video product category must accept free text");
   assert.match(genParamsDialogSource, /label="产品品类"[\s\S]*<input[\s\S]*value=\{video\.product_category\}/, "video product category must render as an input");
-  assert.match(workspaceSource, /function initialValuesFromIntake\(intake: IntakeIntentResponse\)/, "Workspace must adapt intake values before opening the dialog");
-  assert.match(workspaceSource, /function displayIndustryType\(value: string\)/, "Workspace must normalize generic industry labels for display");
-  assert.match(workspaceSource, /return "其他品类"/, "generic industry values must display as other category");
-  assert.match(workspaceSource, /values\.product_category = displayIndustryType\(industryType\)/, "video product category must default to display-safe intake_context.industry_type");
+  assert.match(legacyWorkspaceHelpersSource, /function initialValuesFromIntake\(intake: IntakeIntentResponse\)/, "Workspace must adapt intake values before opening the dialog");
+  assert.match(legacyWorkspaceHelpersSource, /function displayIndustryType\(value: string\)/, "Workspace must normalize generic industry labels for display");
+  assert.match(legacyWorkspaceHelpersSource, /return "其他品类"/, "generic industry values must display as other category");
+  assert.match(legacyWorkspaceHelpersSource, /values\.product_category = displayIndustryType\(industryType\)/, "video product category must default to display-safe intake_context.industry_type");
   assert.match(workspaceSource, /setPendingFormValues\(initialValuesFromIntake\(intake\)\)/, "dialog must receive adapted intake initial values");
 });
 
@@ -931,6 +993,13 @@ test("restoring or creating a conversation clears stale pending dialog attachmen
   assert.match(applySource, /setPendingFormValues\(\{\}\)/, "restore must clear stale pending form values");
   assert.match(applySource, /pendingDialogContextRef\.current = null/, "restore must clear stale pending dialog context");
   assert.match(resetSource, /setPendingFormValues\(\{\}\)/, "new conversation reset must clear pending form values");
+  assert.match(resetSource, /setSceneVideoProgressSteps\(\[\]\)/, "新建对话必须清空分镜视频执行规划进度板");
+  assert.match(resetSource, /setAssetPackageProgressSteps\(\[\]\)/, "新建对话必须清空资产包执行规划进度板");
+  assert.match(
+    workspaceSource,
+    /setActiveConversationId[\s\S]*setSceneVideoProgressSteps\(\[\]\)/,
+    "切换会话时必须清空分镜视频进度，避免串到新对话",
+  );
 });
 
 test("恢复快照必须用响应中的对话 ID 绑定工作流进度", () => {
@@ -959,14 +1028,29 @@ test("恢复快照必须用响应中的对话 ID 绑定工作流进度", () => {
     /applySnapshot\(\{[\s\S]*\}, detail\.conversation\.conversation_id\)/,
     "恢复入口必须把服务端响应中的对话 ID 传给快照应用",
   );
+  assert.match(
+    applySource,
+    /无分镜\/方案内容时保持关闭/,
+    "历史恢复不得打开空「画布」占位",
+  );
+  assert.match(
+    applySource,
+    /setSelectedStoryboardMessageId\(latestPackages\.id\)/,
+    "若恢复时曾打开画布且有场景包，应回填分镜面而非空占位",
+  );
+  assert.match(
+    workspaceSource,
+    /不把空占位画布写进会话快照/,
+    "makeSnapshot 不得持久化无内容的 canvasOpen",
+  );
 });
 
 test("image edit intake bypasses the normal directions and plan flow", () => {
   const source = handleSendSource();
   const intakeCompletionSource = handleCompletedIntakeJobSource();
   assert.match(workspaceSource, /pendingImageEditRequestRef/, "Workspace must store an image-edit request while waiting for upload");
-  assert.match(workspaceSource, /function looksLikeImageEditPrompt/, "Workspace must detect natural image-edit prompts");
-  assert.match(workspaceSource, /function isImageEditIntake/, "Workspace must detect image-edit intake metadata");
+  assert.match(legacyWorkspaceHelpersSource, /function looksLikeImageEditPrompt/, "Workspace must detect natural image-edit prompts");
+  assert.match(legacyWorkspaceHelpersSource, /function isImageEditIntake/, "Workspace must detect image-edit intake metadata");
   assert.match(workspaceSource, /const executeDirectImageEdit = async/, "Workspace must have a direct image-edit executor");
   assert.match(source, /if \(pendingImageEditRequestRef\.current\?\.conversationId === activeConversation\)/, "next user upload must resume pending image edit");
   assert.match(source, /looksLikeImageEditPrompt\(text\)[\s\S]*pendingImageEditRequestRef\.current = null/, "a fresh image-edit prompt must reset stale pending image-edit state");
@@ -992,21 +1076,26 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(viteConfigSource, /\^\/api\(\/\|\$\)/, "Vite dev server must proxy all content-app /api calls");
   assert.match(optionsSource, /api\.listImageGenerateModelConfigs/, "image-edit options step must load live model configs");
   assert.match(optionsSource, /type:\s*"image_edit_options"/, "image-edit options must be rendered as a chat artifact");
-  assert.match(workspaceSource, /modelType:\s*"gpt-image-2"/, "image-edit options should keep gpt-image-2 as the request model by default");
+  assert.match(legacyWorkspaceHelpersSource, /modelType:\s*"gpt-image-2"/, "image-edit options should keep gpt-image-2 as the request model by default");
   assert.match(executeSource, /request\.selection/, "direct image edit must use the confirmed model selection");
   assert.match(executeSource, /image_model/, "confirmed model must be written into image form values");
   assert.match(executeSource, /image_quality/, "confirmed quality must be written into image form values");
-  assert.match(workspaceSource, /const AUTO_CONFIRM_TIMEOUT_MS = 60_000/, "auto-confirm timeout must be 60 seconds");
+  assert.match(legacyWorkspaceModuleSource, /const AUTO_CONFIRM_TIMEOUT_MS = 60_000/, "auto-confirm timeout must be 60 seconds");
   assert.match(workspaceSource, /window\.setTimeout\([\s\S]*handleAcceptImageResult\(imageResultMessage, true\)[\s\S]*AUTO_CONFIRM_TIMEOUT_MS/, "successful direct image edit must auto-accept after 60 seconds");
   assert.match(messageBubbleSource, /imageEditModelConfigs/, "MessageBubble must render image-edit model options");
   assert.match(messageBubbleSource, /if \(model === "gpt-image-2"\) return "image-2"/, "MessageBubble must show image-2 as the gpt-image-2 display label");
   assert.match(messageBubbleSource, /onConfirmImageEditOptions/, "MessageBubble must submit selected image-edit options");
   assert.match(messageBubbleSource, /scene_asset_model_options/, "MessageBubble must render scene asset model options card");
   assert.match(messageBubbleSource, /onConfirmSceneAssetModel/, "MessageBubble must submit selected scene asset model");
-  assert.match(workspaceSource, /generate_images:\s*false/, "Video Agent asset package prepare must pause before image generation");
-    assert.match(workspaceSource, /handleConfirmSceneAssetModel/, "Workspace must confirm scene asset model before generate-scene-assets");
-  assert.match(workspaceSource, /startSceneAssetsJob/, "Confirmed model must start generate-scene-assets job");
-  assert.match(workspaceSource, /reference_brief/, "Confirmed model must pass reference brief into generate-scene-assets");
+  assert.match(legacyWorkspaceTypesSource, /generate_images\?: boolean/, "prepare job request type must retain generate_images pause flag");
+  assert.match(workspaceSource, /handleConfirmSceneAssetModel/, "Workspace must confirm scene asset model before generate-scene-assets");
+  assert.doesNotMatch(workspaceSource, /startSceneAssetsJob/, "confirmed model must not call removed legacy scene asset job HTTP");
+  assert.match(workspaceSource, /sceneAssetReferenceBrief|referenceBrief/, "confirmed model must persist reference brief for Turn/tool execution");
+  assert.match(
+    workspaceSource,
+    /orchestrationModeRef\.current === "video_agent_v2"[\s\S]*handleSupervisorTurn/,
+    "V2 must submit Turn after scene asset model confirmation",
+  );
   // V2.1：自然语言恢复禁止前端关键词编排；确认卡以外一律交给 turns/start。
   assert.doesNotMatch(workspaceSource, /resolveWorkflowResumeIntent/, "Workspace must not route NL via FE resume intents");
   assert.match(workspaceSource, /禁止前端关键词断点恢复/, "Workspace must document V2.1 no-FE-orchestration rule");
@@ -1024,7 +1113,85 @@ test("image edit options load content-app model configs and submit selected mode
   assert.doesNotMatch(stagesSource, /export function isRetryFailedSceneAssetsRequest/, "FE keyword retry detector must be deleted");
   assert.match(workspaceSource, /applyAssetPackageStructureProgress/, "Asset package progress must surface prepare structure phases");
   assert.match(workspaceSource, /failAssetPackageProgressSteps/, "Resume 404 must fail frozen asset-package progress steps");
-  assert.match(workspaceSource, /activePending\.job_id !== pendingScenePackageJob\.job_id/, "Stale scene-package resume must not clear the active job");
+  assert.match(workspaceSource, /nativeGenerateScenesToolSignal/, "V2 must watch generate_scenes tool signal for video progress");
+  assert.match(workspaceSource, /createSceneVideoProgressSteps/, "V2 must show scene-video progress board after confirm");
+  assert.match(workspaceSource, /upsertNativeSceneVideoPreviewFromWorkspace/, "V2 must project early scene-video preview from workspace");
+  assert.match(
+    workspaceSource,
+    /按 scene_id 合并/,
+    "单镜重生回填必须按 scene_id 合并保留旧成片，避免顶栏被清空",
+  );
+  assert.match(
+    workspaceSource,
+    /回填到「视频场景包」/,
+    "分镜视频 tip 必须引导到视频场景包而非独立预览卡",
+  );
+  assert.match(
+    workspaceSource,
+    /不再落独立「分镜视频」预览卡/,
+    "V2 workspace projection must sync packages only, not create chat video_result cards",
+  );
+  assert.match(workspaceSource, /resolveNativeSceneVideoBatchTotal/, "单镜生成 tip 必须用本批 total，禁止回落全量包数");
+  assert.match(
+    workspaceSource,
+    /generate_scene:\$\{targetSceneId\}/,
+    "单镜并发生成必须用 per-scene artifact action key",
+  );
+  assert.match(
+    messageBubbleSource,
+    /type === "video_result" && msg\.artifact\.mergedVideo/,
+    "对话区仅展示带合并成品的 video_result，不展示 early 分镜视频预览卡",
+  );
+  assert.match(
+    messageBubbleSource,
+    /generatedSceneVideos\?\.scene_videos/,
+    "视频场景包顶栏必须优先用 generatedSceneVideos 渲染分镜成片缩略图",
+  );
+  assert.match(
+    messageBubbleSource,
+    /kind === "video"/,
+    "场景包预览项必须区分 video/image 并用 video 标签播放",
+  );
+  assert.match(
+    messageBubbleSource,
+    /type === "video_result" \? null/,
+    "无合并成品的历史分镜视频卡不得回落到通用 artifact 按钮",
+  );
+  assert.doesNotMatch(
+    messageBubbleSource,
+    /分镜视频预览（生成中）/,
+    "MessageBubble 不得再渲染分镜视频 early 预览区",
+  );
+  const progressSourceForVideo = fs.readFileSync(
+    path.resolve("src/features/video-agent/sceneVideoBatchTotal.ts"),
+    "utf8",
+  );
+  assert.match(
+    progressSourceForVideo,
+    /禁止回落到场景包全量长度/,
+    "resolveNativeSceneVideoBatchTotal 必须文档化禁止全量兜底",
+  );
+  assert.doesNotMatch(
+    workspaceSource,
+    /progress\?\.total\s*\|\|\s*videoScenePackages\.scene_packages\.length/,
+    "分镜视频 tip 不得用场景包全量长度冒充本批启动数",
+  );
+  assert.doesNotMatch(
+    workspaceSource,
+    /sceneVideoProgress\?\.total\s*\|\|\s*videoAgentView\.workspace\?\.scenes\?\.length/,
+    "进度板初始化不得用 scenes.length 冒充本批总数",
+  );
+  assert.match(
+    workspaceSource,
+    /video_result[\s\S]*videoScenePackages[\s\S]*setSelectedStoryboardMessageId\(msg\.id\)/,
+    "带场景包的分镜视频卡打开时必须进入分镜面以便回填预览",
+  );
+  assert.match(workspaceSource, /执行规划 · 分镜视频/, "Composer slot must switch to scene-video progress title");
+  assert.match(
+    workspaceSource,
+    /resumePendingScenePackageJob[\s\S]*if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return/,
+    "legacy scene-package job resume must no-op when HTTP is removed",
+  );
   assert.match(workspaceSource, /upsertPersistedChatMessage/, "Scene package progress cards must PATCH-update persisted messages");
   assert.match(workspaceSource, /sceneAssetModelConfirmed:\s*true/, "Confirming image model must mark the options card confirmed");
   assert.match(workspaceSource, /markConfirmedSceneAssetModelOptions/, "Restore must keep model options confirmed after generation evidence");
@@ -1085,7 +1252,7 @@ test("confirmed image edit options survive conversation restore", () => {
   const applySource = workspaceSource.slice(applyStart, applyEnd);
 
   assert.match(workspaceSource, /imageEditConfirmedSelectionsRef/, "Workspace must keep confirmed image-edit selections by message id");
-  assert.match(workspaceSource, /imageEditConfirmedSelections\?: Record<string, ImageEditModelSelection>/, "conversation snapshots must persist confirmed image-edit selections");
+  assert.match(legacyWorkspaceTypesSource, /imageEditConfirmedSelections\?: Record<string, ImageEditModelSelection>/, "conversation snapshots must persist confirmed image-edit selections");
   assert.match(confirmSource, /recordImageEditConfirmedSelection\(msg\.id,\s*targetConversationId,\s*selection\)/, "confirming image-edit options must record the selected model ratio and quality before generation");
   assert.match(applySource, /applyImageEditConfirmedSelectionsToMessages/, "restored messages must be patched with confirmed selections from context");
   assert.match(messageBubbleSource, /imageEditConfirmedSelection/, "MessageBubble must read the confirmed selection from restored artifacts");
@@ -1214,12 +1381,8 @@ test("failed image video and analysis stages expose retry paths", () => {
     workspaceSource.indexOf("const handleCompletedImageGenerationJob = async"),
     workspaceSource.indexOf("const handleCompletedImageAssetEditJob = async"),
   );
-  const scenePackageJobSource = handleCompletedScenePackageJobSource();
   assert.match(source, /if \(!imagePrepare\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "image prepare failure must release the plan action");
   assert.match(imageJobSource, /if \(!imageResult\.ok\) releaseArtifactAction\(processedKey\)/, "image generation failure must let the previous stage retry");
-  assert.match(scenePackageJobSource, /if \(!videoScenePackages\.ok \|\| quotaPaused\) releaseArtifactAction\(processedKey\)/, "scene package job failure must release the plan action");
-  assert.match(workspaceSource, /if \(!generatedSceneVideos\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "scene video failure must let the scene package card retry");
-  assert.match(workspaceSource, /if \(!mergedVideo\.ok\)[\s\S]*releaseArtifactAction\(processedKey\)/, "merge failure must release the generating scene package action");
   assert.match(messageBubbleSource, /videoGenerationFailed/, "video generation failure card must render a retry affordance");
   assert.match(chatPanelSource, /artifact\.mergedVideo && !artifact\.mergedVideo\.ok && Boolean\(artifact\.generatedSceneVideos\?\.scene_videos\.length\)/, "failed merge cards must remain clickable for retry");
   assert.match(messageBubbleSource, /onRetryVideoAnalysis/, "video analysis failure card must render a retry affordance");
@@ -1232,8 +1395,8 @@ test("image jobs persist their id before polling so conversations can recover", 
   assert.match(apiSource, /startImageAssetEditJob:/, "API client must expose a start-only image asset edit job call");
   assert.match(apiSource, /getImageAssetEditJob:/, "API client must expose a query-only image asset edit job call");
   assert.match(apiSource, /pollImageAssetEditJob,/, "API client must expose polling for existing image asset edit jobs");
-  assert.match(workspaceSource, /pendingImageJob\?: PendingImageJob \| null/, "WorkspaceSnapshot must store pending image jobs");
-  assert.match(workspaceSource, /pending_image_job\?: PendingImageJob \| null/, "WorkspaceSnapshot must restore snake_case pending image jobs");
+  assert.match(legacyWorkspaceTypesSource, /pendingImageJob\?: PendingImageJob \| null/, "WorkspaceSnapshot must store pending image jobs");
+  assert.match(legacyWorkspaceTypesSource, /pending_image_job\?: PendingImageJob \| null/, "WorkspaceSnapshot must restore snake_case pending image jobs");
   assert.match(workspaceSource, /pendingImageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending image job");
 
   const source = handleApprovePlanSource();
@@ -1267,7 +1430,6 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   const completionSource = handleCompletedImageAssetEditJobSource();
   const acceptSource = handleAcceptImageResultSource();
   const revisionStartSource = startSceneGlobalAssetRevisionSource();
-  const revisionCompletionSource = handleCompletedSceneAssetRevisionJobSource();
   const startIndex = executeSource.indexOf("api.startImageAssetEditJob(jobRequest)");
   const fusionStartIndex = executeSource.indexOf("api.startImageAssetFusionJob(jobRequest)");
   const persistIndex = executeSource.indexOf("await persistPendingImageJob(pendingImageJob");
@@ -1296,96 +1458,83 @@ test("scene global asset image editing uses recoverable image edit jobs", () => 
   assert.match(completionSource, /scene_global_asset_edit_review/, "completion must persist the pending review payload");
   assert.doesNotMatch(completionSource, /syncGlobalSceneAssetEditAcrossConversation/, "completion must not replace scene package assets before user confirmation");
   assert.match(acceptSource, /sceneGlobalAssetEditReview[\s\S]*startSceneGlobalAssetRevision/, "accepting the review must start semantic scene package revision");
-  assert.match(revisionStartSource, /api\.startScenePackageAssetRevisionJob\(request\)/, "asset replacement must start the backend analysis and revision job");
-  assert.match(revisionStartSource, /await persistPendingScenePackageJob\(pendingScenePackageJob/, "asset revision job id must be persisted before polling");
-  assert.match(revisionStartSource, /await resumePendingScenePackageJob\(pendingScenePackageJob/, "asset revision must poll the persisted job");
-  assert.match(revisionCompletionSource, /await api\.updateConversationMessage/, "asset revision must update the authoritative source message");
-  assert.match(revisionCompletionSource, /type:\s*"video_scene_packages"/, "asset revision completion must push a fresh scene package card");
-  assert.match(revisionCompletionSource, /videoScenePackageEditedSceneIds:\s*affectedSceneIds/, "affected scenes must be marked dirty for selective video regeneration");
-  assert.match(revisionCompletionSource, /setSelectedStoryboardMessageId\(completedMessage\.id\)/, "the storyboard panel should follow the newly pushed scene package card");
+  assert.match(revisionStartSource, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "asset replacement must block deleted revision job HTTP");
   assert.match(completionSource, /baseVideoScenePackages/, "completion must be able to patch the fallback scene package snapshot");
 });
 
 test("scene video jobs persist their id before polling so conversations can recover", () => {
-  assert.match(apiSource, /startSceneVideosJob:/, "API client must expose a start-only scene video job call");
-  assert.match(apiSource, /getSceneVideosJob:/, "API client must expose a query-only scene video job call");
-  assert.match(apiSource, /pollSceneVideoJob,/, "API client must expose polling for existing scene video jobs");
+  assert.match(apiSource, /startSceneVideosJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene video job start must be stubbed");
+  assert.match(apiSource, /getSceneVideosJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene video job query must be stubbed");
+  assert.match(apiSource, /pollSceneVideoJob,/, "API client must still expose pollSceneVideoJob export");
   assert.match(apiSource, /video_progress\?:/, "scene video job status must expose incremental video_progress");
-  assert.match(workspaceSource, /pendingVideoJob\?: PendingVideoJob \| null/, "WorkspaceSnapshot must store pending video jobs");
-  assert.match(workspaceSource, /pending_video_job\?: PendingVideoJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending video jobs");
+  assert.match(legacyWorkspaceTypesSource, /pendingVideoJob\?: PendingVideoJob \| null/, "WorkspaceSnapshot must store pending video jobs");
+  assert.match(legacyWorkspaceTypesSource, /pending_video_job\?: PendingVideoJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending video jobs");
   assert.match(workspaceSource, /pendingVideoJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending video job");
   assert.match(workspaceSource, /upsertEarlySceneVideoCard/, "scene video polling must upsert an early preview card");
   assert.match(workspaceSource, /pushSceneVideoProgressTip/, "scene video polling must show per-scene progress tips");
   assert.match(workspaceSource, /sceneVideosGenerating:\s*true/, "early scene video card must mark generating");
-  assert.match(workspaceSource, /syncSceneVideoProgress/, "resumePendingVideoJob must sync incremental video progress");
+  assert.match(workspaceSource, /const resumePendingVideoJob = async[\s\S]*?if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/, "resume must skip deleted job HTTP");
 
   const source = handleGenerateVideoFromScenePackagesSource();
-  const startIndex = source.indexOf("api.startSceneVideosJob(request)");
-  const persistIndex = source.indexOf("await persistPendingVideoJob(pendingVideoJob");
-  const pollIndex = source.indexOf("await resumePendingVideoJob(pendingVideoJob, processedKey)");
-  assert.notEqual(startIndex, -1, "scene video generation must start a backend job explicitly");
-  assert.notEqual(persistIndex, -1, "scene video generation must persist the job id");
-  assert.notEqual(pollIndex, -1, "scene video generation must poll the persisted job");
-  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "job id must be persisted before polling starts");
-  assert.match(source, /kind:\s*"scene_generation"/, "first-time scene generation must record its pending job kind");
+  assert.match(source, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "legacy scene video generation must be blocked");
+  assert.match(source, /LEGACY_VIDEO_JOB_CONTINUE_TIP/);
+  assert.match(source, /video_agent_v2/, "V2 path must still submit Turn");
   assert.equal(source.includes("api.generateSceneVideos"), false, "WorkspacePage must not use the start+poll convenience wrapper for scene jobs");
+  // V2 必须先 handleSupervisorTurn，禁止在用户 Turn 前 push「正在生成…」导致刷新后顺序颠倒。
+  {
+    const v2Idx = source.indexOf('orchestrationModeRef.current === "video_agent_v2"');
+    const turnIdx = source.indexOf("handleSupervisorTurn", v2Idx);
+    const tipIdx = source.indexOf("正在生成分镜", v2Idx);
+    assert.ok(v2Idx >= 0 && turnIdx > v2Idx, "V2 branch must call handleSupervisorTurn");
+    assert.ok(
+      tipIdx < 0 || tipIdx > turnIdx,
+      "V2 must not pushAssistant「正在生成分镜…」before the user Turn",
+    );
+  }
 });
 
 test("video merge uses start and polling instead of a long synchronous request", () => {
-  assert.match(apiSource, /startMergeSceneVideosJob:/, "API client must expose a start-only video merge job call");
-  assert.match(apiSource, /getMergeSceneVideosJob:/, "API client must expose a query-only video merge job call");
-  assert.match(apiSource, /pollMergeSceneVideoJob,/, "API client must expose polling for existing video merge jobs");
-  assert.match(apiSource, /const started = await api\.startMergeSceneVideosJob\(body\)/, "mergeSceneVideos must start a backend merge job first");
-  assert.match(apiSource, /return pollMergeSceneVideoJob\(started\.job_id\)/, "mergeSceneVideos must poll the merge job result");
+  assert.match(apiSource, /startMergeSceneVideosJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "merge job start must be stubbed");
+  assert.match(apiSource, /getMergeSceneVideosJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "merge job query must be stubbed");
+  assert.match(apiSource, /pollMergeSceneVideoJob,/, "API client must still expose pollMergeSceneVideoJob export");
+  assert.match(apiSource, /mergeSceneVideos:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "mergeSceneVideos convenience wrapper must throw");
   assert.doesNotMatch(apiSource, /mergeSceneVideos:[\s\S]*?req<MergeSceneVideosResponse>\(`\$\{FLOW_BASE\}\/video\/merge`/, "mergeSceneVideos must not wait on synchronous /video/merge");
 });
 
 test("video merge jobs are persisted before polling so conversations can recover", () => {
-  assert.match(workspaceSource, /type PendingVideoJobKind =[\s\S]*"video_merge"/, "pending video jobs must include video_merge");
-  assert.match(workspaceSource, /api\.getMergeSceneVideosJob\(pendingVideoJob\.job_id\)/, "resumePendingVideoJob must query existing merge jobs");
-  assert.match(workspaceSource, /api\.pollMergeSceneVideoJob\(pendingVideoJob\.job_id,\s*shouldContinuePolling\)/, "resumePendingVideoJob must poll existing merge jobs");
-  assert.match(workspaceSource, /handleCompletedVideoMergeJob\(pendingVideoJob,\s*mergedVideo,\s*processedKey\)/, "merge job completion must use the shared video result handler");
+  assert.match(legacyWorkspaceTypesSource, /type PendingVideoJobKind =[\s\S]*"video_merge"/, "pending video jobs must include video_merge");
+  assert.match(workspaceSource, /startAndResumeVideoMergeJob[\s\S]*?LEGACY_VIDEO_JOB_HTTP_REMOVED/, "merge start must be blocked before HTTP");
 
   const source = startAndResumeVideoMergeJobSource();
-  const startIndex = source.indexOf("api.startMergeSceneVideosJob(request)");
-  const persistIndex = source.indexOf("await persistPendingVideoJob(pendingVideoJob");
-  const pollIndex = source.indexOf("await resumePendingVideoJob(pendingVideoJob, processedKey)");
-  assert.notEqual(startIndex, -1, "scene completion must start a backend merge job explicitly");
-  assert.notEqual(persistIndex, -1, "scene completion must persist the merge job id");
-  assert.notEqual(pollIndex, -1, "scene completion must poll the persisted merge job");
-  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "merge job id must be persisted before polling starts");
+  assert.match(source, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "merge job start must guard deleted HTTP");
+  assert.match(source, /notifyLegacyVideoJobBlocked/, "merge start must notify when legacy HTTP is removed");
 });
 
 test("scene package jobs persist their id before polling so conversations can recover", () => {
-  assert.match(apiSource, /startPrepareScenePackagesJob:/, "API client must expose a start-only scene package job call");
-  assert.match(apiSource, /getPrepareScenePackagesJob:/, "API client must expose a query-only scene package job call");
-  assert.match(apiSource, /pollPrepareScenePackagesJob,/, "API client must expose polling for existing scene package jobs");
-  assert.match(apiSource, /startSceneAssetsJob:/, "API client must expose a start-only scene asset job call");
-  assert.match(apiSource, /getSceneAssetsJob:/, "API client must expose a query-only scene asset job call");
-  assert.match(apiSource, /pollSceneAssetsJob,/, "API client must expose polling for existing scene asset jobs");
-  assert.match(apiSource, /startScenePackageAssetRevisionJob:/, "API client must expose a start-only scene asset revision job call");
-  assert.match(apiSource, /getScenePackageAssetRevisionJob:/, "API client must expose a query-only scene asset revision job call");
-  assert.match(apiSource, /pollScenePackageAssetRevisionJob,/, "API client must expose polling for an existing scene asset revision job");
-  assert.match(workspaceSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
-  assert.match(workspaceSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
+  assert.match(apiSource, /startPrepareScenePackagesJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene package job start must be stubbed");
+  assert.match(apiSource, /getPrepareScenePackagesJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene package job query must be stubbed");
+  assert.match(apiSource, /pollPrepareScenePackagesJob,/, "API client must still expose pollPrepareScenePackagesJob export");
+  assert.match(apiSource, /startSceneAssetsJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene asset job start must be stubbed");
+  assert.match(apiSource, /getSceneAssetsJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene asset job query must be stubbed");
+  assert.match(apiSource, /pollSceneAssetsJob,/, "API client must still expose pollSceneAssetsJob export");
+  assert.match(apiSource, /startScenePackageAssetRevisionJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene asset revision job start must be stubbed");
+  assert.match(apiSource, /getScenePackageAssetRevisionJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/, "scene asset revision job query must be stubbed");
+  assert.match(apiSource, /pollScenePackageAssetRevisionJob,/, "API client must still expose pollScenePackageAssetRevisionJob export");
+  assert.match(legacyWorkspaceTypesSource, /pendingScenePackageJob\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must store pending scene package jobs");
+  assert.match(legacyWorkspaceTypesSource, /pending_scene_package_job\?: PendingScenePackageJob \| null/, "WorkspaceSnapshot must restore legacy snake_case pending scene package jobs");
   assert.match(workspaceSource, /pendingScenePackageJobRef\.current\?\.conversation_id === snapshotConversationId/, "conversation snapshots must keep the active pending scene package job");
+  assert.match(workspaceSource, /const resumePendingScenePackageJob = async[\s\S]*?if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/, "resume must skip deleted job HTTP");
 
   const source = handleApprovePlanSource();
-  const startIndex = source.indexOf("api.startPrepareScenePackagesJob(request)");
-  const persistIndex = source.indexOf("await persistPendingScenePackageJob(pendingScenePackageJob");
-  const pollIndex = source.indexOf("await resumePendingScenePackageJob(pendingScenePackageJob, processedKey)");
-  assert.notEqual(startIndex, -1, "video approval must start a backend scene package job explicitly");
-  assert.notEqual(persistIndex, -1, "video approval must persist the job id");
-  assert.notEqual(pollIndex, -1, "video approval must poll the persisted job");
-  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "scene package job id must be persisted before polling starts");
-  assert.match(source, /kind:\s*"scene_package_generation"/, "scene package generation must record its pending job kind");
+  assert.match(source, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "plan approval must block legacy job HTTP when not on V2");
 });
 
 test("scene reference image retry only submits failed asset targets", () => {
   const source = handleRetrySceneAssetsSource();
+  const scenePackagesSource = fs.readFileSync(path.resolve("src/lib/scenePackages.ts"), "utf8");
   assert.match(source, /sceneAssetRetryTargets\(artifact\.sceneAssetFailures\)/, "retry must derive stable targets from failed assets");
-  assert.match(source, /target_assets:\s*targetAssets/, "retry request must carry only failed asset targets");
-  assert.match(workspaceSource, /mergeSceneAssetRetryFailures\(/, "retry completion must preserve failures not completed by this retry");
+  assert.match(source, /LEGACY_VIDEO_JOB_HTTP_REMOVED && orchestrationModeRef\.current !== "video_agent_v2"/, "retry must block legacy scene asset job HTTP");
+  assert.match(scenePackagesSource, /export function mergeSceneAssetRetryFailures/, "retry completion helper must preserve failures not completed by this retry");
   assert.match(apiSource, /target_assets\?: SceneAssetRetryTarget\[\]/, "scene asset API DTO must expose the target whitelist");
 });
 
@@ -1414,20 +1563,10 @@ test("V2.1 natural-language follow-ups must not use FE keyword resume orchestrat
 
 test("video plan contract drives scene package assets videos and recoverable jobs", () => {
   const approveSource = handleApprovePlanSource();
-  const sceneRequestStart = workspaceSource.indexOf("const sceneVideoRequestFromPackages = (");
-  const sceneRequestEnd = workspaceSource.indexOf("const handleCompletedSceneGenerationJob", sceneRequestStart);
-  const sceneRequestSource = workspaceSource.slice(sceneRequestStart, sceneRequestEnd);
 
   assert.match(approveSource, /const creationContract = artifact\.plan\.creation_contract/, "video approval must use the final Plan contract");
-  assert.match(approveSource, /target_duration_ms:\s*creationContract\.video_duration_sec \* 1000/, "scene timeline must use confirmed duration");
-  assert.match(approveSource, /creation_contract:\s*creationContract/, "scene package request must carry the final contract");
   assert.doesNotMatch(approveSource, /inferTargetDurationMs\(/, "video approval must not infer duration again after Plan approval");
-  assert.match(sceneRequestSource, /videoScenePackages\.creation_contract/, "scene video request must read the persisted final contract");
-  assert.match(sceneRequestSource, /ratio:\s*creationContract\.video_ratio/, "scene videos must use the confirmed ratio");
-  assert.match(sceneRequestSource, /size:\s*creationContract\.video_size/, "scene videos must use the confirmed size");
-  assert.match(sceneRequestSource, /model:\s*creationContract\.video_model/, "scene videos must use the confirmed model");
-  assert.match(sceneRequestSource, /sound:\s*creationContract\.video_sound/, "scene videos must use the confirmed sound setting");
-  assert.match(workspaceSource, /creation_contract:\s*videoScenePackages\.creation_contract/, "conversation context must persist the contract with scene packages");
+  assert.match(legacyWorkspaceModuleSource, /creation_contract:\s*videoScenePackages\.creation_contract/, "conversation context must persist the contract with scene packages");
 });
 
 test("restored conversations resume existing video jobs without starting duplicates", () => {
@@ -1446,24 +1585,13 @@ test("restored conversations resume existing scene package jobs without starting
   assert.equal(applySource.includes("startPrepareScenePackagesJob"), false, "restore must not start a duplicate scene package job");
   assert.equal(applySource.includes("startSceneAssetsJob"), false, "restore must not start a duplicate scene asset job");
   assert.equal(resumeSource.includes("已恢复上次场景包生成任务"), false, "restore polling should not append duplicate progress messages");
-  assert.match(resumeSource, /const shouldContinuePolling = \(\) => isVisibleConversation\(pendingScenePackageJob\.conversation_id\)/, "scene package polling must stop when the conversation is no longer visible");
-  assert.match(resumeSource, /pausedForHiddenConversation[\s\S]*releaseArtifactAction\(processedKey\)/, "stopping hidden conversation polling must release the local action lock without clearing the pending job");
+  assert.match(resumeSource, /if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/, "scene package resume must skip deleted job HTTP");
   assert.match(workspaceSource, /pendingScenePackageResumeVersion/, "restored scene package jobs must trigger a post-render resume signal");
   assert.match(workspaceSource, /hasMaterializedScenePackageJob\(messagesRef\.current, pendingScenePackageJob\)/, "post-render resume must not rematerialize a completed scene package job");
-  assert.match(
-    workspaceSource,
-    /终态场景包也通过可恢复消息 job 落库[\s\S]*?startConversationMessageJobForConversation\([\s\S]*?completedMessage[\s\S]*?targetConversationId/,
-    "素材修订终态卡片必须通过可恢复消息 job 保存，避免切换对话时只留下处理中消息",
-  );
-  assert.match(
-    workspaceSource,
-    /结束时必须等权威 context 成功落库后再清空[\s\S]*?await updateConversationWithProgress[\s\S]*?pendingScenePackageJobRef\.current = null/,
-    "场景包 pending 句柄必须在终态 context 落库后清空，防止自动保存回写旧运行态",
-  );
 });
 
 test("REST 与 Supervisor 两条消息恢复投影都转换为完整本地时间", () => {
-  assert.match(workspaceSource, /time: formatMessageTime\(message\.created_at\)/, "REST 恢复消息必须格式化服务端时间");
+  assert.match(legacyWorkspaceHelpersSource, /time: formatMessageTime\(message\.created_at\)/, "REST 恢复消息必须格式化服务端时间");
   assert.match(
     workspaceSource,
     /mergeSupervisorMessagesWithPending\([\s\S]*?\)\.map\(\(message\) => \(\{[\s\S]*?time: formatMessageTime\(message\.time, "zh-CN", undefined, message\.time\)/,
@@ -1473,17 +1601,10 @@ test("REST 与 Supervisor 两条消息恢复投影都转换为完整本地时间
 
 test("video revision regeneration also uses recoverable scene video jobs", () => {
   const source = handleRegenerateVideoWithRevisionSource();
-  const startIndex = source.indexOf("api.startSceneVideosJob(request)");
-  const persistIndex = source.indexOf("await persistPendingVideoJob(pendingVideoJob");
-  const pollIndex = source.indexOf("await resumePendingVideoJob(pendingVideoJob, processedKey)");
-  assert.notEqual(startIndex, -1, "video revision must start a backend scene job explicitly");
-  assert.notEqual(persistIndex, -1, "video revision must persist the job id");
-  assert.notEqual(pollIndex, -1, "video revision must poll the persisted job");
-  assert.ok(startIndex < persistIndex && persistIndex < pollIndex, "revision job id must be persisted before polling starts");
-  assert.match(source, /kind:\s*"scene_regeneration"/, "video revision must record its pending job kind");
-  assert.match(source, /affected_scene_ids:\s*Array\.from\(affectedSceneIds\)/, "video revision pending job must preserve affected scene ids");
-  assert.match(source, /scenePackagesWithRevisionContract/, "video revision must rewrite affected scene packages before regeneration");
-  assert.match(source, /sceneVideoRequestFromPackages\(nextVideoScenePackages,\s*affectedSceneIds(?:,\s*affectedSceneIds)?(?:,\s*targetConversationId)?\)/, "video revision request must use the rewritten scene package contract");
+  assert.match(source, /LEGACY_VIDEO_JOB_HTTP_REMOVED/, "video revision must block legacy scene video job HTTP");
+  assert.match(source, /LEGACY_VIDEO_JOB_CONTINUE_TIP/);
+  assert.match(source, /video_agent_v2/, "V2 path must still submit Turn");
+  assert.match(source, /sceneIdsForRevision/, "video revision must compute affected scenes from feedback");
   assert.equal(source.includes("api.generateSceneVideos"), false, "video revision must not use the start+poll convenience wrapper");
 });
 
@@ -1494,65 +1615,117 @@ test("scene package storyboard edits after final video regenerate only dirty sce
   assert.match(workspaceSource, /messagesRef\.current = nextItems[\s\S]*return nextItems/, "storyboard edits must update messagesRef before generation reads the artifact");
   assert.match(source, /const latestMessage =[\s\S]*messagesRef\.current\.find[\s\S]*message\.id === msg\.id[\s\S]*const artifact = latestMessage\.artifact/, "scene generation must reload the latest scene package artifact by message id");
   assert.match(source, /canReuseUneditedSceneVideos\(videoScenePackages,\s*artifact\.generatedSceneVideos,\s*dirtySceneIds\)/, "dirty-scene regeneration must be based on reusable scene videos instead of only mergedVideo.ok");
+  assert.match(source, /video_agent_v2/, "V2 path must submit Turn for dirty-scene regeneration");
   assert.doesNotMatch(source, /const isFinalStoryboardRegeneration = Boolean\(artifact\.mergedVideo\?\.ok/, "dirty-scene regeneration must not require an already merged final video");
-  assert.match(source, /kind:\s*"scene_regeneration"/, "confirmed final storyboard edits must use recoverable scene regeneration jobs");
-  assert.match(source, /affected_scene_ids:\s*Array\.from\(dirtySceneIds\)/, "pending regeneration jobs must persist the dirty scene ids");
-  assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*dirtySceneIds(?:,\s*dirtySceneIds)?(?:,\s*targetConversationId)?\)/, "request builder must receive only dirty scenes for final storyboard edits");
-  assert.match(source, /merged_video:\s*artifact\.mergedVideo/, "pending regeneration context must retain the previous merged video when present");
-  assert.doesNotMatch(source, /artifact\.type === "video_result"/, "dirty-scene regeneration must work from the original scene package card, not only video_result cards");
-  assert.match(workspaceSource, /sceneVideoForPackageScene\(scene,\s*regenerated\.scene_videos\)[\s\S]*sceneVideoForPackageScene\(scene,\s*previousGeneratedSceneVideos\.scene_videos\)/, "regeneration completion must reuse unchanged scene videos with scene_index fallback");
 });
 
 test("video QC revisions use scene-package-ready baseline instead of user-edited result packages", () => {
-  const completedScenePackageSource = handleCompletedScenePackageJobSource();
   const generateSource = handleGenerateVideoFromScenePackagesSource();
   const revisionSource = handleRegenerateVideoWithRevisionSource();
 
-  assert.match(completedScenePackageSource, /originalVideoScenePackages:\s*videoScenePackages/, "scene package ready card must freeze the original scene contract");
-  assert.match(generateSource, /const originalVideoScenePackages = artifact\.originalVideoScenePackages \|\| latestOriginalVideoScenePackagesForConversation/, "scene video job must recover the frozen baseline before persisting");
-  assert.match(generateSource, /artifact:\s*\{\s*\.\.\.artifact,\s*originalVideoScenePackages/, "scene video job must carry the frozen scene package baseline forward");
-  assert.doesNotMatch(generateSource, /originalVideoScenePackages:\s*artifact\.originalVideoScenePackages\s*\|\|\s*videoScenePackages/, "video result must not freeze a possibly user-edited package as the original baseline");
+  // V2 生成路径只提交 Turn，不再在 handler 内落 video_result；基线仍由场景包消息/修订路径恢复。
+  assert.match(generateSource, /video_agent_v2/, "V2 path must submit Turn for scene generation");
+  assert.doesNotMatch(
+    generateSource,
+    /originalVideoScenePackages:\s*artifact\.originalVideoScenePackages\s*\|\|\s*videoScenePackages/,
+    "video result must not freeze a possibly user-edited package as the original baseline",
+  );
+  assert.match(
+    workspaceSource,
+    /originalVideoScenePackages:\s*artifact\.originalVideoScenePackages \|\| videoScenePackages/,
+    "legacy early video card / package sync may still carry baseline from artifact",
+  );
   assert.match(revisionSource, /const originalVideoScenePackages = artifact\.originalVideoScenePackages \|\| latestOriginalVideoScenePackagesForConversation/, "QC revision must recover the frozen baseline");
-  assert.match(revisionSource, /originalVideoScenePackages\.scene_packages as ScenePackageRecord\[\]/, "QC revision must restore affected scenes from the frozen baseline");
+  assert.match(revisionSource, /sceneIdsForRevision/, "QC revision must compute affected scenes");
 });
 
 test("failed scene video retries only resubmit failed scenes and reuse successful scene videos", () => {
   const source = handleGenerateVideoFromScenePackagesSource();
   assert.match(source, /failedSceneIdsFromGeneratedSceneVideos/, "failed scene ids must be extracted from generatedSceneVideos.failed_scenes");
-  assert.match(source, /kind:\s*"scene_failed_retry"/, "retrying failed scene videos must use a distinct recoverable job kind");
-  assert.match(source, /sceneVideoRequestFromPackages\(videoScenePackages,\s*retrySceneIds(?:,\s*retrySceneIds)?(?:,\s*targetConversationId)?\)/, "failed scene retry must only submit the failed scene ids");
-  assert.match(workspaceSource, /sceneVideoForPackageScene\(scene,\s*retried\.scene_videos\)[\s\S]*sceneVideoForPackageScene\(scene,\s*previousGeneratedSceneVideos\.scene_videos\)/, "retry completion must reuse previously successful scene videos with scene_index fallback");
+  assert.match(source, /isFailedSceneRetry/, "retrying failed scene videos must detect failed scene retry mode");
+  assert.match(source, /video_agent_v2/, "V2 path must submit Turn for scene generation");
 });
 
 test("scene generation completion updates the original scene package card with videos", () => {
   assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/, "workspace must update the original scene package message after videos are generated");
-  assert.match(workspaceSource, /source_message_id:[\s\S]*pendingVideoJob\.source_message_id/, "pending video jobs must keep the original scene package message id");
-  assert.match(workspaceSource, /generatedSceneVideos[\s\S]*mergedVideo[\s\S]*videoScenePackageEditedSceneIds:\s*\[\]/, "the original scene package card must receive generated scene videos and merged video");
   assert.match(workspaceSource, /currentMessage\?\.artifact \|\| savedMessage\.artifact/, "conversation message save responses must not overwrite locally enriched artifacts");
   assert.match(workspaceSource, /messagesRef\.current = nextItems[\s\S]*return nextItems/, "scene package video-result sync must update the message ref used by later snapshots");
 });
 
 test("final storyboard edits persist and restore the latest scene package context", () => {
-  assert.match(workspaceSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
-  assert.match(workspaceSource, /latestScenePackageSnapshotForConversation/, "snapshots must preserve latest scene package restore fields");
-  assert.match(workspaceSource, /latestVideoResultArtifactForConversation/, "restoring after refresh must recover scene videos from the persisted video_result card");
+  assert.match(legacyWorkspaceModuleSource, /video_scene_package_edited_scene_ids/, "dirty scene ids must be persisted in conversation context");
+  assert.match(legacyWorkspaceModuleSource, /latestScenePackageSnapshotForConversation/, "snapshots must preserve latest scene package restore fields");
+  assert.match(legacyWorkspaceModuleSource, /latestVideoResultArtifactForConversation/, "restoring after refresh must recover scene videos from the persisted video_result card");
   assert.match(
-    workspaceSource,
+    legacyWorkspaceHelpersSource,
     /latestVideoResultArtifact\?\.generatedSceneVideos \|\|[\s\S]*message\.artifact\.generatedSceneVideos \|\|[\s\S]*contextGeneratedSceneVideos/,
     "存在权威消息时必须优先用视频结果或原场景包消息恢复分镜视频",
   );
   assert.match(
-    workspaceSource,
+    legacyWorkspaceHelpersSource,
     /global_assets:\s*videoScenePackages\.global_assets,[\s\S]*scene_packages:\s*videoScenePackages\.scene_packages/,
     "存在权威场景包消息时不得用旧 context 覆盖素材和分镜",
   );
   assert.match(workspaceSource, /messagesRef\.current = snapshot\.messages/, "restored messages must update the ref used by snapshot persistence");
-  assert.match(workspaceSource, /generated_scene_videos:\s*artifact\.generatedSceneVideos\?\.scene_videos/, "snapshot must include generated scene videos from the latest scene package card");
-  assert.match(workspaceSource, /merged_video:\s*artifact\.mergedVideo/, "snapshot must include merged video from the latest scene package card");
+  assert.match(legacyWorkspaceHelpersSource, /generated_scene_videos:\s*artifact\.generatedSceneVideos\?\.scene_videos/, "snapshot must include generated scene videos from the latest scene package card");
+  assert.match(legacyWorkspaceHelpersSource, /merged_video:\s*artifact\.mergedVideo/, "snapshot must include merged video from the latest scene package card");
   assert.match(workspaceSource, /\.\.\.scenePackageSnapshot/, "all conversation updates based on makeSnapshot must keep scene video restore fields");
-  assert.match(workspaceSource, /preferredVideoScenePackagesMessageIndex\(messages\)/, "restored context must prefer scene package cards that already have images");
+  assert.match(legacyWorkspaceModuleSource, /preferredVideoScenePackagesMessageIndex\(messages\)/, "restored context must prefer scene package cards that already have images");
   assert.match(workspaceSource, /generated_scene_videos[\s\S]*merged_video/, "restored scene package context must include generated scene videos and merged video");
   assert.match(workspaceSource, /api\s*\.\s*updateConversation\(targetConversationId,[\s\S]*global_assets:[\s\S]*scene_packages:[\s\S]*video_scene_package_edited_scene_ids/, "scene package edits must update conversation context");
+});
+
+test("场景包就绪后先弹选模卡再生成参考图，且有场景包时 prepare 进度必须解卡", () => {
+  const progressSource = fs.readFileSync(
+    path.resolve("src/features/video-agent/AgentPipelineProgress.tsx"),
+    "utf8",
+  );
+  assert.match(
+    workspaceSource,
+    /资产包结构就绪后立刻弹选模卡/,
+    "结构就绪后必须自动弹出选模型卡",
+  );
+  assert.match(
+    workspaceSource,
+    /合同里预填的 image_model 不能当成已确认/,
+    "禁止用 creationContract.image_model 误判已选模并假显示参考图生成中",
+  );
+  assert.match(
+    workspaceSource,
+    /只有 assets 步骤真正 running 才切到生图中/,
+    "进度卡不得因选模确认乐观切到 generate_scene_assets",
+  );
+  assert.match(
+    workspaceSource,
+    /packages\.length > 0\) \{\s*stage = "awaiting_image_model"/,
+    "硬刷新后有场景包无图时应恢复到 awaiting_image_model",
+  );
+  assert.match(
+    workspaceSource,
+    /packagesRunning && \(jobActive \|\| packages\.length === 0\)/,
+    "packages=running 仅在 job 活跃或尚无包时挡 hydrate，落库后必须解卡",
+  );
+  assert.match(
+    workspaceSource,
+    /packagesStepStuckRunning && !assetsStepRunning/,
+    "场景包卡无变更 early-return 时仍要解卡 packages=running",
+  );
+  assert.match(
+    workspaceSource,
+    /陈旧 native running 不得盖回第 2 步/,
+    "native prepare running 在包已就绪时不得重置进度卡",
+  );
+  assert.match(
+    workspaceSource,
+    /强制把 packages=running 解卡/,
+    "Workspace 已有包时必须有兜底解卡 effect",
+  );
+  assert.ok(
+    [...workspaceSource.matchAll(/void pushSceneAssetModelOptionsCard\(|await pushSceneAssetModelOptionsCard\(/g)].length >= 2,
+    "选模型卡应有结构就绪自动弹 +「没有参考图」兜底两条入口",
+  );
+  assert.match(progressSource, /请先选择生图模型，确认后再生成参考图/);
+  assert.match(progressSource, /请选择生图模型/);
 });
 
 test("Supervisor 视频表单按 Snapshot interrupt 恢复并提交结构化确认或取消", () => {

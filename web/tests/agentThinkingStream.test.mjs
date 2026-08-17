@@ -166,6 +166,41 @@ test("workspace prefers live thinking over archived for current turn", async () 
   assert.match(source, /thinking-answer:/, "completed answer must become a chat bubble");
   assert.match(source, /thinkingAnswerNoticeInFlightRef/);
   assert.match(source, /waiting_for_input/, "waiting plans must not duplicate answer bubbles");
+  assert.match(
+    source,
+    /orchestrationModeRef\.current === "video_agent_v2"\) return;/,
+    "video_agent_v2 must not persist thinking-answer bubbles (AgentTurnGroup owns response)",
+  );
+  assert.match(
+    source,
+    /orchestrationMode === "video_agent_v2"[\s\S]*AgentTurnGroup/,
+    "video_agent_v2 must render AgentTurnGroup in agentActivityBlocks",
+  );
+  assert.match(
+    source,
+    /orchestrationMode === "video_agent_v2"[\s\S]*resolveThinkingAfterMessageId\(turn\.turnId/,
+    "native Turn groups must anchor after the triggering user message",
+  );
+  assert.doesNotMatch(
+    source,
+    /orchestrationMode === "video_agent_v2"[\s\S]{0,200}AgentThinkingStream/,
+    "video_agent_v2 must not stack legacy AgentThinkingStream",
+  );
+  assert.match(
+    source,
+    /空壳[\s\S]*Timeline|0 步空壳/,
+    "video_agent_v2 must hide empty observation plan timeline shells",
+  );
+  assert.match(
+    source,
+    /afterMessageId: historyAnchor\?\.afterMessageId/,
+    "native Turn anchor must prefer Snapshot thinkingHistory.afterMessageId after refresh",
+  );
+  assert.match(
+    source,
+    /硬刷新后 native tool 事件丢失/,
+    "asset package progress must restore from Workspace after hard refresh",
+  );
   assert.match(source, /thinkingTurnAnchorsRef/, "thinking must pin to turn user message");
   assert.match(source, /当前 Turn 优先展示 live/);
   assert.match(source, /holdActivePlanForThinking/);

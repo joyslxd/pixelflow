@@ -9,7 +9,11 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from pixelflow.creative.contract import build_video_creation_contract
-from pixelflow.creative.script_shots import extract_script_shot_entries
+from pixelflow.creative.script_shots import (
+    extract_script_shot_entries,
+    resolve_shot_source_markdown,
+    compute_scene_packages_source_digest,
+)
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
 from pixelflow.video_agent.quota import build_start_quota_interrupt_id
@@ -64,6 +68,8 @@ class ScenePackageOperationPort(Protocol):
         materials: list[dict[str, JsonValue]],
         target_duration_ms: int,
         attempt: int,
+        shot_source_markdown: str = "",
+        settings_source_markdown: str = "",
     ) -> ScenePackageOperationJob: ...
 
 
@@ -121,23 +127,52 @@ def _script_markdown(payload: Mapping[str, Any]) -> str:
 
 
 def _asset_package_plan_markdown(payload: Mapping[str, Any], explicit: str) -> str:
-    """终稿 + 设定集：对齐前端 buildAssetPackagePlanMarkdown，避免丢掉角色/场景/道具。"""
+    """终稿 + 脚本预览分阶段产物：优先复用 characters / outline，避免丢掉角色/场景/道具与分镜。
+
+    对齐前端 buildAssetPackagePlanMarkdown：右侧「脚本预览 · 分阶段产物」里已拆好的
+    角色/场景/道具设定与分镜提示词，应直接进入 prepare_scene_packages，而不是从零重写。
+    """
 
     base = explicit.strip() or _script_markdown(payload)
     characters = _pipeline_stage_content(payload, "characters")
+    outline = _pipeline_stage_content(payload, "outline")
     export_stage = _pipeline_stage_content(payload, "export")
-    primary = export_stage or base
+    episode = _pipeline_stage_content(payload, "episode")
+    primary = export_stage or episode or base
     has_character_heading = bool(re.search(r"#{1,3}\s*[^\n]*角色设定", primary))
     has_scene_heading = bool(re.search(r"#{1,3}\s*[^\n]*场景设定", primary))
     has_prop_heading = bool(re.search(r"#{1,3}\s*[^\n]*道具", primary))
     needs_settings = not (has_character_heading and has_scene_heading and has_prop_heading)
-    if characters and needs_settings:
-        return f"{characters}\n\n---\n\n{primary}".strip()
-    if characters and primary:
-        snippet = characters[: min(60, len(characters))]
-        if snippet and snippet not in primary and has_character_heading:
-            return f"{characters}\n\n---\n\n{primary}".strip()
-    return primary or base or characters
+    has_shot_section = bool(
+        re.search(r"#{1,3}\s*[^\n]*(?:分镜提示词|镜头列表|分镜大纲)", primary)
+    )
+
+    parts: list[str] = []
+    if characters and (needs_settings or (primary and characters[: min(60, len(characters))] not in primary)):
+        parts.append(characters)
+    if outline and (not has_shot_section or (primary and outline[: min(60, len(outline))] not in primary)):
+        parts.append(outline)
+    if primary:
+        parts.append(primary)
+    if parts:
+        return "\n\n---\n\n".join(parts).strip()
+    return primary or base or characters or outline
+
+
+def _public_prepare_summary(message: Any, package_count: int) -> str:
+    """领域内部口吻（请前端…）不得进入公开 Tool 摘要。"""
+
+    text = str(message or "").strip()
+    if (
+        not text
+        or "请前端" in text
+        or text.startswith("LLM 已生成")
+        or "规则已生成视频场景包" in text
+    ):
+        if package_count > 0:
+            return f"已生成 {package_count} 个分镜资产包，请打开卡片查看"
+        return "视频场景包已生成，请打开卡片查看"
+    return text[:500]
 
 
 def _positive_duration_sec(value: Any) -> int | None:
@@ -186,6 +221,14 @@ def _infer_timeline_end_sec(markdown: str) -> int | None:
         total = int(match.group(3)) * 60 + int(match.group(4))
         if total > max_end:
             max_end = total
+    # 成稿时间线：0—10秒｜标题 … 170—180秒｜收束
+    for match in re.finditer(
+        r"(?<!\d)(\d{1,4})\s*[-—–~～到至]\s*(\d{1,4})\s*秒",
+        text,
+    ):
+        total = int(match.group(2))
+        if total > max_end:
+            max_end = total
     if 4 <= max_end <= 300:
         return max_end
     return None
@@ -225,8 +268,9 @@ def _resolve_target_duration_ms(
         declared = _infer_declared_duration_sec(text)
         if declared is not None:
             return declared * 1000
-    # 成稿镜头列表末尾时间码：14 镜脚本常无「时长：」字段，但有 00:00-02:02。
-    shot_entries = extract_script_shot_entries(plan_markdown) or extract_script_shot_entries(script_content)
+    # 成稿镜头列表：优先确认后的 episode，避免只看 script.content 漏镜。
+    shot_source = resolve_shot_source_markdown(payload, plan_markdown, script_content)
+    shot_entries = extract_script_shot_entries(shot_source)
     if shot_entries:
         shot_total = max(int(item["end_sec"]) for item in shot_entries)
         if 4 <= shot_total <= 300:
@@ -234,6 +278,7 @@ def _resolve_target_duration_ms(
     timeline_candidates = [
         value
         for value in (
+            _infer_timeline_end_sec(shot_source),
             _infer_timeline_end_sec(plan_markdown),
             _infer_timeline_end_sec(script_content),
         )
@@ -244,6 +289,53 @@ def _resolve_target_duration_ms(
     if isinstance(request_duration_ms, int) and request_duration_ms >= 1_000:
         return min(request_duration_ms, 600_000)
     return _DEFAULT_TARGET_DURATION_MS
+
+
+def _payload_has_scene_packages(payload: Mapping[str, Any]) -> bool:
+    for key in ("scene_packages", "scenes"):
+        value = payload.get(key)
+        if isinstance(value, list) and any(isinstance(item, Mapping) for item in value):
+            return True
+    return False
+
+
+def _resolve_prepare_attempt(payload: Mapping[str, Any], *, requested: int) -> int:
+    """已有场景包时抬高 attempt，避免同 digest 幂等复用旧成功 Operation。"""
+
+    attempt = requested if isinstance(requested, int) and requested >= 1 else 1
+    job = payload.get("scene_package_job")
+    previous = 1
+    if isinstance(job, Mapping):
+        raw = job.get("attempt")
+        if isinstance(raw, int) and raw >= 1:
+            previous = raw
+    if _payload_has_scene_packages(payload) and attempt <= previous:
+        return min(10, max(previous + 1, 2))
+    return min(10, attempt)
+
+
+def _resolve_scene_assets_attempt(payload: Mapping[str, Any], *, requested: int) -> int:
+    """已有 scene_asset_job 或失败清单时抬高 attempt，避免同指纹 Operation 冲突。
+
+    无参考图但 job 已记录（含 polling/succeeded）时也必须抬高：进程重启后内存 job
+    消失，复用旧 Operation 会卡在「完成事件不唯一」或 expired。
+    """
+
+    attempt = requested if isinstance(requested, int) and requested >= 1 else 1
+    previous = 1
+    job = payload.get("scene_asset_job")
+    if isinstance(job, Mapping):
+        raw = job.get("attempt")
+        if isinstance(raw, int) and raw >= 1:
+            previous = raw
+    failures = payload.get("scene_asset_failures")
+    has_prior = (
+        (isinstance(job, Mapping) and bool(str(job.get("job_id") or "").strip()))
+        or (isinstance(failures, list) and bool(failures))
+    )
+    if has_prior and attempt <= previous:
+        return min(10, max(previous + 1, 2))
+    return min(10, attempt)
 
 
 def _resolve_prepare_form_and_contract(
@@ -296,7 +388,11 @@ def _resolve_prepare_form_and_contract(
 class PrepareScenePackagesTool:
     spec = VideoToolSpec(
         name="prepare_scene_packages",
-        description="从已确认脚本生成结构化视频资产包（角色/场景/道具与分镜包）",
+        description=(
+            "从已确认脚本生成结构化视频资产包（角色/场景/道具与分镜包）。"
+            "优先复用 Workspace 中 script_pipeline 的 characters/outline 等分阶段产物，"
+            "投影到可编辑的视频场景包；不要忽略脚本预览里已拆解好的设定与分镜。"
+        ),
         input_model=PrepareScenePackagesInput,
         cost_level=VideoToolCostLevel.EXTERNAL_READ,
         confirmation_required=False,
@@ -307,10 +403,12 @@ class PrepareScenePackagesTool:
             "global_assets",
             "scenes",
             "scene_packages",
+            "scenes_replace",
             "creation_contract",
             "target_duration_ms",
             "script_plan_confirmed",
             "scene_package_job",
+            "scene_packages_source_digest",
             "quota_interrupt",
         ),
     )
@@ -334,6 +432,24 @@ class PrepareScenePackagesTool:
         plan_markdown = _asset_package_plan_markdown(payload, request.plan_markdown)
         if not plan_markdown:
             raise VideoToolValidationError("当前工作区没有可生成资产包的脚本")
+        # 抽镜头单独读确认后的 episode；角色/场景/道具读 characters。
+        shot_source_markdown = resolve_shot_source_markdown(payload, plan_markdown)
+        settings_source_markdown = _pipeline_stage_content(payload, "characters")
+        if payload.get("script_plan_confirmed") is not True:
+            raise VideoToolValidationError("请先确认脚本方案")
+        from pixelflow.video_agent.production_fields import (
+            reconcile_missing_with_workspace,
+            workspace_missing_requirements,
+        )
+
+        gaps = reconcile_missing_with_workspace(
+            workspace_missing_requirements(payload),
+            payload,
+        )
+        if gaps:
+            raise VideoToolValidationError(
+                f"请先补齐生产字段：{'、'.join(gaps)}"
+            )
 
         target_duration_ms = _resolve_target_duration_ms(
             payload,
@@ -357,6 +473,9 @@ class PrepareScenePackagesTool:
             }
         materials = _as_list(payload.get("materials"))
 
+        # 已有场景包时抬高 attempt，避免同 digest 幂等复用旧成功 Operation（重新生成仍生效）。
+        attempt = _resolve_prepare_attempt(payload, requested=request.attempt)
+
         try:
             job = await self._operation_port.start_prepare_scene_packages(
                 context,
@@ -365,7 +484,9 @@ class PrepareScenePackagesTool:
                 selected_direction=selected_direction,
                 materials=materials,
                 target_duration_ms=target_duration_ms,
-                attempt=request.attempt,
+                attempt=attempt,
+                shot_source_markdown=shot_source_markdown,
+                settings_source_markdown=settings_source_markdown,
             )
         except VideoToolExecutionError:
             raise
@@ -381,6 +502,7 @@ class PrepareScenePackagesTool:
                         "job_id": job.job_id,
                         "plan_step_id": context.step_id,
                         "status": job.status,
+                        "attempt": attempt,
                     },
                     "creation_contract": creation_contract,
                     "target_duration_ms": target_duration_ms,
@@ -416,11 +538,16 @@ class PrepareScenePackagesTool:
             result_duration = target_duration_ms
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=str(result.get("message") or f"已生成 {len(scene_packages)} 个分镜包"),
+            public_summary=_public_prepare_summary(
+                result.get("message"),
+                len(scene_packages),
+            ),
             workspace_patch={
                 "global_assets": dict(global_assets),
                 "scenes": list(scene_packages),
                 "scene_packages": list(scene_packages),
+                # 全量重建场景包：整表替换，不与旧镜按 id 合并残留。
+                "scenes_replace": True,
                 "creation_contract": result_contract,
                 "target_duration_ms": result_duration,
                 "script_plan_confirmed": True,
@@ -428,7 +555,10 @@ class PrepareScenePackagesTool:
                     "job_id": job.job_id,
                     "plan_step_id": context.step_id,
                     "status": "succeeded",
+                    "attempt": attempt,
                 },
+                # 记录本次 prepare 所依据的脚本指纹，供再次确认时判断是否需要重拆。
+                "scene_packages_source_digest": compute_scene_packages_source_digest(payload),
                 "quota_interrupt": None,
             },
             pending_operation_job_ids=(),
@@ -438,7 +568,13 @@ class PrepareScenePackagesTool:
 class GenerateSceneAssetsTool:
     spec = VideoToolSpec(
         name="generate_scene_assets",
-        description="为资产包生成角色/场景/道具参考图，并更新资产版本",
+        description=(
+            "在场景包已就绪且尚无参考图时，为角色/场景/道具生成参考图并更新资产版本。"
+            "用户说「没有参考图/直接生成」且已选生图模型时调用；"
+            "生图模型只接受已注册 Borgrise 值：gpt-image-2（展示 image-2）、"
+            "seeddream-5.0（展示 Seedream 5.0）；不要推荐 Midjourney/DALL·E 等未注册模型。"
+            "不要在未生成参考图前跳到 generate_scenes。"
+        ),
         input_model=GenerateSceneAssetsInput,
         cost_level=VideoToolCostLevel.BILLABLE,
         confirmation_required=True,
@@ -449,6 +585,7 @@ class GenerateSceneAssetsTool:
             "global_assets",
             "scenes",
             "scene_packages",
+            "scenes_replace",
             "asset_versions",
             "scene_asset_failures",
             "scene_asset_job",
@@ -477,23 +614,56 @@ class GenerateSceneAssetsTool:
         if not global_assets and not scene_packages:
             raise VideoToolValidationError("当前工作区没有可生成参考图的资产包")
 
+        # 生图前先做实体名校验，避免 Operation 吞掉「不是可生成实体」等业务原因。
         try:
-            job = await self._operation_port.start_generate_scene_assets(
-                context,
-                global_assets=global_assets,
-                scene_packages=scene_packages,
-                materials=_as_list(payload.get("materials")),
-                image_model=request.image_model,
-                image_ratio=request.image_ratio,
-                image_size=request.image_size,
-                reference_brief=request.reference_brief,
-                target_assets=[dict(item) for item in request.target_assets],
-                attempt=request.attempt,
-            )
-        except VideoToolExecutionError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise VideoToolExecutionError("参考图生成失败") from exc
+            from pixelflow.generate.scene_assets import _validate_scene_asset_entity_names
+
+            _validate_scene_asset_entity_names(dict(global_assets), list(scene_packages))
+        except ValueError as exc:
+            detail = str(exc).strip()[:280] or "场景包资产名无效"
+            raise VideoToolValidationError(f"参考图生成前校验失败：{detail}") from exc
+
+        attempt = _resolve_scene_assets_attempt(payload, requested=request.attempt)
+        job: ScenePackageOperationJob | None = None
+        last_error: VideoToolExecutionError | None = None
+        # 僵尸 SUCCEEDED（完成事件缺失/冲突）时抬高 attempt 重开，避免同指纹永久撞车。
+        for _ in range(3):
+            try:
+                job = await self._operation_port.start_generate_scene_assets(
+                    context,
+                    global_assets=global_assets,
+                    scene_packages=scene_packages,
+                    materials=_as_list(payload.get("materials")),
+                    image_model=request.image_model,
+                    image_ratio=request.image_ratio,
+                    image_size=request.image_size,
+                    reference_brief=request.reference_brief,
+                    # 空元组默认值会变成 []；domain runner / generate_scene_assets 须把空列表当全量。
+                    target_assets=[dict(item) for item in request.target_assets],
+                    attempt=attempt,
+                )
+                last_error = None
+                break
+            except VideoToolExecutionError as exc:
+                detail = str(exc)
+                last_error = exc
+                if (
+                    attempt < 10
+                    and (
+                        "完成事件" in detail
+                        or "同步终态" in detail
+                        or "持久化冲突" in detail
+                    )
+                ):
+                    attempt = min(10, attempt + 1)
+                    continue
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise VideoToolExecutionError("参考图生成失败") from exc
+        if last_error is not None:
+            raise last_error
+        if job is None:
+            raise VideoToolExecutionError("参考图生成失败")
 
         if job.status in {"polling", "start_paused_quota"}:
             return VideoToolResult(
@@ -505,6 +675,7 @@ class GenerateSceneAssetsTool:
                         "plan_step_id": context.step_id,
                         "status": job.status,
                         "image_model": request.image_model,
+                        "attempt": attempt,
                     },
                     **(
                         {
@@ -537,12 +708,15 @@ class GenerateSceneAssetsTool:
                 "global_assets": dict(next_global),
                 "scenes": list(next_scenes),
                 "scene_packages": list(next_scenes),
+                # 参考图回填可能改写全部分镜 mentions；整表替换避免与旧结构半合并。
+                "scenes_replace": True,
                 "scene_asset_failures": list(failed),
                 "scene_asset_job": {
                     "job_id": job.job_id,
                     "plan_step_id": context.step_id,
                     "status": "succeeded",
                     "image_model": request.image_model,
+                    "attempt": attempt,
                 },
                 "quota_interrupt": None,
             },

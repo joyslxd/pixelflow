@@ -15,6 +15,7 @@ from pixelflow.video_agent.production_fields import (
     creative_confirm_cost_summary,
     format_creative_confirm_clarification,
     looks_like_production_field_reply,
+    looks_like_scene_asset_continue,
     normalize_user_text,
 )
 
@@ -64,11 +65,34 @@ def test_production_field_reply_is_structural_gate_only() -> None:
         "9：16",
         workspace_payload=with_missing,
     ) is True
-    # 有缺项时短句结构上可进补字段；是否真该补由 Entrypoint + Intake 再裁。
+    # 「没有参考图」是生图续步，即使工作区仍缺画幅也不能当成补字段。
     assert looks_like_production_field_reply(
         "没有参考图，直接生成",
         workspace_payload=with_missing,
-    ) is True
+    ) is False
+    assert looks_like_scene_asset_continue("没有参考图，直接生成") is True
+    # 确认脚本不得被 awaiting/missing 截胡。
+    assert looks_like_production_field_reply(
+        "确认脚本",
+        workspace_payload={
+            "awaiting_production_fields": True,
+            "script": {
+                "content": "x" * 100,
+                "missing_requirements": ["结尾行动引导"],
+            },
+        },
+    ) is False
+    # 单镜重生成不得被 awaiting 截胡成补字段。
+    assert looks_like_production_field_reply(
+        "确认并生成分镜视频（scene-1）",
+        workspace_payload={
+            "awaiting_production_fields": True,
+            "script": {
+                "content": "x" * 100,
+                "missing_requirements": ["视频画幅"],
+            },
+        },
+    ) is False
     # 无 awaiting/missing 时，即使短句也不当成补字段。
     assert looks_like_production_field_reply(
         "9：16",
@@ -78,6 +102,39 @@ def test_production_field_reply_is_structural_gate_only() -> None:
         "随便聊聊天气",
         workspace_payload={"latest_input": "短"},
     ) is False
+
+
+def test_enrich_choice_replies_maps_third_option_to_none_cta() -> None:
+    from pixelflow.video_agent.production_fields import enrich_analysis_with_choice_replies
+
+    incomplete = ProductionFieldsAnalysis(
+        duration_sec=180,
+        missing=("视频画幅", "结尾行动引导"),
+        has_aspect_ratio=False,
+        has_ending_cta=False,
+    )
+    enriched = enrich_analysis_with_choice_replies("1. 9：16 2. 第三个", incomplete)
+    assert enriched.aspect_ratio == "9:16"
+    assert enriched.has_aspect_ratio is True
+    assert enriched.ending_cta == "none"
+    assert enriched.has_ending_cta is True
+    assert enriched.missing == ()
+
+
+def test_enrich_choice_replies_ignores_third_shot_edit() -> None:
+    from pixelflow.video_agent.production_fields import enrich_analysis_with_choice_replies
+
+    incomplete = ProductionFieldsAnalysis(
+        duration_sec=None,
+        missing=("结尾行动引导",),
+        has_aspect_ratio=True,
+        has_ending_cta=False,
+        aspect_ratio="9:16",
+    )
+    enriched = enrich_analysis_with_choice_replies("把第三个分镜旁白改短", incomplete)
+    assert enriched.has_ending_cta is False
+    assert enriched.ending_cta is None
+    assert "结尾行动引导" in enriched.missing
 
 
 def test_production_field_reply_uses_workspace_not_regex() -> None:
@@ -142,7 +199,7 @@ def test_format_production_fields_update_notice() -> None:
     )
     assert "已更新脚本版本 1" in notice
     assert "生产字段已齐" in notice
-    assert "脚本预览底部确认" in notice
+    assert "在右侧查看脚本" in notice
     assert "确认卡" not in notice
     assert "视频时长" not in notice
 

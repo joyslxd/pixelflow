@@ -19,6 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
 from pixelflow.agent_runtime.contracts import TurnStartRequest
+from pixelflow.agent_runtime.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
+)
 from pixelflow.agent_runtime.service import (
     AgentRuntimeContextConflictError,
     AgentRuntimeInterruptStateError,
@@ -30,9 +33,12 @@ from pixelflow.agent_runtime.service import (
     AgentRuntimeVideoQuotaConflictError,
     AgentRuntimeVideoQuotaUnavailableError,
     AgentRuntimeVideoScriptConflictError,
+    AgentRuntimeVideoScriptNotReadyError,
     AgentRuntimeVideoScriptUnavailableError,
     AgentTurnJobResponse,
     AgentTurnStartResponse,
+    VideoAgentConfirmScriptPlanRequest,
+    VideoAgentConfirmScriptPlanResponse,
     VideoAgentConfirmationResponse,
     VideoAgentConfirmationResponseRequest,
     VideoAgentQuotaResponse,
@@ -240,6 +246,14 @@ def _runtime_http_exception(exc: Exception) -> HTTPException:
         )
     if isinstance(exc, LookupError):
         return HTTPException(status_code=404, detail="Conversation not found")
+    if isinstance(exc, AgentRuntimeRecordConflictError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_runtime_record_conflict",
+                "message": "会话状态刚被并发更新，请重试",
+            },
+        )
     return HTTPException(status_code=500, detail="Agent Runtime request failed")
 
 
@@ -335,6 +349,7 @@ async def start_agent_turn(
     except (
         AgentRuntimeContextConflictError,
         AgentRuntimeUnavailableError,
+        AgentRuntimeRecordConflictError,
         LookupError,
     ) as exc:
         raise _runtime_http_exception(exc) from exc
@@ -428,9 +443,73 @@ async def save_video_agent_script(
             detail={"code": "video_agent_script_unavailable"},
         ) from exc
     except AgentRuntimeVideoScriptConflictError as exc:
+        detail: dict[str, object] = {
+            "code": "video_agent_script_conflict",
+            "message": str(exc),
+        }
+        if isinstance(exc.current_revision, int) and exc.current_revision >= 1:
+            detail["current_revision"] = exc.current_revision
+        if isinstance(exc.workspace_id, str) and exc.workspace_id.strip():
+            detail["workspace_id"] = exc.workspace_id.strip()
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except (AgentRuntimeUnavailableError, LookupError) as exc:
+        raise _runtime_http_exception(exc) from exc
+
+
+@router.post(
+    "/{conversation_id}/video-agent/commands/confirm-script-plan",
+    response_model=VideoAgentConfirmScriptPlanResponse,
+)
+async def confirm_video_agent_script_plan(
+    conversation_id: str,
+    body: VideoAgentConfirmScriptPlanRequest,
+    request: Request,
+) -> VideoAgentConfirmScriptPlanResponse:
+    """确认脚本方案并启动 prepare_scene_packages（按钮路径，不伪造自然语言 Turn）。"""
+
+    try:
+        return await _agent_runtime_service(request).confirm_video_agent_script_plan(
+            user_id=await get_current_user(request),
+            conversation_id=conversation_id,
+            request=body,
+            credential=_transient_video_agent_credential(request),
+        )
+    except AgentRuntimeVideoScriptUnavailableError as exc:
         raise HTTPException(
-            status_code=409,
-            detail={"code": "video_agent_script_conflict", "message": str(exc)},
+            status_code=503,
+            detail={
+                "code": "video_agent_script_unavailable",
+                "message": str(exc) or "VideoAgent脚本确认入口尚未就绪",
+            },
+        ) from exc
+    except AgentRuntimeVideoScriptConflictError as exc:
+        detail: dict[str, object] = {
+            "code": "video_agent_script_conflict",
+            "message": str(exc),
+        }
+        if isinstance(exc.current_revision, int) and exc.current_revision >= 1:
+            detail["current_revision"] = exc.current_revision
+        if isinstance(exc.workspace_id, str) and exc.workspace_id.strip():
+            detail["workspace_id"] = exc.workspace_id.strip()
+        raise HTTPException(status_code=409, detail=detail) from exc
+    except AgentRuntimeVideoScriptNotReadyError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "video_agent_script_not_ready",
+                "message": str(exc),
+                "missing_fields": list(exc.missing_fields),
+                **(
+                    {"workspace_id": exc.workspace_id}
+                    if isinstance(exc.workspace_id, str) and exc.workspace_id.strip()
+                    else {}
+                ),
+                **(
+                    {"revision": exc.revision}
+                    if isinstance(exc.revision, int) and exc.revision >= 1
+                    else {}
+                ),
+            },
         ) from exc
     except (AgentRuntimeUnavailableError, LookupError) as exc:
         raise _runtime_http_exception(exc) from exc

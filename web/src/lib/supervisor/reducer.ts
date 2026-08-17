@@ -111,6 +111,9 @@ export interface SupervisorAgentThinkingState {
   answer: string;
   startedAt: string | null;
   status: "streaming" | "completed";
+  /** 触发该 Turn 的用户消息 id（= client_input_id）；刷新后锚点权威来源。 */
+  afterMessageId?: string | null;
+  clientInputId?: string | null;
 }
 
 export interface SupervisorRuntimeProjection extends SupervisorWorkspaceProjection {
@@ -272,7 +275,6 @@ function mapInputStatus(value: JsonValue | undefined): SupervisorInputStatus | n
   switch (value) {
     case "accepted":
     case "waiting_user":
-    case "completed":
       return "accepted";
     case "queued":
       return "queued";
@@ -431,6 +433,40 @@ function applyInputEvent(
 ): SupervisorRuntimeState {
   const clientInputId = event.payload.client_input_id;
   if (!isNonEmptyString(clientInputId)) return withInvalidEvent(state);
+
+  // 与 Snapshot 一致：COMPLETED Turn 不出现在 inputQueue。
+  // 旧逻辑把 wire completed 映射成 accepted，会永久卡住「正在处理中」。
+  if (event.payload.status === "completed") {
+    const current = state.inputQueue.find((item) => item.clientInputId === clientInputId);
+    if (
+      current?.turnId
+      && event.payload.turn_id !== undefined
+      && event.payload.turn_id !== current.turnId
+    ) {
+      return withInvalidEvent(state);
+    }
+    const nextQueue = state.inputQueue.filter(
+      (item) => item.clientInputId !== clientInputId,
+    );
+    const hasActiveOwner = nextQueue.some(
+      (item) => item.status === "accepted"
+        || item.status === "processing"
+        || item.status === "sending"
+        || item.status === "queued",
+    );
+    return {
+      ...withEventResumePoint(state, event),
+      inputQueue: nextQueue,
+      run: hasActiveOwner
+        ? state.run
+        : {
+            runId: null,
+            status: "idle",
+            updatedAt: event.occurred_at,
+          },
+    };
+  }
+
   const current = state.inputQueue.find((item) => item.clientInputId === clientInputId);
   const nextStatus = inputStatusAfterServerEvent(current?.status, event.payload.status);
   const turnId = optionalNullableString(event.payload, "turn_id", current?.turnId ?? null);
@@ -615,6 +651,120 @@ function applyAgentEvent(
         agentThinkingHistory: [...withoutSame, completed],
       };
     }
+    case "agent.reasoning_summary.delta": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
+      if (!turnId || !delta) return withEventResumePoint(state, event);
+      const base = state.agentThinking && state.agentThinking.turnId === turnId
+        ? state.agentThinking
+        : {
+            turnId,
+            title: "思考中",
+            subtitle: "",
+            text: "",
+            answer: "",
+            startedAt: event.occurred_at,
+            status: "streaming" as const,
+          };
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: {
+          ...base,
+          text: `${base.text}${delta}`,
+          status: "streaming",
+        },
+      };
+    }
+    case "agent.reasoning_summary.completed": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      const text = typeof event.payload.text === "string"
+        ? event.payload.text
+        : typeof event.payload.summary === "string"
+          ? event.payload.summary
+          : "";
+      if (!turnId) return withEventResumePoint(state, event);
+      const base = state.agentThinking && state.agentThinking.turnId === turnId
+        ? state.agentThinking
+        : {
+            turnId,
+            title: "思考中",
+            subtitle: "",
+            text: "",
+            answer: "",
+            startedAt: event.occurred_at,
+            status: "streaming" as const,
+          };
+      const completed: SupervisorAgentThinkingState = {
+        ...base,
+        text: text || base.text,
+        status: "completed",
+      };
+      const withoutSame = state.agentThinkingHistory.filter((item) => item.turnId !== turnId);
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: completed,
+        agentThinkingHistory: [...withoutSame, completed],
+      };
+    }
+    case "agent.response.delta": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
+      if (!turnId || !delta) return withEventResumePoint(state, event);
+      const base = state.agentThinking && state.agentThinking.turnId === turnId
+        ? state.agentThinking
+        : {
+            turnId,
+            title: "回复中",
+            subtitle: "",
+            text: "",
+            answer: "",
+            startedAt: event.occurred_at,
+            status: "streaming" as const,
+          };
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: {
+          ...base,
+          answer: `${base.answer ?? ""}${delta}`,
+          status: "streaming",
+        },
+      };
+    }
+    case "agent.response.completed": {
+      const turnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+      const text = typeof event.payload.text === "string" ? event.payload.text : "";
+      if (!turnId) return withEventResumePoint(state, event);
+      const base = state.agentThinking && state.agentThinking.turnId === turnId
+        ? state.agentThinking
+        : {
+            turnId,
+            title: "回复完成",
+            subtitle: "",
+            text: "",
+            answer: "",
+            startedAt: event.occurred_at,
+            status: "streaming" as const,
+          };
+      const completed: SupervisorAgentThinkingState = {
+        ...base,
+        answer: text || base.answer || "",
+        status: "completed",
+      };
+      const withoutSame = state.agentThinkingHistory.filter((item) => item.turnId !== turnId);
+      return {
+        ...withEventResumePoint(state, event),
+        agentThinking: completed,
+        agentThinkingHistory: [...withoutSame, completed],
+      };
+    }
+    case "agent.tool.started":
+    case "agent.tool.progress":
+    case "agent.tool.completed":
+    case "agent.tool.failed":
+    case "agent.operation.updated":
+    case "agent.artifact.updated":
+      // Native 事件：先推进 resume cursor；完整 plan/step 投影在 P0-2.3 收口。
+      return withEventResumePoint(state, event);
     case "agent.plan.created":
     case "agent.plan.updated":
     case "agent.step.started":
@@ -1045,6 +1195,15 @@ export function supervisorRuntimeReducer(
         if (!local) return incoming;
         if (!incoming) return local;
         if (local.planId !== incoming.planId) return incoming;
+        const incomingStatus = String(incoming.status || "").toLowerCase();
+        // 服务端终态优先：confirmation.requested 会在本地 upsert 步骤，不能盖住 completed。
+        if (
+          incomingStatus === "completed"
+          || incomingStatus === "failed"
+          || incomingStatus === "cancelled"
+        ) {
+          return incoming;
+        }
         const localSteps = Object.keys(local.steps).length;
         const incomingSteps = Object.keys(incoming.steps).length;
         return localSteps > incomingSteps ? local : incoming;
@@ -1092,7 +1251,14 @@ export function supervisorRuntimeReducer(
         }
         const preferLocal = (local.text?.length || 0) > (item.text?.length || 0)
           || (local.answer?.length || 0) > (item.answer?.length || 0);
-        historyByTurn.set(item.turnId, preferLocal ? { ...local, status: item.status } : item);
+        historyByTurn.set(item.turnId, preferLocal
+          ? {
+            ...local,
+            status: item.status,
+            afterMessageId: local.afterMessageId || item.afterMessageId || null,
+            clientInputId: local.clientInputId || item.clientInputId || null,
+          }
+          : item);
       }
       const nextThinkingHistory = [...historyByTurn.values()];
       const historyForLive = nextThinkingHistory.find(

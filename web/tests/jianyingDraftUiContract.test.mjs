@@ -17,7 +17,7 @@ test("剪映草稿任务状态进入对话快照并按来源对话恢复", () =>
   assert.match(workspaceSource, /jianyingDraftRecords/);
   assert.match(workspaceSource, /jianying_draft_records/);
   assert.match(workspaceSource, /resumePendingJianyingDraftJob/);
-  assert.match(workspaceSource, /pendingJob\.conversation_id/);
+  assert.match(workspaceSource, /pendingJianyingDraftJob\.conversation_id|pendingJianyingDraftJob\?\.conversation_id/);
   assert.match(workspaceSource, /storyboard_version_id/);
 });
 
@@ -46,7 +46,7 @@ test("当前对话启动任务会立即写入 pending ref，并持久化两种 r
   assert.match(workspaceSource, /snapshot\.jianyingDraftRecords \|\| snapshot\.jianying_draft_records/);
 });
 
-test("草稿启动 guard 在 capability 查询前建立，并在 finally 中释放", () => {
+test("草稿启动 guard 在 capability 查询前建立，并在阻断路径释放", () => {
   const generateMatch = workspaceSource.match(
     /const handleGenerateJianyingDraft[\s\S]*?(?=\n\s{2}const \w|\n\s{2}async function|\n\s{2}function)/,
   );
@@ -54,8 +54,11 @@ test("草稿启动 guard 在 capability 查询前建立，并在 finally 中释�
   assert.ok(generateMatch, "handleGenerateJianyingDraft must exist");
   const generateSource = generateMatch[0];
   assert.match(generateSource, /jianyingDraftStartGuardRef\.current\.tryAcquire\(targetConversationId, storyboard_version_id\)/);
-  assert.match(generateSource, /tryAcquire\(targetConversationId, storyboard_version_id\)[\s\S]*?await api\.getJianyingDraftCapability\(\)/);
-  assert.match(generateSource, /finally[\s\S]*?jianyingDraftStartGuardRef\.current\.release\(targetConversationId, storyboard_version_id\)/);
+  assert.match(generateSource, /tryAcquire\(targetConversationId, storyboard_version_id\)[\s\S]*?LEGACY_VIDEO_JOB_HTTP_REMOVED/);
+  // P0-5：旧 HTTP try/finally 已删；阻断后仍释放 guard，避免卡死。
+  assert.match(generateSource, /jianyingDraftStartGuardRef\.current\.release\(targetConversationId, storyboard_version_id\)/);
+  assert.match(apiSource, /getJianyingDraftCapability:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/);
+  assert.match(apiSource, /startJianyingDraftJob:[\s\S]*?throwLegacyVideoJobApiRemoved\(\)/);
 });
 
 test("草稿生成 handler 仅跳过仍有效的成功记录，过期成功允许重新启动", () => {
@@ -98,48 +101,33 @@ test("跨会话持久化使用后端原子 PATCH，不再执行 GET 加全量 PU
 });
 
 test("终态与过期写入携带原 pending job 条件，启动写入携带新 job 条件", () => {
-  assert.match(
-    workspaceSource,
-    /persistPendingJianyingDraftJob\([\s\S]*?`jianying_draft_\$\{boundResult\.status\}`,[\s\S]*?pendingJob\.job_id/,
-  );
-  assert.match(
-    workspaceSource,
-    /persistPendingJianyingDraftJob\(\s*null,\s*targetConversationId,\s*"jianying_draft_job_expired",[\s\S]*?pendingJob\.job_id/,
-  );
-  assert.match(
-    workspaceSource,
-    /persistPendingJianyingDraftJob\(\s*pendingJianyingDraftJob,\s*targetConversationId,\s*"jianying_draft_running",[\s\S]*?pendingJianyingDraftJob\.job_id/,
-  );
+  // P0-5：旧 complete/clearExpired Job 完成路径已删；仍保留 pending 持久化助手。
+  assert.match(workspaceSource, /persistPendingJianyingDraftJob/);
+  assert.match(workspaceSource, /pendingJianyingDraftJob/);
+  assert.doesNotMatch(workspaceSource, /const completeJianyingDraftJob/);
+  assert.doesNotMatch(workspaceSource, /const clearExpiredJianyingDraftJob/);
 });
 
 test("过期任务保留恢复错误，capability 后只使用捕获的目标对话", () => {
-  const expiredMatch = workspaceSource.match(
-    /const clearExpiredJianyingDraftJob[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
-  );
   const generateMatch = workspaceSource.match(
     /const handleGenerateJianyingDraft[\s\S]*?(?=\n\s{2}const \w|\n\s{2}async function|\n\s{2}function)/,
   );
 
-  assert.ok(expiredMatch, "clearExpiredJianyingDraftJob must exist");
   assert.ok(generateMatch, "handleGenerateJianyingDraft must exist");
-  assert.match(
-    expiredMatch[0],
-    /persistPendingJianyingDraftJob\(\s*null,\s*targetConversationId,\s*"jianying_draft_job_expired",\s*pendingJob\.job_id,\s*\{\},\s*message/,
-  );
-  const afterCapability = generateMatch[0].slice(generateMatch[0].indexOf("await api.getJianyingDraftCapability()"));
-  assert.doesNotMatch(afterCapability, /conversationIdRef\.current/);
-  assert.match(afterCapability, /conversation_id: targetConversationId/);
-  assert.match(afterCapability, /persistPendingJianyingDraftJob\(\s*pendingJianyingDraftJob,\s*targetConversationId/);
+  assert.match(generateMatch[0], /LEGACY_VIDEO_JOB_HTTP_REMOVED/);
+  assert.match(generateMatch[0], /LEGACY_VIDEO_JOB_CONTINUE_TIP/);
+  assert.doesNotMatch(workspaceSource, /const clearExpiredJianyingDraftJob/);
+  assert.match(workspaceSource, /patchJianyingDraftConversationContextForTarget/);
 });
 
-test("恢复已有剪映草稿任务只查询状态而不启动新任务", () => {
+test("恢复已有剪映草稿任务不再调用已删除 Job HTTP", () => {
   const resumeMatch = workspaceSource.match(
     /const resumePendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const \w|\n\s{2}useEffect)/,
   );
 
   assert.ok(resumeMatch, "resumePendingJianyingDraftJob must exist");
   const resumeSource = resumeMatch[0];
-  assert.match(resumeSource, /getJianyingDraftJob/);
+  assert.match(resumeSource, /if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/);
   assert.doesNotMatch(resumeSource, /startJianyingDraftJob/);
 });
 
@@ -154,13 +142,13 @@ test("最终视频卡片透传剪映草稿 handler，并保持原视频结果作
 
 test("最终视频提供三按钮、历史入口与运行锁定", () => {
   const videoResultBranch = messageBubbleSource.match(
-    /msg\.artifact\?\.type === "video_result"[\s\S]*?(?=\n        \) : msg\.artifact \?)/,
+    /msg\.artifact\?\.type === "video_result" && msg\.artifact\.mergedVideo[\s\S]*?(?=\n        \) : msg\.artifact\?\.type === "video_result" \? null)/,
   );
-  assert.ok(videoResultBranch, "video result branch must exist");
+  assert.ok(videoResultBranch, "merged video result branch must exist");
   const source = videoResultBranch[0];
   assert.match(source, /sm:grid-cols-3/);
   assert.match(source, /无意见，结束/);
-  assert.match(source, /生成剪映草稿/);
+  assert.match(source, /jianyingDraftAction\.label/);
   assert.match(source, /提出修改意见/);
   assert.match(source, /videoAccepted/);
   assert.match(source, /草稿生成中/);
@@ -202,37 +190,29 @@ test("失败草稿结果卡绕过旧消息锁定且只受忙碌或服务状态�
 });
 
 test("失败重试、not_configured 终态和 job 级消息幂等均有明确合同", () => {
-  const completeMatch = workspaceSource.match(
-    /const completeJianyingDraftJob[\s\S]*?(?=\n\s{2}const clearExpiredJianyingDraftJob)/,
-  );
   const resumeMatch = workspaceSource.match(
     /const resumePendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const resumePendingImageJob)/,
   );
   const generateMatch = workspaceSource.match(/const handleGenerateJianyingDraft[\s\S]*?\n  const handleGenerateVideoFromScenePackages/);
-  assert.ok(completeMatch && resumeMatch && generateMatch);
-  assert.match(completeMatch[0], /pendingJob\.job_id/);
-  assert.match(completeMatch[0], /existingRecord\.job_id !== boundResult\.job_id/);
-  assert.match(completeMatch[0], /isJianyingDraftSucceededResultValid\(result\)/);
-  assert.match(completeMatch[0], /status: "failed"/);
-  assert.match(completeMatch[0], /剪映草稿生成失败，请重新生成。/);
-  assert.match(resumeMatch[0], /result\.status === "not_configured"/);
+  assert.ok(resumeMatch && generateMatch);
+  // P0-5：旧 Job complete/poll 已删除；resume 仅 early-return，生成入口保留 retry_failed 语义标记。
+  assert.match(resumeMatch[0], /if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/);
   assert.match(generateMatch[0], /retry_failed/);
   assert.match(jianyingDraftSource, /retry_failed\?: boolean/);
 });
 
-test("从视频结果卡重试失败草稿会显式传 retry_failed，错误展示不会拼接响应正文", () => {
+test("从视频结果卡重试失败草稿会显式标记 retry_failed，且不再走旧 Job HTTP", () => {
   const resumeMatch = workspaceSource.match(
     /const resumePendingJianyingDraftJob[\s\S]*?(?=\n\s{2}const resumePendingImageJob)/,
   );
   const generateMatch = workspaceSource.match(/const handleGenerateJianyingDraft[\s\S]*?\n  const handleGenerateVideoFromScenePackages/);
   assert.ok(resumeMatch && generateMatch);
   assert.match(generateMatch[0], /const retry_failed = existingRecord\?\.status === "failed" \|\| existingRecord\?\.status === "timeout"/);
-  assert.match(generateMatch[0], /retry_failed,/);
-  assert.match(generateMatch[0], /jianyingDraftPublicErrorMessage\("capability"\)/);
-  assert.match(generateMatch[0], /jianyingDraftPublicErrorMessage\("start"\)/);
+  assert.match(generateMatch[0], /retry_failed/);
+  assert.match(generateMatch[0], /LEGACY_VIDEO_JOB_HTTP_REMOVED/);
+  assert.doesNotMatch(generateMatch[0], /startJianyingDraftJob|getJianyingDraftCapability/);
   assert.doesNotMatch(generateMatch[0], /err\.message|String\(err\)|started\.message/);
-  assert.match(resumeMatch[0], /jianyingDraftPublicErrorMessage\("poll"\)/);
-  assert.doesNotMatch(resumeMatch[0], /继续查询剪映草稿任务失败:\$\{message\}|err\.message|String\(err\)/);
+  assert.match(resumeMatch[0], /if \(LEGACY_VIDEO_JOB_HTTP_REMOVED\) return;/);
 });
 
 test("Supervisor 剪映生成重试下载均提交当前 workflow 的结构化动作", () => {

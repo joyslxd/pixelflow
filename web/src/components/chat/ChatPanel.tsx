@@ -11,6 +11,17 @@ import type { SupervisorRuntimeNoticeModel } from "@/lib/supervisor/runtimeNotic
 import { ConversationRuntimeNotice } from "./ConversationRuntimeNotice";
 import { WorkflowTaskBoard } from "./WorkflowTaskBoard";
 
+/** 脚本确认内部回执/编排脏文案，不在对话气泡展示。 */
+const HIDDEN_CHAT_CONTENT_RE =
+  /已交给 VideoAgent|请根据工作区选择下一步|资产包准备由 VideoAgent 推进中/;
+
+function shouldHideChatMessage(message: ChatMessage): boolean {
+  const content = String(message.content || "").trim();
+  if (!content) return false;
+  if (message.artifact) return false;
+  return HIDDEN_CHAT_CONTENT_RE.test(content);
+}
+
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSubmit: (payload: AgentUserMessagePayload) => void;
@@ -33,7 +44,10 @@ interface ChatPanelProps {
   onConfirmSceneAssetModel?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
-  onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
+  onGenerateVideoFromScenePackages?: (
+    msg: ChatMessage,
+    options?: { sceneId?: string },
+  ) => void;
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
   onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
@@ -62,6 +76,13 @@ interface ChatPanelProps {
   agentActivity?: ReactNode;
   /** 把活动卡片锚在指定用户/助手消息之后，保证多轮对话时间线顺序正确。 */
   agentActivityBlocks?: Array<{ afterMessageId: string; content: ReactNode }>;
+  /** 输入框上方常驻槽（如进行中的视频资产包进度卡）。 */
+  composerTopSlot?: ReactNode;
+  /**
+   * @deprecated 原生 Turn 组应并入 agentActivityBlocks 按用户消息锚点渲染；
+   * 仅作无锚点时的末尾兜底。
+   */
+  nativeTurnGroups?: ReactNode;
 }
 
 function isProgressMessage(message: ChatMessage): boolean {
@@ -138,6 +159,8 @@ export function ChatPanel({
   workflowTaskBoard,
   agentActivity = null,
   agentActivityBlocks = [],
+  composerTopSlot = null,
+  nativeTurnGroups = null,
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const latestVideoScenePackageMessageId = [...messages]
@@ -210,6 +233,7 @@ export function ChatPanel({
           </div>
         ) : (
           messages.map((m) => {
+            if (shouldHideChatMessage(m)) return null;
             const isLatestVideoScenePackage = m.id === latestVideoScenePackageMessageId;
             const isSupersededArtifact = Boolean(m.artifact && latestActionableMessageId && m.id !== latestActionableMessageId);
             const keepScenePackageActions = isLatestVideoScenePackage && m.artifact?.type === "video_scene_packages";
@@ -276,11 +300,17 @@ export function ChatPanel({
         {orphanActivityBlocks.map((block, index) => (
           <div key={`orphan-activity-${index}`} className="w-full">{block}</div>
         ))}
+        {nativeTurnGroups ? <div className="w-full space-y-5">{nativeTurnGroups}</div> : null}
         <div ref={endRef} />
       </div>
 
       <div className="relative shrink-0 px-4 pb-4 pt-2">
         <ConversationRuntimeNotice notice={runtimeNotice} />
+        {composerTopSlot ? (
+          <div className="relative z-20 mb-2 mr-auto w-full max-w-[720px]">
+            {composerTopSlot}
+          </div>
+        ) : null}
         {workflowTaskBoard ? (
           <div className="relative z-0 mr-auto -mb-4 w-full max-w-[1080px] pl-6 pr-7">
             <WorkflowTaskBoard key={workflowTaskBoard.workflowId} model={workflowTaskBoard} />

@@ -69,6 +69,42 @@ test("confirmation requested event pauses the persisted plan step", () => {
   assert.equal(paused.plans["plan-1"].steps["step-1"].status, "awaiting_confirmation");
 });
 
+test("confirmation requested upserts missing step on empty native observation plan", () => {
+  const planned = reduceVideoAgentEvent(createVideoAgentTimelineState(), {
+    type: "agent.plan.created",
+    payload: {
+      plan_id: "plan-native-1",
+      workspace_id: "workspace-1",
+      status: "running",
+      public_goal: "处理视频请求：合并视频吧",
+    },
+  });
+
+  const paused = reduceVideoAgentEvent(planned, {
+    type: "agent.confirmation.requested",
+    payload: {
+      plan_id: "plan-native-1",
+      step_id: "plan-native-1-native",
+      sequence: 1,
+      title: "合并分镜视频为成片",
+      status: "awaiting_confirmation",
+      tool_name: "compose_or_export_video",
+      cost_summary: "即将执行计费能力",
+      confirmation_id: "confirm-1",
+    },
+  });
+
+  assert.equal(paused.plans["plan-native-1"].status, "awaiting_confirmation");
+  assert.equal(
+    paused.plans["plan-native-1"].steps["plan-native-1-native"].title,
+    "合并分镜视频为成片",
+  );
+  assert.equal(
+    paused.plans["plan-native-1"].steps["plan-native-1-native"].status,
+    "awaiting_confirmation",
+  );
+});
+
 test("progressed step event appends live phase log while keeping running status", () => {
   const planned = reduceVideoAgentEvent(createVideoAgentTimelineState(), {
     type: "agent.plan.created",

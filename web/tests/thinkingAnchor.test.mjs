@@ -42,3 +42,17 @@ test("thinking-answer bubble still resolves previous user", () => {
   ];
   assert.equal(resolveThinkingAfterMessageId("run-1", messages), "u1");
 });
+
+test("Snapshot afterMessageId beats latest-user fallback and stale knownAnchor", () => {
+  const messages = [
+    { id: "u1", role: "user" },
+    { id: "u2", role: "user" },
+  ];
+  assert.equal(
+    resolveThinkingAfterMessageId("turn_old", messages, {
+      knownAnchor: "u2",
+      afterMessageId: "u1",
+    }),
+    "u1",
+  );
+});

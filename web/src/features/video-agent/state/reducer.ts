@@ -357,8 +357,13 @@ export function reduceVideoAgentEvent(
     const planId = asText(event.payload.plan_id);
     const stepId = asText(event.payload.step_id);
     const plan = planId ? state.plans[planId] : undefined;
-    const previous = stepId && plan ? plan.steps[stepId] : undefined;
-    if (!planId || !stepId || !plan || !previous) return state;
+    if (!planId || !stepId || !plan) return state;
+    const previous = plan.steps[stepId];
+    const title = asText(event.payload.title) ?? previous?.title ?? "待确认步骤";
+    const sequence = asPositiveInteger(event.payload.sequence) ?? previous?.sequence ?? (
+      Object.keys(plan.steps).length + 1
+    );
+    // 原生观察 Plan 常以 0 步创建；确认闸门必须 upsert 步骤，否则 UI 卡在「规划中」。
     return {
       plans: {
         ...state.plans,
@@ -367,7 +372,19 @@ export function reduceVideoAgentEvent(
           status: "awaiting_confirmation",
           steps: {
             ...plan.steps,
-            [stepId]: { ...previous, status: "awaiting_confirmation" },
+            [stepId]: {
+              stepId,
+              sequence,
+              title,
+              status: "awaiting_confirmation",
+              publicSummary: previous?.publicSummary ?? null,
+              progressLog: previous?.progressLog ?? [],
+              progressPhase: previous?.progressPhase ?? null,
+              artifactRefs: previous?.artifactRefs ?? [],
+              startedAt: previous?.startedAt ?? null,
+              completedAt: previous?.completedAt ?? null,
+              durationMs: previous?.durationMs ?? null,
+            },
           },
         },
       },

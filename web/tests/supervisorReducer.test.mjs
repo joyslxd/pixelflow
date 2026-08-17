@@ -326,6 +326,12 @@ test("input queue 按 client_input_id 幂等更新且服务端接管后不被本
     turn_id: "turn-1",
     status: "completed",
   }));
+  assert.equal(
+    state.inputQueue.some((item) => item.clientInputId === "input-1"),
+    false,
+    "completed Turn 应从 inputQueue 移除，避免假「处理中」",
+  );
+  assert.equal(state.run.status, "idle");
   state = supervisorRuntimeReducer(state, {
     type: "input.submit_failed",
     clientInputId: "input-1",
@@ -336,10 +342,10 @@ test("input queue 按 client_input_id 幂等更新且服务端接管后不被本
   });
   assert.deepEqual(state.inputQueue, [{
     clientInputId: "input-1",
-    turnId: "turn-1",
-    status: "accepted",
+    turnId: null,
+    status: "sending",
     queuePosition: null,
-    updatedAt: "2026-07-24T02:00:04Z",
+    updatedAt: null,
   }]);
 
   state = supervisorRuntimeReducer(state, {
@@ -614,6 +620,39 @@ test("thinking completed 写入 agentThinkingHistory 供刷新回显", () => {
   assert.equal(state.agentThinkingHistory.length, 1);
   assert.equal(state.agentThinkingHistory[0].turnId, "turn-1");
   assert.equal(state.agentThinkingHistory[0].text, "先看脚本");
+});
+
+test("native response/reasoning 事件投影到 agentThinking", () => {
+  let state = createSupervisorRuntimeState("conv-1");
+  state = receive(state, event(1, "agent.reasoning_summary.delta", {
+    turn_id: "turn-n1",
+    delta: "先确认脚本",
+  }));
+  state = receive(state, event(2, "agent.reasoning_summary.completed", {
+    turn_id: "turn-n1",
+    summary: "先确认脚本再生成",
+  }));
+  assert.equal(state.agentThinking?.status, "completed");
+  assert.equal(state.agentThinking?.text, "先确认脚本再生成");
+
+  state = receive(state, event(3, "agent.response.delta", {
+    turn_id: "turn-n1",
+    delta: "已",
+  }));
+  state = receive(state, event(4, "agent.response.completed", {
+    turn_id: "turn-n1",
+    text: "已完成检查",
+  }));
+  assert.equal(state.agentThinking?.status, "completed");
+  assert.equal(state.agentThinking?.answer, "已完成检查");
+  assert.equal(state.resume.sequence, 4);
+
+  state = receive(state, event(5, "agent.tool.started", {
+    turn_id: "turn-n1",
+    tool_name: "inspect_video_workspace",
+    tool_call_id: "call-1",
+  }));
+  assert.equal(state.resume.sequence, 5);
 });
 
 test("snapshot 可把本地仍 streaming 的思考收成 completed", () => {

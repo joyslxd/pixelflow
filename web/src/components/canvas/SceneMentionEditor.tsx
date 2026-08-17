@@ -14,6 +14,11 @@ interface SceneMentionEditorProps {
   shotDescription: Record<string, unknown>;
   candidates: SceneMentionCandidate[];
   onChange: (next: { text: string; mentions: SceneMention[] }) => void;
+  /** 表格单元格内联编辑：更矮、无外框，默认不单独展示关联计数。 */
+  compact?: boolean;
+  showAssociationCount?: boolean;
+  className?: string;
+  placeholder?: string;
 }
 
 interface ActiveMentionQuery {
@@ -36,14 +41,27 @@ const MENTION_CANDIDATE_GROUPS: Array<{ group: SceneMentionCandidate["group"]; l
   { group: "props", label: "道具" },
 ];
 
-export function SceneMentionEditor({ text, shotDescription, candidates, onChange }: SceneMentionEditorProps) {
+export function SceneMentionEditor({
+  text,
+  shotDescription,
+  candidates,
+  onChange,
+  compact = false,
+  showAssociationCount,
+  className,
+  placeholder,
+}: SceneMentionEditorProps) {
+  const showCount = showAssociationCount ?? !compact;
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const queryRangeRef = useRef<Range | null>(null);
   const lastDomKeyRef = useRef("");
   const [activeQuery, setActiveQuery] = useState<ActiveMentionQuery | null>(null);
-  const mentions = useMemo(() => normalizeShotMentions({ ...shotDescription, text }, [], undefined), [shotDescription, text]);
+  const mentions = useMemo(
+    () => normalizeShotMentions({ ...shotDescription, text }, [], candidates),
+    [candidates, shotDescription, text],
+  );
   const mentionedAssetIds = useMemo(() => new Set(mentions.map((mention) => mention.asset_id)), [mentions]);
   const canAddNewReference = mentions.length < MAX_REFERENCE_IMAGE_COUNT;
   const filteredCandidates = useMemo(() => {
@@ -65,6 +83,14 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
     if (!editor) return;
     const key = editorStateKey(text, mentions);
     if (lastDomKeyRef.current === key) return;
+    // 聚焦编辑中：若正文与当前 DOM 一致，只同步 key，禁止 replaceChildren（否则光标乱跳）。
+    if (document.activeElement === editor) {
+      const live = serializeEditorContent(editor);
+      if (live.text === text) {
+        lastDomKeyRef.current = key;
+        return;
+      }
+    }
     renderEditorContent(editor, text, mentions);
     lastDomKeyRef.current = key;
   }, [mentions, text]);
@@ -212,14 +238,19 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
     : null;
 
   return (
-    <div ref={wrapperRef} className="relative grid gap-2">
+    <div ref={wrapperRef} className={compact ? "relative" : "relative grid gap-2"}>
       <div
         ref={editorRef}
         role="textbox"
         aria-multiline="true"
         contentEditable
         suppressContentEditableWarning
-        data-placeholder="0-5秒: 地点:@办公室走廊 中,角色:@赵总监 完成动作。5-12秒: 地点:@办公室走廊 中,角色:@林晓 进入近景。"
+        data-placeholder={
+          placeholder
+          || (compact
+            ? "点击编辑，输入 @ 关联参考图"
+            : "0-5秒: 地点:@办公室走廊 中,角色:@赵总监 完成动作。5-12秒: 地点:@办公室走廊 中,角色:@林晓 进入近景。")
+        }
         onInput={handleInput}
         onClick={updateMentionQuery}
         onFocus={updateMentionQuery}
@@ -227,15 +258,23 @@ export function SceneMentionEditor({ text, shotDescription, candidates, onChange
         onKeyUp={updateMentionQuery}
         onMouseUp={updateMentionQuery}
         onPaste={handlePaste}
-        className="min-h-44 w-full rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink outline-none empty:before:pointer-events-none empty:before:text-ink-soft empty:before:content-[attr(data-placeholder)] focus:border-accent"
+        className={[
+          "w-full text-[13px] leading-relaxed text-ink outline-none empty:before:pointer-events-none empty:before:text-ink-soft empty:before:content-[attr(data-placeholder)]",
+          compact
+            ? "min-h-[2.25rem] rounded-md bg-transparent px-0 py-0.5 focus:bg-white"
+            : "min-h-44 rounded-xl border border-line bg-white px-3 py-2 focus:border-accent",
+          className || "",
+        ].join(" ")}
       />
 
       {mentionMenu}
 
-      <div className="text-[12px] text-ink-soft">
-        已关联 {mentions.length}/{MAX_REFERENCE_IMAGE_COUNT}
-        {mentions.length >= MAX_REFERENCE_IMAGE_COUNT ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
-      </div>
+      {showCount ? (
+        <div className="text-[12px] text-ink-soft">
+          已关联 {mentions.length}/{MAX_REFERENCE_IMAGE_COUNT}
+          {mentions.length >= MAX_REFERENCE_IMAGE_COUNT ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 }

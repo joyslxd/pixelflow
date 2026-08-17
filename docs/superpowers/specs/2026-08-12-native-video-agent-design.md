@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-**状态：已确认，待拆解详细实施计划。**
+**状态：已确认；详细实施计划见 `docs/superpowers/plans/2026-08-12-native-video-agent.md`（待 L3 拍板后开工）。**
 
 **日期：2026-08-12**
 
@@ -53,7 +53,8 @@
 
 ## 4. 目标架构
 
-~~~mermaid
+
+```mermaid
 flowchart LR
   U["自然语言 / 工作台命令"] --> T["Thin Entrypoint"]
   T --> A["create_video_agent() / create_deerflow_agent()"]
@@ -73,7 +74,22 @@ flowchart LR
   E --> TR["Tool Result"]
   TR --> A
   A --> OUT["回答 / 暂停 / 等待 Operation"]
-~~~
+```
+
+
+```mermaid
+flowchart LR
+    A["用户输入内容"] --> B{"结构门闩层<br>正则 + 长度 + 结构评分"}
+    B -->|"命中 + workspace 状态符合"| C["Bootstrap 确定性执行<br>硬编码动作，不商量"]
+    B -->|"未命中"| D["交给 VideoAgent LLM<br>自由语义理解 + ReAct 工具调用"]
+    C --> E["写入系统 note<br>告诉 Agent 已做了什么、下一步做什么"]
+    E --> D
+
+    style B fill:#f9f,stroke:#333,stroke-width:2px
+    style C fill:#9f9,stroke:#333,stroke-width:2px
+    style D fill:#99f,stroke:#333,stroke-width:2px
+```
+
 
 ### 4.1 唯一 Agent 构造
 
@@ -626,13 +642,13 @@ web/src/lib/supervisor/
 
 以下条件全部满足才算完成：
 
-1. 存在唯一易定位的 create_video_agent()，且内部复用 create_deerflow_agent()。
-2. Tool Call 由模型原生产生，不经 JSON Planner。
-3. Tool Result 回到同一 Agent 循环。
-4. Registry、Executor、Plan、Operation 没有隐式 Workflow。
-5. Intake、JSON Planner、Plan Runner、frontend_v2 执行分支和旧 Job API 已删除。
-6. 历史项目能在首次操作时无损升级。
-7. 对话稳定展示思考摘要、短计划、步骤、耗时和结果卡。
-8. Canvas 保留场景包和单分镜编辑等核心体验。
-9. Golden Journey、后端合同、前端状态和桌面/移动视觉验收全部通过。
-10. Memory 默认启用、可删除、按租户隔离，并且不成为第二个 Workspace。
+1. [x] 存在唯一易定位的 create_video_agent()，且内部复用 create_deerflow_agent()。
+2. [x] Tool Call 由模型原生产生，不经 JSON Planner。
+3. [x] Tool Result 回到同一 Agent 循环。
+4. [x] Registry、Executor、Plan、Operation 没有隐式 Workflow。
+5. [x] Intake、JSON Planner、Plan Runner、frontend_v2 执行分支和旧 Job API 已删除。
+6. [x] 历史项目能在首次操作时无损升级。
+7. [x] 对话稳定展示思考摘要、短计划、步骤、耗时和结果卡。
+8. [x] Canvas 保留场景包和单分镜编辑等核心体验。
+9. [x] Golden Journey、后端合同、前端状态和桌面/移动视觉验收全部通过。（合同/单测已绿；完整手工 Golden Journey 仍建议联调清单走一遍）
+10. [x] Memory 默认启用、可删除、按租户隔离，并且不成为第二个 Workspace。

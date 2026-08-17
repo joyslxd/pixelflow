@@ -24,8 +24,20 @@ test("video scene package card hides duration editing from users", () => {
 test("video scene package chat card is a compact storyboard entry", () => {
   assert.match(messageBubbleSource, /查看分镜/);
   assert.match(messageBubbleSource, /storyboardPreviewAssets|previewAssets/);
+  assert.match(messageBubbleSource, /确认并生成视频/);
   assert.doesNotMatch(messageBubbleSource, /全局固定资产/);
   assert.doesNotMatch(messageBubbleSource, /onUpdateVideoSceneAssetField/);
+});
+
+test("scene asset model options card echoes the confirmed model not the gpt default", () => {
+  const start = messageBubbleSource.indexOf('msg.artifact?.type === "scene_asset_model_options"');
+  const end = messageBubbleSource.indexOf('msg.artifact?.type === "video_scene_packages"', start);
+  assert.notEqual(start, -1, "model options branch must exist");
+  assert.notEqual(end, -1, "video scene packages branch must follow model options");
+  const branch = messageBubbleSource.slice(start, end);
+  assert.match(branch, /confirmedModel/);
+  assert.match(branch, /creation_contract[\s\S]*image_model/);
+  assert.match(branch, /sceneAssetModelConfirmed[\s\S]*preferred/);
 });
 
 test("storyboard detail panel edits global assets and scene-varying fields", () => {
@@ -38,13 +50,37 @@ test("storyboard detail panel edits global assets and scene-varying fields", () 
   assert.match(storyboardPanelSource, /视觉风格/);
   assert.match(storyboardPanelSource, /故事线/);
   assert.match(storyboardPanelSource, /镜头描述/);
-  assert.match(storyboardPanelSource, /旁白/);
+  // 六字段「旁白（对白）」在镜头描述结构化编辑器内；底部独立旁白框已删除。
+  assert.doesNotMatch(
+    storyboardPanelSource,
+    /updateScene\(\{\s*narration:/,
+    "底部重复旁白字段已删除，旁白只在镜头描述六字段里编辑",
+  );
   assert.doesNotMatch(storyboardPanelSource, />\s*时间范围\s*</);
   assert.doesNotMatch(storyboardPanelSource, />\s*地点标注\s*</);
   assert.doesNotMatch(storyboardPanelSource, />\s*角色标注\s*</);
   assert.doesNotMatch(storyboardPanelSource, />\s*景别\s*</);
   assert.match(storyboardPanelSource, /shotDescriptionText/);
   assert.match(storyboardPanelSource, /SceneMentionEditor/);
+  assert.match(storyboardPanelSource, /ShotDescriptionStructuredEditor|点击字段直接编辑/);
+  assert.match(storyboardPanelSource, /composeShotDescriptionFields/);
+  assert.match(storyboardPanelSource, /generatingSceneIds/, "分镜面板须接收正在生成的 scene_id");
+  assert.match(storyboardPanelSource, /SceneVideoGeneratingOverlay/, "生成中须盖灰蒙版转圈");
+  assert.match(workspaceSource, /optimisticGeneratingSceneIds/, "单镜重生点按后须乐观蒙版");
+  assert.match(
+    workspaceSource,
+    /polling[\s\S]*即使仍有旧成片也要蒙版|即使仍有旧成片也要蒙版/,
+    "重生保留旧 video_url 时仍须蒙版",
+  );
+  assert.match(storyboardPanelSource, /previewExpanded/, "镜头预览须支持放大覆盖全屏");
+  assert.match(storyboardPanelSource, /放大镜头预览/, "镜头预览标题须可点击放大");
+  assert.match(storyboardPanelSource, /返回分镜编辑/, "放大预览须提供返回");
+  assert.match(storyboardPanelSource, /mergedVideoUrl/, "资产包须接收合并成片 URL");
+  assert.match(storyboardPanelSource, /查看合并后的视频/, "有成片时底部须提供查看入口");
+  assert.match(storyboardPanelSource, /合并成片预览/, "查看入口须打开成片预览");
+  assert.match(workspaceSource, /mergedVideoUrl=\{/, "工作台须把 Workspace 成片 URL 传入资产包");
+  assert.doesNotMatch(storyboardPanelSource, /编辑并 @ 参考图素材/);
+  assert.doesNotMatch(storyboardPanelSource, /shotDescriptionEditorOpen/);
   assert.doesNotMatch(storyboardPanelSource, />\s*参考素材\s*</);
 });
 
@@ -74,21 +110,24 @@ test("storyboard detail panel enforces at-reference image limit and failure deta
 });
 
 function videoResultBranchSource() {
-  const start = messageBubbleSource.indexOf('msg.artifact?.type === "video_result"');
-  const end = messageBubbleSource.indexOf(") : msg.artifact ?", start);
-  assert.notEqual(start, -1, "video result branch must exist");
-  assert.notEqual(end, -1, "generic artifact branch must follow video result branch");
+  const start = messageBubbleSource.indexOf('msg.artifact?.type === "video_result" && msg.artifact.mergedVideo');
+  const end = messageBubbleSource.indexOf(') : msg.artifact?.type === "video_result" ? null', start);
+  assert.notEqual(start, -1, "merged video_result branch must exist");
+  assert.notEqual(end, -1, "non-merged video_result must be suppressed");
   return messageBubbleSource.slice(start, end);
 }
 
 test("original scene package button reopens storyboard with generated scene video previews", () => {
   assert.doesNotMatch(videoResultBranchSource(), /查看分镜/);
+  assert.doesNotMatch(videoResultBranchSource(), /分镜视频预览/);
+  assert.match(videoResultBranchSource(), /mergedVideo/, "对话 video_result 仅保留合并成片卡");
   assert.match(storyboardPanelSource, /generatedSceneVideos/);
   assert.match(storyboardPanelSource, /sceneVideoForScene/);
   assert.match(storyboardPanelSource, /video\.scene_id === scene\.scene_id/);
   assert.match(storyboardPanelSource, /Number\(video\.scene_index\) === Number\(scene\.scene_index\)/);
   assert.match(storyboardPanelSource, /<video[\s\S]*controls[\s\S]*preload="metadata"/);
   assert.match(storyboardPanelSource, /dirtySceneIds|已修改/);
+  assert.match(storyboardPanelSource, /generatingIdSet\.has\(selectedScene\.scene_id\)/);
   assert.match(workspaceSource, /updateOriginalScenePackageMessageWithVideoResult|syncScenePackageMessageVideoResult/);
   assert.match(workspaceSource, /videoScenePackageEditedSceneIds/);
 });
@@ -108,7 +147,11 @@ test("Supervisor 场景包和分镜操作提交结构化 modify continue regener
 });
 
 test("Supervisor 分镜编辑只在显式保存时提交一次当前草稿", () => {
-  assert.match(workspaceSource, /deferSceneUpdates=\{orchestrationMode !== "video_agent_v2" && Boolean\(supervisorVideoArtifact\)\}/);
+  assert.match(
+    workspaceSource,
+    /deferSceneUpdates=\{\s*orchestrationMode === "video_agent_v2" \|\| Boolean\(supervisorVideoArtifact\)\s*\}/,
+  );
+  assert.match(workspaceSource, /deferSceneUpdates\n/);
   assert.match(storyboardPanelSource, /sceneDraftPatches/);
   assert.match(storyboardPanelSource, /saveStoryboardDraft/);
   assert.match(storyboardPanelSource, /await onUpdateVideoScenePackage/);

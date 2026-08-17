@@ -810,7 +810,7 @@ Planner 会根据你的状态诊断和服务端 Tool Registry 决定具体执行
 - develop_script：从想法创作或继续完善脚本
 - import_script：导入并结构化已有成熟脚本
 - confirm_script：等待用户确认脚本方案
-- prepare_scene_packages：拆解角色、场景、道具和分镜
+- prepare_scene_packages：把脚本预览分阶段产物（角色/场景/道具设定与分镜提示词）投影进视频场景包；已有 characters/outline 时不要当作未拆解；用户说「重新生成分镜包/场景包/资产包」时目标仍是 prepare_scene_packages，不要改成确认脚本或空聊
 - inspect_storyboard：检查分镜结构及资产引用
 - generate_scene_assets：生成分镜参考图或资产
 - inspect_scene_results：检查已生成的分镜结果
@@ -821,6 +821,8 @@ Planner 会根据你的状态诊断和服务端 Tool Registry 决定具体执行
 - workspace_digest.has_scene_packages=true 且尚无参考图时，
   用户说「没有参考图 / 直接生成 / 生成参考图」→ target_capability=generate_scene_assets，
   intent=continue_images；不要写成 generate_scenes 或「直接生成视频」。
+- 引导选生图模型时：只推荐 workspace_digest.registered_scene_asset_image_models
+  （当前 Borgrise：image-2 / Seedream 5.0），禁止推荐 Midjourney、DALL·E、Stable Diffusion。
 - 只有参考图已就绪后，确认生成分镜视频才进入 generate_scenes。
 - review_generated_scenes：检查生成后的视频镜头
 - compose_video：拼接并导出视频
@@ -866,166 +868,36 @@ Planner 会根据你的状态诊断和服务端 Tool Registry 决定具体执行
 """
 
 
-async def stream_intake_thinking(
-    *,
-    publisher: ThinkingStreamPublisher,
-    content: str,
-    materials: Sequence[Mapping[str, Any]] | None = None,
-    workspace_digest: Mapping[str, Any] | None = None,
-    blocking_confirmation: Mapping[str, Any] | None = None,
-    model_factory: Callable[..., Any] | None = None,
-) -> IntakeThinkingResult:
-    """入场思考流：流式判断 → answer + context；失败不阻断 Turn。"""
-
-    from deerflow.models import create_chat_model
-
-    factory = model_factory or create_chat_model
-    material_hint = ""
-    if materials:
-        names = [
-            str(item.get("name") or item.get("filename") or "").strip()
-            for item in materials
-            if isinstance(item, Mapping)
-        ]
-        names = [name for name in names if name][:8]
-        if names:
-            material_hint = "素材文件：" + "、".join(names)
-
-    raw = content.strip()
-    fallback = IntakeThinkingResult(
-        user_message="已完成初步判断，继续生成执行方案。",
-        entry_path=None,
-        needs_user_reply=False,
-    )
-
-    try:
-        await publisher.start(
-            title="思考中",
-            subtitle="",
-        )
-        await publisher.push_delta("正在核对工作区状态。", channel="reasoning")
-        await publisher.push_delta("正在检查生成前置条件。", channel="reasoning")
-        await publisher.flush()
-
-        model = _create_streaming_chat_model(factory, thinking_enabled=True)
-        human_parts = [
-            "请根据系统提示完成状态诊断。严格按 NDJSON 协议逐行输出；"
-            "先实时输出 progress，最后输出 result。\n",
-            f"【本轮用户输入】\n{_truncate_for_thinking(raw)}\n",
-        ]
-        if material_hint:
-            human_parts.append(f"【{material_hint}】\n")
-        if workspace_digest:
-            human_parts.append(
-                "【workspace_digest】（事实摘要，不是结论；由你对照闸门规则裁决）\n"
-                f"{json.dumps(dict(workspace_digest), ensure_ascii=False)[:1_800]}\n"
-            )
-        if blocking_confirmation:
-            human_parts.append(
-                "【blocking_confirmation】（若非 null，表示仍卡在确认闸门）\n"
-                f"{json.dumps(dict(blocking_confirmation), ensure_ascii=False)[:600]}\n"
-            )
-        else:
-            human_parts.append("【blocking_confirmation】\nnull\n")
-
-        public_stream = _IntakeNdjsonStream(publisher)
-
-        async def on_content(delta: str) -> None:
-            await public_stream.feed(delta)
-
-        reasoning, answer = await stream_chat_tokens(
-            model=model,
-            messages=[
-                ("system", _INTAKE_SYSTEM_PROMPT),
-                ("human", "\n".join(human_parts)),
-            ],
-            # 原始 reasoning_content 可能复述系统提示，不进公开 reasoning 通道；
-            # 用户可见进度只来自 NDJSON progress（on_content → _IntakeNdjsonStream）。
-            on_reasoning=None,
-            on_content=on_content,
-            timeout_sec=THINKING_PREAMBLE_TIMEOUT_SEC,
-        )
-        await public_stream.finish()
-        combined_answer = public_stream.final_content() or (answer or "")
-        result = _parse_intake_answer_and_verdict(combined_answer)
-        if not combined_answer.strip() and not reasoning:
-            result = fallback
-        # needs_user_reply 时追问只落 WAITING_FOR_INPUT Plan，避免与卡片重复写气泡。
-        if not result.needs_user_reply and result.user_message.strip():
-            await publisher.push_delta(result.user_message, channel="answer")
-        logger.info(
-            "入场思考流完成 turn_id=%s reasoning_chars=%s answer_chars=%s "
-            "entry_path=%s intent=%s missing=%s needs_reply=%s",
-            publisher._turn_id,
-            len(reasoning or ""),
-            len(result.user_message),
-            result.entry_path,
-            result.intent,
-            list(result.missing_requirements),
-            result.needs_user_reply,
-        )
-        return result
-    except TimeoutError:
-        logger.warning(
-            "入场思考流超时 turn_id=%s，保留已推送片段并继续",
-            publisher._turn_id,
-        )
-        try:
-            await publisher.push_delta(
-                "\n思考预热超时，先按现有判断继续。",
-                channel="answer",
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        return IntakeThinkingResult(
-            user_message="思考预热超时，先按现有判断继续。",
-            entry_path=None,
-            needs_user_reply=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "入场思考流失败 turn_id=%s error_type=%s",
-            publisher._turn_id,
-            type(exc).__name__,
-            exc_info=True,
-        )
-        try:
-            await publisher.push_delta(
-                "思考流暂时中断，继续生成执行方案。",
-                channel="answer",
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        return IntakeThinkingResult(
-            user_message="思考流暂时中断，继续生成执行方案。",
-            entry_path=None,
-            needs_user_reply=False,
-        )
-    finally:
-        # complete 写 AGENT_THINKING_COMPLETED；卡住则前端 caret 永不收口。
-        try:
-            await asyncio.wait_for(publisher.complete(), timeout=8.0)
-        except TimeoutError:
-            logger.warning(
-                "思考流收口超时 turn_id=%s，继续规划以免整轮挂死",
-                publisher._turn_id,
-            )
-        except Exception:  # noqa: BLE001
-            try:
-                await publisher.flush()
-            except Exception:  # noqa: BLE001
-                pass
-
-
 def fold_thinking_history_from_events(
     events: Sequence[Any],
     *,
     max_text_chars: int = 80_000,
 ) -> list[dict[str, Any]]:
-    """从持久化 AgentEvent 折叠可回显的思考历史（刷新恢复权威来源）。"""
+    """从持久化 AgentEvent 折叠可回显的思考历史（刷新恢复权威来源）。
+
+    同时支持旧 agent.thinking.* 与原生 agent.reasoning_summary.* / agent.response.*。
+    """
 
     by_turn: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+
+    def ensure_turn(turn_id: str, *, title: str = "思考中") -> dict[str, Any]:
+        current = by_turn.get(turn_id)
+        if current is not None:
+            return current
+        order.append(turn_id)
+        created = {
+            "turn_id": turn_id,
+            "title": title,
+            "subtitle": "",
+            "text": "",
+            "answer": "",
+            "started_at": None,
+            "status": "streaming",
+        }
+        by_turn[turn_id] = created
+        return created
+
     for event in events:
         event_type = getattr(event, "type", None)
         type_value = getattr(event_type, "value", event_type)
@@ -1036,22 +908,16 @@ def fold_thinking_history_from_events(
         if not turn_id:
             continue
         if type_value == "agent.thinking.started":
-            if turn_id not in by_turn:
-                order.append(turn_id)
-            by_turn[turn_id] = {
-                "turn_id": turn_id,
-                "title": str(payload.get("title") or "").strip() or "思考中",
-                "subtitle": str(payload.get("subtitle") or "").strip(),
-                "text": "",
-                "answer": "",
-                "started_at": payload.get("started_at"),
-                "status": "streaming",
-            }
-            continue
-        current = by_turn.get(turn_id)
-        if current is None:
+            current = ensure_turn(turn_id)
+            current["title"] = str(payload.get("title") or "").strip() or "思考中"
+            current["subtitle"] = str(payload.get("subtitle") or "").strip()
+            current["started_at"] = payload.get("started_at")
+            current["status"] = "streaming"
             continue
         if type_value == "agent.thinking.delta":
+            current = by_turn.get(turn_id)
+            if current is None:
+                continue
             delta = payload.get("delta")
             if not isinstance(delta, str) or not delta:
                 continue
@@ -1063,7 +929,51 @@ def fold_thinking_history_from_events(
             current[key] = merged
             continue
         if type_value == "agent.thinking.completed":
+            current = by_turn.get(turn_id)
+            if current is None:
+                continue
             current["status"] = "completed"
+            continue
+        # 原生 VideoAgent：思考摘要与公开回答。
+        if type_value == "agent.reasoning_summary.delta":
+            current = ensure_turn(turn_id, title="思考中")
+            delta = payload.get("delta")
+            if not isinstance(delta, str) or not delta:
+                continue
+            if current["started_at"] is None:
+                current["started_at"] = getattr(event, "occurred_at", None)
+            merged = f"{current['text']}{delta}"
+            if len(merged) > max_text_chars:
+                merged = merged[:max_text_chars]
+            current["text"] = merged
+            continue
+        if type_value == "agent.reasoning_summary.completed":
+            current = ensure_turn(turn_id, title="思考中")
+            summary = payload.get("summary")
+            if not isinstance(summary, str) or not summary.strip():
+                summary = payload.get("text")
+            if isinstance(summary, str) and summary.strip():
+                current["text"] = summary.strip()[:max_text_chars]
+            if current["started_at"] is None:
+                current["started_at"] = getattr(event, "occurred_at", None)
+            continue
+        if type_value == "agent.response.delta":
+            current = ensure_turn(turn_id, title="回复中")
+            delta = payload.get("delta")
+            if not isinstance(delta, str) or not delta:
+                continue
+            merged = f"{current['answer']}{delta}"
+            if len(merged) > max_text_chars:
+                merged = merged[:max_text_chars]
+            current["answer"] = merged
+            continue
+        if type_value == "agent.response.completed":
+            current = ensure_turn(turn_id, title="回复完成")
+            text = payload.get("text")
+            if isinstance(text, str) and text.strip():
+                current["answer"] = text.strip()[:max_text_chars]
+            current["status"] = "completed"
+            continue
     return [by_turn[turn_id] for turn_id in order if turn_id in by_turn]
 
 
@@ -1072,7 +982,6 @@ __all__ = [
     "ThinkingStreamPublisher",
     "fold_thinking_history_from_events",
     "stream_chat_tokens",
-    "stream_intake_thinking",
     "_parse_intake_answer_and_verdict",
     "_thinking_event_id",
 ]

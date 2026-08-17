@@ -171,56 +171,367 @@ def render_asset_manifest_markdown(asset_manifest: Mapping[str, Any]) -> str:
 
 
 def extract_script_setting_assets(plan_markdown: str) -> AssetManifest:
-    """从脚本 Markdown 的角色/场景/道具设定章节解析资产种子（不依赖 LLM）。"""
+    """从脚本 Markdown 的角色/场景/道具设定章节解析资产种子（不依赖 LLM）。
+
+    优先读独立二级标题；再读合并段「角色/场景/道具设定」内嵌套小节；
+    若仍是扁平三级标题混写，按名称/正文语义分流到三类，避免地点进角色、叙事段名进场景。
+    """
 
     text = str(plan_markdown or "").strip()
     result = empty_asset_manifest()
     if not text:
         return result
 
-    character_section = _extract_markdown_section(
-        text,
-        r"角色设定|角色\s*[/／]\s*场景\s*[/／]\s*道具",
-    )
-    scene_section = _extract_markdown_section(text, r"场景设定")
-    prop_section = _extract_markdown_section(text, r"道具(?:与产品)?设定|道具设定")
+    character_section, scene_section, prop_section = _resolve_setting_sections(text)
 
     for name, body in _iter_setting_entries(character_section):
-        description = body or (
-            f"角色“{name}”的固定人物设定；外貌、发型、服装与气质在所有分镜中保持一致。"
+        _append_setting_asset(result, "characters", name, body)
+    for name, body in _iter_setting_entries(scene_section):
+        _append_setting_asset(result, "scenes", name, body)
+    for name, body in _iter_setting_entries(prop_section):
+        _append_setting_asset(result, "props", name, body)
+
+    # 合并段扁平混写：角色桶里混进地点/道具，或场景桶仍空时，按语义重分流
+    mixed_in_characters = any(
+        isinstance(item, dict)
+        and _classify_setting_entry_kind(
+            str(item.get("name") or ""),
+            str(item.get("description") or ""),
+        )
+        != "character"
+        for item in result["characters"]
+    )
+    if result["characters"] and (mixed_in_characters or not result["scenes"]):
+        result = _rebucket_mixed_setting_assets(result)
+
+    # 丢掉叙事分镜标题（开场钩子/补充证明）与空名
+    result = _filter_invalid_setting_assets(result)
+
+    # 无「角色/场景/道具设定」章节时：从对白说话人与时间线标题兜底抽资产，
+    # 避免 0—10秒｜成稿拆镜后 global_assets 被空蓝图需求清空。
+    if not any(result[collection] for collection in ("characters", "scenes", "props")):
+        dialogue = extract_dialogue_cast_assets(text)
+        for collection in ("characters", "scenes", "props"):
+            result[collection] = list(dialogue.get(collection) or [])
+        result = _filter_invalid_setting_assets(result)
+    return result
+
+
+def _resolve_setting_sections(text: str) -> tuple[str, str, str]:
+    """解析设定三桶正文：独立 H2 > 合并段内嵌套 H2/H3 > 合并段全文（待重分流）。"""
+
+    character_section = _extract_markdown_section(text, r"角色设定")
+    scene_section = _extract_markdown_section(text, r"场景设定")
+    prop_section = _extract_markdown_section(text, r"道具(?:与产品)?设定|道具设定")
+    if character_section or scene_section or prop_section:
+        return character_section, scene_section, prop_section
+
+    combined = _extract_markdown_section(text, r"角色\s*[/／]\s*场景\s*[/／]\s*道具(?:设定)?")
+    if not combined:
+        # 仅当正文明显是设定集时才整篇当合并段，避免把分镜大纲标题抽成资产
+        if re.search(
+            r"(?:^|\n)#{2,4}\s*.*(?:角色设定|场景设定|道具(?:与产品)?设定)|视觉形象|时空背景|外观材质",
+            text,
+        ):
+            combined = text
+        else:
+            return "", "", ""
+
+    nested_character = _extract_markdown_section(combined, r"角色设定") or _extract_hashed_bucket(
+        combined, r"角色设定"
+    )
+    nested_scene = _extract_markdown_section(combined, r"场景设定") or _extract_hashed_bucket(
+        combined, r"场景设定"
+    )
+    nested_prop = _extract_markdown_section(
+        combined, r"道具(?:与产品)?设定|道具设定"
+    ) or _extract_hashed_bucket(combined, r"道具(?:与产品)?设定|道具设定")
+    if nested_character or nested_scene or nested_prop:
+        return nested_character, nested_scene, nested_prop
+
+    # 扁平混写：暂全部交给角色桶，后续 _rebucket_mixed_setting_assets 分流
+    return combined, "", ""
+
+
+def _extract_hashed_bucket(text: str, heading_pattern: str) -> str:
+    """从 ###/#### 桶标题截取（LLM 常把「角色设定」写成三级标题）。"""
+
+    match = re.search(
+        rf"^###{{1,2}}\s*[0-9一二三四五六七八九十.、)）]*\s*(?:{heading_pattern})[^\n]*\n([\s\S]*?)"
+        rf"(?=^#{{2,4}}\s*[0-9一二三四五六七八九十.、)）]*\s*"
+        rf"(?:角色设定|场景设定|道具|大纲|完整镜头|合规|标题|规格|分镜提示词|镜头列表|分镜大纲)|\Z)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _append_setting_asset(
+    result: AssetManifest,
+    collection: str,
+    name: str,
+    body: str,
+) -> None:
+    cleaned = str(name or "").strip()
+    if not cleaned or _is_narrative_beat_name(cleaned) or _is_empty_asset_name(cleaned):
+        return
+    description = body or ""
+    if collection == "characters":
+        description = description or (
+            f"角色“{cleaned}”的固定人物设定；外貌、发型、服装与气质在所有分镜中保持一致。"
         )
         result["characters"].append(
             {
-                "name": name,
+                "name": cleaned,
                 "description": description,
                 "three_view_prompt": (
-                    f"角色“{name}”同一人物的正面、侧面、背面三视图，"
+                    f"角色“{cleaned}”同一人物的正面、侧面、背面三视图，"
                     f"{description}，三幅人物身份与造型严格一致，纯净背景，无文字水印、无产品道具。"
                 ),
             }
         )
-
-    for name, body in _iter_setting_entries(scene_section):
-        description = body or f"场景“{name}”的固定空间、光线与氛围设定。"
+        return
+    if collection == "scenes":
+        description = description or f"场景“{cleaned}”的固定空间、光线与氛围设定。"
         result["scenes"].append(
             {
-                "name": name,
+                "name": cleaned,
                 "description": description,
                 "image_prompt": (
-                    f"场景“{name}”环境参考图，{description}，清晰展示空间结构与光线氛围，"
+                    f"场景“{cleaned}”环境参考图，{description}，清晰展示空间结构与光线氛围，"
                     "无人、无文字水印。"
                 ),
             }
         )
+        return
+    description = description or f"道具“{cleaned}”的固定外观、材质与颜色设定。"
+    result["props"].append(
+        {
+            "name": cleaned,
+            "description": description,
+            "image_prompt": (
+                f"道具“{cleaned}”产品参考图，{description}，完整展示外观材质颜色，"
+                "纯净背景，无人物、无文字水印。"
+            ),
+        }
+    )
 
-    for name, body in _iter_setting_entries(prop_section):
-        description = body or f"道具“{name}”的固定外观、材质与颜色设定。"
+
+def _rebucket_mixed_setting_assets(manifest: AssetManifest) -> AssetManifest:
+    """扁平设定混写时，把角色桶里的地点/道具分流到正确集合。"""
+
+    rebucketed = empty_asset_manifest()
+    # 已有正确桶先保留
+    for collection in ("scenes", "props"):
+        for item in manifest.get(collection) or []:
+            if isinstance(item, dict) and item.get("name"):
+                rebucketed[collection].append(dict(item))
+
+    seen = {
+        collection: {_name_key(str(item.get("name") or "")) for item in rebucketed[collection]}
+        for collection in ("characters", "scenes", "props")
+    }
+
+    for item in manifest.get("characters") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        body = str(item.get("description") or "")
+        if not name:
+            continue
+        kind = _classify_setting_entry_kind(name, body)
+        target = {"character": "characters", "scene": "scenes", "prop": "props"}[kind]
+        key = _name_key(name)
+        if key in seen[target]:
+            continue
+        seen[target].add(key)
+        if target == "characters":
+            rebucketed["characters"].append(dict(item))
+        else:
+            # 从角色条目重建场景/道具字段
+            _append_setting_asset(rebucketed, target, name, body)
+    return rebucketed
+
+
+def _filter_invalid_setting_assets(manifest: AssetManifest) -> AssetManifest:
+    cleaned = empty_asset_manifest()
+    for collection in ("characters", "scenes", "props"):
+        for item in manifest.get(collection) or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or _is_empty_asset_name(name) or _is_narrative_beat_name(name):
+                continue
+            if collection == "scenes" and _is_narrative_beat_name(name):
+                continue
+            cleaned[collection].append(dict(item))
+    return cleaned
+
+
+def _is_empty_asset_name(name: str) -> bool:
+    cleaned = re.sub(r"[\s\{\}\[\]\(\)（）]", "", str(name or ""))
+    return not cleaned
+
+
+def _is_narrative_beat_name(name: str) -> bool:
+    """分镜叙事职能名（开场钩子/补充证明）不是可拍摄物理场景。"""
+
+    key = _name_key(name)
+    if key in {_name_key(item) for item in _NARRATIVE_BEAT_NAMES}:
+        return True
+    return bool(re.fullmatch(r"补充证明\d*", key))
+
+
+def _classify_setting_entry_kind(name: str, body: str) -> str:
+    """扁平混写时判断条目属于角色 / 场景 / 道具。"""
+
+    text = f"{name} {body}"
+    if _is_narrative_beat_name(name):
+        return "scene"  # 稍后会被 filter 丢掉；避免进角色
+    # 道具：产品词、器材词、正文偏外观材质
+    if re.search(
+        r"(防晒|乳液|粉底|精华|面霜|口红|手机|反光板|三脚架|灯|包装|瓶|盒|袋)",
+        name,
+    ) or re.search(r"(外观材质|品牌露出|使用动作|产品参考|道具)", body):
+        return "prop"
+    # 场景：地点后缀 / 空间陈设词
+    if re.search(
+        r"(办公室|梳妆台|工作室|拍摄区|提案室|房间|酒店|海岛|餐厅|店|厅|台|区|室|外景|内景|窗边)",
+        name,
+    ) or re.search(r"(时空背景|陈设细节|光线氛围|可拍要点|环境参考|无人)", body):
+        return "scene"
+    # 角色：人设字段或明显人名/身份
+    if re.search(r"(视觉形象|身份|核心标签|性格|金句|人物|主讲|闺蜜|代表)", text):
+        return "character"
+    # 短专名默认当角色（安然 / Yann）；含地点后缀已在上面拦截
+    if len(name) <= 12 and not re.search(r"(证明|钩子|收口|大纲|提示词)", name):
+        return "character"
+    return "prop"
+
+
+_NARRATIVE_BEAT_NAMES = {
+    "开场钩子",
+    "卖点证明",
+    "转化收口",
+    "补充证明",
+    "追剧钩子",
+    "投流记忆点",
+}
+
+
+_DIALOGUE_LABEL_BLOCKLIST = frozenset(
+    {
+        "剧情",
+        "动作",
+        "剧情动作",
+        "新增对白",
+        "原片对白",
+        "产品演示",
+        "追剧钩子",
+        "投流记忆点",
+        "画面",
+        "旁白",
+        "字幕",
+        "镜头描述",
+        "提示词",
+        "画外音",
+    }
+)
+
+
+def extract_dialogue_cast_assets(plan_markdown: str) -> AssetManifest:
+    """从时间线成稿对白/标题抽角色、场景、道具种子（无设定章节时用）。"""
+
+    text = str(plan_markdown or "")
+    result = empty_asset_manifest()
+    if not text.strip():
+        return result
+
+    speakers: list[str] = []
+    seen_speakers: set[str] = set()
+    for match in re.finditer(
+        r"(?m)(?:^|[\n\r])\s*(?:【[^】]{0,20}】\s*)?"
+        r"([A-Za-z][A-Za-z0-9_\-]{0,20}|[\u4e00-\u9fff]{1,12})"
+        r"\s*[：:]\s*",
+        text,
+    ):
+        name = match.group(1).strip()
+        name = re.sub(r"(画外音|旁白)$", "", name).strip()
+        key = _name_key(name)
+        if (
+            not key
+            or key in seen_speakers
+            or key in {_name_key(item) for item in _GENERIC_SETTING_NAMES}
+            or key in {_name_key(item) for item in _DIALOGUE_LABEL_BLOCKLIST}
+            or re.search(r"(关系|档案|弧线|设定|场景|道具|对白|动作)", name)
+        ):
+            continue
+        seen_speakers.add(key)
+        speakers.append(name)
+
+    for name in speakers:
+        result["characters"].append(
+            {
+                "name": name,
+                "description": f"角色“{name}”在成片中反复出场，造型与身份保持一致。",
+                "three_view_prompt": (
+                    f"角色“{name}”同一人物的正面、侧面、背面三视图，"
+                    "外貌发型服装气质全片一致，纯净背景，无文字水印、无产品道具。"
+                ),
+            }
+        )
+
+    # 时间线/正文里的地点作场景种子（保守枚举，避免把标题整句当场景名）
+    scene_candidates = (
+        ("办公室", "办公室"),
+        ("梳妆台", "办公室梳妆台"),
+        ("海岛", "海岛外拍"),
+        ("酒店", "酒店"),
+        ("晚宴", "晚宴现场"),
+        ("房间", "室内房间"),
+        ("窗边", "窗边"),
+    )
+    seen_scenes: set[str] = set()
+    for needle, scene_name in scene_candidates:
+        if needle not in text:
+            continue
+        key = _name_key(scene_name)
+        if key in seen_scenes:
+            continue
+        seen_scenes.add(key)
+        result["scenes"].append(
+            {
+                "name": scene_name,
+                "description": f"场景“{scene_name}”的固定空间、光线与氛围设定。",
+                "image_prompt": (
+                    f"场景“{scene_name}”环境参考图，清晰展示空间结构与光线氛围，"
+                    "无人、无文字水印。"
+                ),
+            }
+        )
+        if len(result["scenes"]) >= 6:
+            break
+
+    # 成稿里高频产品名：氧气防晒 等（2–12 字 + 防晒/乳液/粉底）
+    prop_hits: list[str] = []
+    seen_props: set[str] = set()
+    for match in re.finditer(
+        r"([\u4e00-\u9fffA-Za-z0-9]{2,12}(?:防晒|乳液|粉底|精华|面霜|口红))",
+        text,
+    ):
+        name = match.group(1).strip()
+        key = _name_key(name)
+        if not key or key in seen_props or key in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
+            continue
+        seen_props.add(key)
+        prop_hits.append(name)
+    for name in prop_hits[:8]:
         result["props"].append(
             {
                 "name": name,
-                "description": description,
+                "description": f"道具“{name}”的固定外观、材质与颜色设定。",
                 "image_prompt": (
-                    f"道具“{name}”产品参考图，{description}，完整展示外观材质颜色，"
+                    f"道具“{name}”产品参考图，完整展示外观材质颜色，"
                     "纯净背景，无人物、无文字水印。"
                 ),
             }
@@ -229,11 +540,13 @@ def extract_script_setting_assets(plan_markdown: str) -> AssetManifest:
 
 
 def _extract_markdown_section(text: str, heading_pattern: str) -> str:
+    # 只在行首二级大节（## 且非 ###）截断；避免 ### 被吃掉一个 # 后误触发截断。
     match = re.search(
-        rf"#{{1,3}}\s*[0-9一二三四五六七八九十.、)）]*\s*(?:{heading_pattern})[^\n]*\n([\s\S]*?)"
-        rf"(?=#{{1,3}}\s*[0-9一二三四五六七八九十.、)）]*\s*(?:角色设定|场景设定|道具|大纲|完整镜头|合规|标题|规格)|$)",
+        rf"^##(?!#)\s*[0-9一二三四五六七八九十.、)）]*\s*(?:{heading_pattern})[^\n]*\n([\s\S]*?)"
+        rf"(?=^##(?!#)\s*[0-9一二三四五六七八九十.、)）]*\s*"
+        rf"(?:角色设定|场景设定|道具|大纲|完整镜头|合规|标题|规格|分镜提示词|镜头列表|分镜大纲)|\Z)",
         text,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.MULTILINE,
     )
     return match.group(1).strip() if match else ""
 
@@ -277,6 +590,32 @@ _GENERIC_SETTING_NAMES = {
     "感情线弧线",
     "关键互动场景预设",
     "四层反派体系",
+    # 设定模板字段名：常被误抽成出场角色/场景/道具
+    "视觉特征",
+    "动作习惯",
+    "人物弧光",
+    "关键关系",
+    "定位",
+    "人设",
+    "人设定位",
+    "时段",
+    "光线",
+    "光影",
+    "色调",
+    "视觉要点",
+    "功能",
+    "时空背景",
+    "陈设细节",
+    "光线氛围",
+    "可拍要点",
+    "外观材质",
+    "品牌露出",
+    "使用动作",
+    "分镜提示词",
+    "镜头列表",
+    "分镜大纲",
+    "对白",
+    "旁白",
 }
 
 # 容器标题：不可当作资产名；应继续解析其下的列表/子标题人名
@@ -291,12 +630,51 @@ _CONTAINER_SETTING_HEADINGS = {
     "四层反派体系",
 }
 
+# 字段标签：只描述属性，绝不是可生成实体名
+_SETTING_FIELD_LABELS = {
+    "视觉特征",
+    "动作习惯",
+    "人物弧光",
+    "关键关系",
+    "视觉形象",
+    "身份",
+    "性格",
+    "金句",
+    "核心标签",
+    "定位",
+    "人设",
+    "人设定位",
+    "时段",
+    "光线",
+    "光影",
+    "色调",
+    "视觉要点",
+    "功能",
+    "时空背景",
+    "陈设细节",
+    "光线氛围",
+    "可拍要点",
+    "外观材质",
+    "品牌露出",
+    "使用动作",
+    "名称",
+    "文字说明",
+    "分镜提示词",
+    "镜头列表",
+    "分镜大纲",
+}
+
 
 def _is_container_setting_heading(name: str) -> bool:
     key = _name_key(name)
     return key in {_name_key(item) for item in _CONTAINER_SETTING_HEADINGS} or key.startswith(
         _name_key("角色关系")
     )
+
+
+def _is_setting_field_label(name: str) -> bool:
+    key = _name_key(name)
+    return key in {_name_key(item) for item in _SETTING_FIELD_LABELS}
 
 
 def _concrete_name_from_setting_body(body: str) -> str:
@@ -366,12 +744,21 @@ def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
             return
         if _is_container_setting_heading(cleaned):
             return
+        # 「视觉特征 / 时段 / 分镜提示词」是字段标签，不是可出镜实体
+        if _is_setting_field_label(cleaned):
+            return
         body_text = re.sub(r"\s+", " ", body).strip()[:400]
         if _name_key(cleaned) in {_name_key(item) for item in _GENERIC_SETTING_NAMES}:
             concrete = _concrete_name_from_setting_body(body_text)
-            if not concrete:
+            if not concrete or _is_setting_field_label(concrete):
                 return
             cleaned = concrete
+        # 过长身份描述（如「从执行者成长为…的创意工作者」）不是稳定角色名
+        if len(cleaned) > 16 and re.search(
+            r"(工作者|负责人|创业者|上班族|宝妈|用户画像|目标人群)",
+            cleaned,
+        ):
+            return
         key = _name_key(cleaned)
         if key in seen:
             return

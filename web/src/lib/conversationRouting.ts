@@ -8,13 +8,30 @@ export function shouldRenderConversationMessage(activeConversationId: string, ta
 
 export function appendVisibleConversationMessage<T>(
   messages: T[],
-  input: { activeConversationId: string; targetConversationId: string; message: T & { id?: string } },
+  input: {
+    activeConversationId: string;
+    targetConversationId: string;
+    message: T & { id?: string };
+    /** 新建消息时插入到该 id 之前，用于场景包卡回到选模卡之前的原时间线位置。 */
+    insertBeforeId?: string | null;
+  },
 ): T[] {
   if (!shouldRenderConversationMessage(input.activeConversationId, input.targetConversationId)) return messages;
   if (input.message.id) {
     const existingIndex = messages.findIndex((message) => (message as { id?: string }).id === input.message.id);
     if (existingIndex >= 0) {
       return messages.map((message, index) => (index === existingIndex ? input.message : message)) as T[];
+    }
+  }
+  const insertBeforeId = String(input.insertBeforeId || "").trim();
+  if (insertBeforeId) {
+    const beforeIndex = messages.findIndex((message) => (message as { id?: string }).id === insertBeforeId);
+    if (beforeIndex >= 0) {
+      return [
+        ...messages.slice(0, beforeIndex),
+        input.message,
+        ...messages.slice(beforeIndex),
+      ] as T[];
     }
   }
   return [...messages, input.message];

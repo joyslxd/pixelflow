@@ -31,8 +31,8 @@ _TERMINAL_FAILURES = frozenset(
         ExternalJobStatus.EXPIRED,
     }
 )
-# prepare 会同步跑 LLM（常超过 1 分钟）；默认 30s start lease 会在终态落库时判租约失效。
-_SCENE_PACKAGE_START_LEASE = timedelta(minutes=15)
+# prepare / 参考图同步跑领域任务（LLM 或批量生图常远超 30s）；start lease 过短会在终态落库时报冲突。
+_SCENE_PACKAGE_START_LEASE = timedelta(hours=2)
 
 
 class M06ScenePackageOperationPort:
@@ -80,6 +80,8 @@ class M06ScenePackageOperationPort:
         materials: list[dict[str, JsonValue]],
         target_duration_ms: int,
         attempt: int,
+        shot_source_markdown: str = "",
+        settings_source_markdown: str = "",
     ) -> ScenePackageOperationJob:
         if context.plan_id is None or context.step_id is None:
             raise VideoToolExecutionError("场景包 Operation 缺少计划身份")
@@ -87,6 +89,8 @@ class M06ScenePackageOperationPort:
         digest = _request_digest(
             {
                 "plan_markdown": plan_markdown,
+                "shot_source_markdown": shot_source_markdown,
+                "settings_source_markdown": settings_source_markdown,
                 "form_values": form_values,
                 "selected_direction": selected_direction,
                 "target_duration_ms": target_duration_ms,
@@ -94,6 +98,8 @@ class M06ScenePackageOperationPort:
         )
         provider_request: dict[str, JsonValue] = {
             "plan_markdown": plan_markdown,
+            "shot_source_markdown": shot_source_markdown,
+            "settings_source_markdown": settings_source_markdown,
             "form_values": form_values,
             "selected_direction": selected_direction,
             "materials": materials,
@@ -135,6 +141,10 @@ class M06ScenePackageOperationPort:
             "image_size": image_size,
             "reference_brief": reference_brief,
             "target_assets": target_assets,
+            # 供 on_progress 增量回写 Workspace，分镜画布可逐步看到已生成参考图。
+            "conversation_id": context.workspace.conversation_id,
+            "user_id": context.user_id,
+            "workspace_id": context.workspace.workspace_id,
         }
         return await self._start(
             context,
@@ -190,7 +200,16 @@ class M06ScenePackageOperationPort:
         if operation.status in {ExternalJobStatus.CREATED, ExternalJobStatus.POLLING}:
             return ScenePackageOperationJob(job_id=operation.job_id, status="polling")
         if operation.status in _TERMINAL_FAILURES:
-            raise VideoToolExecutionError("场景包/参考图 Operation 执行失败")
+            detail = await self._terminal_failure_detail(
+                adapter=adapter,
+                operation=operation,
+                context=context,
+            )
+            raise VideoToolExecutionError(
+                f"场景包/参考图 Operation 执行失败：{detail}"
+                if detail
+                else "场景包/参考图 Operation 执行失败"
+            )
         if operation.status is not ExternalJobStatus.SUCCEEDED:
             raise VideoToolExecutionError("场景包/参考图 Operation 状态不受支持")
         result = await self._completed_result(context, job_id=operation.job_id)
@@ -199,6 +218,50 @@ class M06ScenePackageOperationPort:
             status="succeeded",
             result=result,
         )
+
+    async def _terminal_failure_detail(
+        self,
+        *,
+        adapter: ProviderJobAdapter,
+        operation: object,
+        context: VideoToolContext,
+    ) -> str:
+        """从领域 Job 内存状态或完成事件提取可公开的失败原因。
+
+        ProviderJobSnapshot 合同会把失败 message 归一成固定文案，业务原因只留在
+        ExistingJobService.status 或事件 payload.result 中。
+        """
+
+        provider_job_id = getattr(operation, "provider_job_id", None)
+        if isinstance(provider_job_id, str) and provider_job_id.strip():
+            service = getattr(adapter, "_service", None)
+            status_fn = getattr(service, "status", None)
+            if callable(status_fn):
+                try:
+                    raw = await status_fn(provider_job_id.strip())
+                except Exception:  # noqa: BLE001
+                    raw = None
+                detail = _extract_public_failure_message(raw)
+                if detail:
+                    return detail
+
+        try:
+            events = await self._repository.list_events(
+                context.user_id,
+                context.workspace.conversation_id,
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+        job_id = getattr(operation, "job_id", None)
+        matches = [
+            event
+            for event in events
+            if isinstance(getattr(event, "payload", None), Mapping)
+            and event.payload.get("job_id") == job_id
+        ]
+        if len(matches) != 1:
+            return ""
+        return _extract_public_failure_message(matches[0].payload)
 
     async def _completed_result(
         self,
@@ -222,6 +285,45 @@ class M06ScenePackageOperationPort:
 def _request_digest(payload: Mapping[str, JsonValue]) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _extract_public_failure_message(payload: object) -> str:
+    """从领域 Job / 完成事件中抽出可展示给用户的失败原因。"""
+
+    if not isinstance(payload, Mapping):
+        return ""
+    candidates: list[object] = [
+        payload.get("message"),
+        payload.get("error"),
+        payload.get("detail"),
+    ]
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        candidates.extend(
+            (
+                result.get("message"),
+                result.get("error"),
+                result.get("detail"),
+            )
+        )
+    for item in candidates:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        # 过滤 Provider 合同固定文案与敏感痕迹。
+        if text in {
+            "供应商任务执行失败。",
+            "供应商任务等待超时。",
+            "供应商原任务已过期，需要用户手动重新发起。",
+        }:
+            continue
+        lowered = text.lower()
+        if any(token in lowered for token in ("authorization", "bearer ", "api_key", "secret")):
+            continue
+        return text[:280]
+    return ""
 
 
 def _context_authorization(context: VideoToolContext) -> str:

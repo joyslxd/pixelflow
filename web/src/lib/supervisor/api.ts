@@ -7,6 +7,7 @@ import type {
   VideoAgentConfirmationResponseRequest,
   VideoAgentQuotaResponseRequest,
   VideoAgentScriptSaveRequest,
+  VideoAgentConfirmScriptPlanRequest,
 } from "./contracts.js";
 
 const AGENT_API_PREFIX = "/agent";
@@ -58,6 +59,11 @@ export interface SupervisorApiTransport {
     request: VideoAgentScriptSaveRequest,
     options?: SupervisorRequestOptions,
   ): Promise<TResponse>;
+  confirmVideoAgentScriptPlan<TResponse extends JsonValue = JsonObject>(
+    conversationId: string,
+    request: VideoAgentConfirmScriptPlanRequest,
+    options?: SupervisorRequestOptions,
+  ): Promise<TResponse>;
   getRunStatus<TResponse extends JsonValue = JsonObject>(
     conversationId: string,
     runId: string,
@@ -69,6 +75,10 @@ export class SupervisorApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code: string | null = null,
+    public readonly currentRevision: number | null = null,
+    public readonly workspaceId: string | null = null,
+    public readonly missingFields: string[] = [],
   ) {
     super(message);
     this.name = "SupervisorApiError";
@@ -183,9 +193,65 @@ export function createSupervisorApiTransport(
 
     const response = await fetchImpl(`${AGENT_API_PREFIX}${path}`, init);
     if (!response.ok) {
+      // 默认不信任错误正文；仅对 409/422 结构化业务 detail 读取重试与缺项字段。
+      let detailMessage = `Supervisor API 请求失败（HTTP ${response.status}）`;
+      let detailCode: string | null = null;
+      let currentRevision: number | null = null;
+      let workspaceId: string | null = null;
+      let missingFields: string[] = [];
+      if (response.status === 409 || response.status === 422) {
+        try {
+          const body = await response.json() as {
+            detail?: {
+              message?: string;
+              code?: string;
+              current_revision?: number;
+              workspace_id?: string;
+              missing_fields?: unknown;
+            };
+          };
+          const detail = body?.detail;
+          if (detail && typeof detail === "object") {
+            if (typeof detail.code === "string" && detail.code.trim()) {
+              detailCode = detail.code.trim();
+            }
+            if (
+              (
+                detailCode === "video_agent_script_conflict"
+                || detailCode === "video_agent_script_not_ready"
+              )
+              && typeof detail.message === "string"
+              && detail.message.trim()
+            ) {
+              detailMessage = detail.message.trim();
+            }
+            if (
+              typeof detail.current_revision === "number"
+              && Number.isInteger(detail.current_revision)
+              && detail.current_revision >= 1
+            ) {
+              currentRevision = detail.current_revision;
+            }
+            if (typeof detail.workspace_id === "string" && detail.workspace_id.trim()) {
+              workspaceId = detail.workspace_id.trim();
+            }
+            if (Array.isArray(detail.missing_fields)) {
+              missingFields = detail.missing_fields
+                .map((item) => (typeof item === "string" ? item.trim() : ""))
+                .filter(Boolean);
+            }
+          }
+        } catch {
+          // 保留默认文案
+        }
+      }
       throw new SupervisorApiError(
         response.status,
-        `Supervisor API 请求失败（HTTP ${response.status}）`,
+        detailMessage,
+        detailCode,
+        currentRevision,
+        workspaceId,
+        missingFields,
       );
     }
     if (response.status === 204) {
@@ -247,6 +313,16 @@ export function createSupervisorApiTransport(
     ) => request(
       `/conversations/${encodeURIComponent(conversationId)}/video-agent/script`,
       "PUT",
+      body,
+      requestOptions,
+    ),
+    confirmVideoAgentScriptPlan: (
+      conversationId,
+      body,
+      requestOptions = {},
+    ) => request(
+      `/conversations/${encodeURIComponent(conversationId)}/video-agent/commands/confirm-script-plan`,
+      "POST",
       body,
       requestOptions,
     ),

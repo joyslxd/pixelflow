@@ -19,14 +19,15 @@ export type {
 
 const AGENT_API_PREFIX = "/agent";
 const FLOW_BASE = "/flows";
+
+/** P0-5.3：旧 /flows/video Job HTTP 已从网关移除。 */
+export const LEGACY_VIDEO_JOB_API_REMOVED_MESSAGE = "旧视频 Job API 已删除，请通过对话由 VideoAgent 继续";
+
+function throwLegacyVideoJobApiRemoved(): never {
+  throw new Error(LEGACY_VIDEO_JOB_API_REMOVED_MESSAGE);
+}
 const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
-const SCENE_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
-const SCENE_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
-const VIDEO_MERGE_JOB_POLL_INTERVAL_MS = 3000;
-const VIDEO_MERGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
-const VIDEO_QUALITY_REVIEW_JOB_POLL_INTERVAL_MS = 3000;
-const VIDEO_QUALITY_REVIEW_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const IMAGE_JOB_POLL_INTERVAL_MS = 3000;
 const IMAGE_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const INTAKE_ANALYZE_JOB_POLL_INTERVAL_MS = 3000;
@@ -36,10 +37,6 @@ const CONVERSATION_MESSAGE_JOB_TIMEOUT_MS = 2 * 60 * 1000;
 const CREATIVE_DIRECTION_JOB_POLL_INTERVAL_MS = 3000;
 const CREATIVE_DIRECTION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
 const PLAN_JOB_POLL_INTERVAL_MS = 3000;
-const SCENE_PACKAGE_JOB_POLL_INTERVAL_MS = 3000;
-const SCENE_PACKAGE_JOB_TIMEOUT_MS = 60 * 60 * 1000;
-const DIRECT_VIDEO_JOB_POLL_INTERVAL_MS = 3000;
-const DIRECT_VIDEO_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const PPT_JOB_POLL_INTERVAL_MS = 3000;
 const PPT_JOB_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
@@ -1213,128 +1210,25 @@ async function pollPlanJob(
 }
 
 async function pollSceneVideoJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
-  onProgress?: (status: GenerateSceneVideosJobStatusResponse) => void,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
+  _onProgress?: (status: GenerateSceneVideosJobStatusResponse) => void,
 ): Promise<GenerateSceneVideosResponse | null> {
-  const deadline = Date.now() + SCENE_VIDEO_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`);
-    if (!shouldContinue()) return null;
-    onProgress?.(status);
-    if (status.status === "completed" && status.result) return status.result;
-    if (status.status === "failed") {
-      return {
-        ok: false,
-        endpoint: "/api/video/reference-mode-video",
-        scene_videos: status.result?.scene_videos || [],
-        failed_scenes: status.result?.failed_scenes?.length
-          ? status.result.failed_scenes
-          : [{ error: status.error || status.message || "场景视频生成失败" }],
-        message: status.error || status.message || "场景视频生成失败",
-        quota_insufficient: status.result?.quota_insufficient,
-      };
-    }
-    await delay(SCENE_VIDEO_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    endpoint: "/api/video/reference-mode-video",
-    scene_videos: [],
-    failed_scenes: [{ error: "场景视频生成轮询超时" }],
-    message: "场景视频生成轮询超时",
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 async function pollMergeSceneVideoJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
 ): Promise<MergeSceneVideosResponse | null> {
-  const deadline = Date.now() + VIDEO_MERGE_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<MergeSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/merge/jobs/${encodeURIComponent(jobId)}`);
-    if (!shouldContinue()) return null;
-    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
-    if (status.status === "failed") {
-      if (status.result) return status.result;
-      return {
-        ok: false,
-        endpoint: "/api/video/merge",
-        merged_video_url: null,
-        task_id: null,
-        scene_videos: [],
-        error: status.error || status.message || "视频合并失败",
-        message: status.error || status.message || "视频合并失败",
-        raw: {},
-      };
-    }
-    await delay(VIDEO_MERGE_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    endpoint: "/api/video/merge",
-    merged_video_url: null,
-    task_id: null,
-    scene_videos: [],
-    error: "视频合并轮询超时",
-    message: "视频合并轮询超时",
-    raw: {},
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 async function pollVideoQualityReviewJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
 ): Promise<VideoQualityReviewResponse | null> {
-  const deadline = Date.now() + VIDEO_QUALITY_REVIEW_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<VideoQualityReviewJobStatusResponse>(`${FLOW_BASE}/video/quality-review/jobs/${encodeURIComponent(jobId)}`);
-    if (!shouldContinue()) return null;
-    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
-    if (status.status === "failed") {
-      if (status.result) return status.result;
-      return {
-        ok: false,
-        endpoint: "/api/creative/video_quality_review",
-        task_id: null,
-        passed: false,
-        score: 0,
-        summary_markdown: "",
-        quality_report_markdown: "",
-        issues: [],
-        affected_scene_ids: [],
-        target_scene_ids: [],
-        excluded_scene_ids: [],
-        revision_prompt: "",
-        check_results: [],
-        error: status.error || status.message || "视频质检失败",
-        message: status.error || status.message || "视频质检失败",
-        raw: {},
-      };
-    }
-    await delay(VIDEO_QUALITY_REVIEW_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    endpoint: "/api/creative/video_quality_review",
-    task_id: null,
-    passed: false,
-    score: 0,
-    summary_markdown: "",
-    quality_report_markdown: "",
-    issues: [],
-    affected_scene_ids: [],
-    target_scene_ids: [],
-    excluded_scene_ids: [],
-    revision_prompt: "",
-    check_results: [],
-    error: "视频质检轮询超时",
-    message: "视频质检轮询超时",
-    raw: {},
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 async function pollImageGenerationJob(
@@ -1454,33 +1348,11 @@ async function pollImageAssetFusionJob(
 }
 
 async function pollPrepareScenePackagesJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
-  onStatus?: PrepareScenePackagesJobStatusCallback,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
+  _onStatus?: PrepareScenePackagesJobStatusCallback,
 ): Promise<PrepareScenePackagesJobResult | null> {
-  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<PrepareScenePackagesJobStatusResponse>(`${FLOW_BASE}/video/prepare-scene-packages/jobs/${encodeURIComponent(jobId)}`);
-    if (!shouldContinue()) return null;
-    await onStatus?.(status);
-    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
-    if (status.status === "failed") {
-      return {
-        ok: false,
-        videoScenePackages: null,
-        sceneAssetFailures: [{ error: status.error || status.message || "视频场景包生成失败" }],
-        message: status.error || status.message || "视频场景包生成失败",
-      };
-    }
-    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    videoScenePackages: null,
-    sceneAssetFailures: [{ error: "视频场景包生成轮询超时" }],
-    message: "视频场景包生成轮询超时",
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 export type GenerateSceneAssetsJobStatusCallback = (
@@ -1488,124 +1360,18 @@ export type GenerateSceneAssetsJobStatusCallback = (
 ) => void | Promise<void>;
 
 async function pollSceneAssetsJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
-  onStatus?: GenerateSceneAssetsJobStatusCallback,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
+  _onStatus?: GenerateSceneAssetsJobStatusCallback,
 ): Promise<GenerateSceneAssetsResponse | null> {
-  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`);
-    if (!shouldContinue()) return null;
-    await onStatus?.(status);
-    if ((status.status === "completed" || status.status === "quota_paused") && status.result) return status.result;
-    if (status.status === "failed") {
-      return {
-        ok: false,
-        endpoint: "/api/picture/text_to_image",
-        global_assets: {},
-        scene_packages: [],
-        failed_assets: [{ error: status.error || status.message || "场景参考图生成失败" }],
-        message: status.error || status.message || "场景参考图生成失败",
-      };
-    }
-    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    endpoint: "/api/picture/text_to_image",
-    global_assets: {},
-    scene_packages: [],
-    failed_assets: [{ error: "场景参考图生成轮询超时" }],
-    message: "场景参考图生成轮询超时",
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 async function pollScenePackageAssetRevisionJob(
-  jobId: string,
-  shouldContinue: () => boolean = () => true,
+  _jobId: string,
+  _shouldContinue: () => boolean = () => true,
 ): Promise<ScenePackageAssetRevisionResponse | null> {
-  const deadline = Date.now() + SCENE_PACKAGE_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!shouldContinue()) return null;
-    const status = await req<ScenePackageAssetRevisionJobStatusResponse>(
-      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
-    );
-    if (!shouldContinue()) return null;
-    if (status.status === "completed" && status.result) return status.result;
-    if (status.status === "quota_paused") {
-      return status.result || {
-        ok: false,
-        operation: "replace",
-        asset_id: "",
-        asset_group: "characters",
-        global_assets: {},
-        scene_packages: [],
-        affected_scene_ids: [],
-        image_analysis_markdown: "",
-        quota_insufficient: true,
-        message: status.error || status.message || "图片分析额度不足",
-      };
-    }
-    if (status.status === "failed") {
-      return {
-        ok: false,
-        operation: "replace",
-        asset_id: "",
-        asset_group: "characters",
-        global_assets: {},
-        scene_packages: [],
-        affected_scene_ids: [],
-        image_analysis_markdown: "",
-        quota_insufficient: false,
-        message: status.error || status.message || "分镜素材修订失败",
-      };
-    }
-    await delay(SCENE_PACKAGE_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    operation: "replace",
-    asset_id: "",
-    asset_group: "characters",
-    global_assets: {},
-    scene_packages: [],
-    affected_scene_ids: [],
-    image_analysis_markdown: "",
-    quota_insufficient: false,
-    message: "分镜素材修订轮询超时",
-  };
-}
-
-async function pollDirectVideoJob(jobId: string): Promise<GenerateDirectVideoResponse> {
-  const deadline = Date.now() + DIRECT_VIDEO_JOB_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const status = await req<GenerateDirectVideoJobStatusResponse>(`${FLOW_BASE}/video/generate-direct/jobs/${encodeURIComponent(jobId)}`);
-    if (status.status === "completed" && status.result) return status.result;
-    if (status.status === "failed") {
-      return {
-        ok: false,
-        mode: "reference_mode_video",
-        endpoint: "/api/video/reference-mode-video",
-        video_url: null,
-        task_id: null,
-        error: status.error || status.message || "直接视频生成失败",
-        message: status.error || status.message || "直接视频生成失败",
-        raw: {},
-      };
-    }
-    await delay(DIRECT_VIDEO_JOB_POLL_INTERVAL_MS);
-  }
-  return {
-    ok: false,
-    mode: "reference_mode_video",
-    endpoint: "/api/video/reference-mode-video",
-    video_url: null,
-    task_id: null,
-    error: "直接视频生成轮询超时",
-    message: "直接视频生成轮询超时",
-    raw: {},
-  };
+  throwLegacyVideoJobApiRemoved();
 }
 
 async function pollPptJob<T extends Record<string, unknown>>(
@@ -2015,7 +1781,7 @@ export const api = {
 
   pollImageAssetFusionJob,
 
-  prepareVideoScenePackages: (body: {
+  prepareVideoScenePackages: (_body: {
     form_values: Record<string, unknown>;
     plan_markdown: string;
     selected_direction: Record<string, unknown>;
@@ -2024,9 +1790,11 @@ export const api = {
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     scene_blueprints?: PlanSceneBlueprint[];
     asset_manifest: PlanAssetManifest;
-  }) => req<PrepareScenePackagesResponse>(`${FLOW_BASE}/video/prepare-scene-packages`, { method: "POST", body: JSON.stringify(body) }),
+  }): Promise<PrepareScenePackagesResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  startPrepareScenePackagesJob: (body: {
+  startPrepareScenePackagesJob: (_body: {
     form_values: Record<string, unknown>;
     plan_markdown: string;
     selected_direction: Record<string, unknown>;
@@ -2036,18 +1804,17 @@ export const api = {
     scene_blueprints?: PlanSceneBlueprint[];
     asset_manifest?: PlanAssetManifest | null;
     generate_images?: boolean;
-  }) =>
-    req<PrepareScenePackagesJobStartResponse>(`${FLOW_BASE}/video/prepare-scene-packages/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  }): Promise<PrepareScenePackagesJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getPrepareScenePackagesJob: (jobId: string) =>
-    req<PrepareScenePackagesJobStatusResponse>(`${FLOW_BASE}/video/prepare-scene-packages/jobs/${encodeURIComponent(jobId)}`),
+  getPrepareScenePackagesJob: (_jobId: string): Promise<PrepareScenePackagesJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollPrepareScenePackagesJob,
 
-  generateSceneAssets: (body: {
+  generateSceneAssets: (_body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
@@ -2056,9 +1823,11 @@ export const api = {
     model?: string | null;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     target_assets?: SceneAssetRetryTarget[];
-  }) => req<GenerateSceneAssetsResponse>(`${FLOW_BASE}/video/generate-scene-assets`, { method: "POST", body: JSON.stringify(body) }),
+  }): Promise<GenerateSceneAssetsResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  startSceneAssetsJob: (body: {
+  startSceneAssetsJob: (_body: {
     global_assets?: Record<string, unknown>;
     scene_packages: PrepareScenePackagesResponse["scene_packages"];
     materials?: Array<Record<string, unknown>>;
@@ -2074,31 +1843,27 @@ export const api = {
       reference_urls?: string[];
     }>;
     conversation_id?: string;
-  }) =>
-    req<GenerateSceneAssetsJobStartResponse>(`${FLOW_BASE}/video/generate-scene-assets/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  }): Promise<GenerateSceneAssetsJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getSceneAssetsJob: (jobId: string) =>
-    req<GenerateSceneAssetsJobStatusResponse>(`${FLOW_BASE}/video/generate-scene-assets/jobs/${encodeURIComponent(jobId)}`),
+  getSceneAssetsJob: (_jobId: string): Promise<GenerateSceneAssetsJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollSceneAssetsJob,
 
-  startScenePackageAssetRevisionJob: (body: ScenePackageAssetRevisionRequest) =>
-    req<ScenePackageAssetRevisionJobStartResponse>(`${FLOW_BASE}/video/update-scene-package-asset/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  startScenePackageAssetRevisionJob: (_body: ScenePackageAssetRevisionRequest): Promise<ScenePackageAssetRevisionJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getScenePackageAssetRevisionJob: (jobId: string) =>
-    req<ScenePackageAssetRevisionJobStatusResponse>(
-      `${FLOW_BASE}/video/update-scene-package-asset/jobs/${encodeURIComponent(jobId)}`,
-    ),
+  getScenePackageAssetRevisionJob: (_jobId: string): Promise<ScenePackageAssetRevisionJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollScenePackageAssetRevisionJob,
 
-  startSceneVideosJob: (body: {
+  startSceneVideosJob: (_body: {
     scenes: SceneGenerationPayload[];
     ratio?: string;
     size?: string;
@@ -2106,41 +1871,39 @@ export const api = {
     sound?: string;
     creation_contract?: VideoCreationContract | Record<string, unknown>;
     conversation_id?: string;
-  }) =>
-    req<GenerateSceneVideosJobStartResponse>(`${FLOW_BASE}/video/generate-scenes/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  }): Promise<GenerateSceneVideosJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getSceneVideosJob: (jobId: string) =>
-    req<GenerateSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/generate-scenes/jobs/${encodeURIComponent(jobId)}`),
+  getSceneVideosJob: (_jobId: string): Promise<GenerateSceneVideosJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getJianyingDraftCapability: () =>
-    req<JianyingDraftCapability>(`${FLOW_BASE}/video/jianying-draft/capability`),
+  getJianyingDraftCapability: (): Promise<JianyingDraftCapability> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  startJianyingDraftJob: (body: JianyingDraftStartRequest) =>
-    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  startJianyingDraftJob: (_body: JianyingDraftStartRequest): Promise<JianyingDraftJobResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getJianyingDraftJob: (jobId: string) =>
-    req<JianyingDraftJobResponse>(`${FLOW_BASE}/video/jianying-draft/jobs/${encodeURIComponent(jobId)}`),
+  getJianyingDraftJob: (_jobId: string): Promise<JianyingDraftJobResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollSceneVideoJob,
 
-  generateSceneVideos: async (body: {
+  generateSceneVideos: async (_body: {
     scenes: SceneGenerationPayload[];
     ratio?: string;
     size?: string;
     model?: string | null;
     sound?: string;
-  }) => {
-    const started = await api.startSceneVideosJob(body);
-    return pollSceneVideoJob(started.job_id);
+  }): Promise<GenerateSceneVideosResponse | null> => {
+    throwLegacyVideoJobApiRemoved();
   },
 
-  generateDirectVideo: async (body: {
+  generateDirectVideo: async (_body: {
     mode: DirectVideoMode;
     prompt?: string;
     image_url?: string;
@@ -2157,42 +1920,36 @@ export const api = {
     size?: string;
     model?: string | null;
     sound?: string;
-  }) => {
-    const started = await req<GenerateDirectVideoJobStartResponse>(`${FLOW_BASE}/video/generate-direct/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    return pollDirectVideoJob(started.job_id);
+  }): Promise<GenerateDirectVideoResponse> => {
+    throwLegacyVideoJobApiRemoved();
   },
 
-  mergeSceneVideos: async (body: {
+  mergeSceneVideos: async (_body: {
     scene_videos: SceneVideoPayload[];
     duration?: number;
     size?: string;
     model?: string | null;
-  }) => {
-    const started = await api.startMergeSceneVideosJob(body);
-    return pollMergeSceneVideoJob(started.job_id);
+  }): Promise<MergeSceneVideosResponse | null> => {
+    throwLegacyVideoJobApiRemoved();
   },
 
-  startMergeSceneVideosJob: (body: {
+  startMergeSceneVideosJob: (_body: {
     scene_videos: SceneVideoPayload[];
     duration?: number;
     size?: string;
     model?: string | null;
     conversation_id?: string;
-  }) =>
-    req<MergeSceneVideosJobStartResponse>(`${FLOW_BASE}/video/merge/start`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  }): Promise<MergeSceneVideosJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getMergeSceneVideosJob: (jobId: string) =>
-    req<MergeSceneVideosJobStatusResponse>(`${FLOW_BASE}/video/merge/jobs/${encodeURIComponent(jobId)}`),
+  getMergeSceneVideosJob: (_jobId: string): Promise<MergeSceneVideosJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollMergeSceneVideoJob,
 
-  reviewVideoQuality: async (body: {
+  reviewVideoQuality: async (_body: {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
@@ -2203,30 +1960,11 @@ export const api = {
     selected_direction?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     user_feedback?: string | null;
-  }) => {
-    const started = await api.startVideoQualityReviewJob(body);
-    const result = await pollVideoQualityReviewJob(started.job_id);
-    return result ?? {
-      ok: false,
-      endpoint: "/api/creative/video_quality_review",
-      task_id: null,
-      passed: false,
-      score: 0,
-      summary_markdown: "",
-      quality_report_markdown: "",
-      issues: [],
-      affected_scene_ids: [],
-      target_scene_ids: [],
-      excluded_scene_ids: [],
-      revision_prompt: "",
-      check_results: [],
-      error: "视频质检轮询已中断",
-      message: "视频质检轮询已中断",
-      raw: {},
-    };
+  }): Promise<VideoQualityReviewResponse> => {
+    throwLegacyVideoJobApiRemoved();
   },
 
-  startVideoQualityReviewJob: (body: {
+  startVideoQualityReviewJob: (_body: {
     merged_video_url: string;
     scene_videos: SceneVideoPayload[];
     scene_packages?: Array<Record<string, unknown>>;
@@ -2237,18 +1975,23 @@ export const api = {
     selected_direction?: Record<string, unknown>;
     materials?: Array<Record<string, unknown>>;
     user_feedback?: string | null;
-  }) => req<VideoQualityReviewJobStartResponse>(`${FLOW_BASE}/video/quality-review/start`, { method: "POST", body: JSON.stringify(body) }),
+  }): Promise<VideoQualityReviewJobStartResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
-  getVideoQualityReviewJob: (jobId: string) =>
-    req<VideoQualityReviewJobStatusResponse>(`${FLOW_BASE}/video/quality-review/jobs/${encodeURIComponent(jobId)}`),
+  getVideoQualityReviewJob: (_jobId: string): Promise<VideoQualityReviewJobStatusResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   pollVideoQualityReviewJob,
 
-  analyzeStoryboards: (body: {
+  analyzeStoryboards: (_body: {
     prompt?: string;
     materials?: Array<Record<string, unknown>>;
     video_urls?: string[];
-  }) => req<AnalyzeStoryboardsResponse>(`${FLOW_BASE}/video/analyze-storyboards`, { method: "POST", body: JSON.stringify(body) }),
+  }): Promise<AnalyzeStoryboardsResponse> => {
+    throwLegacyVideoJobApiRemoved();
+  },
 
   createPptSummaryJob: (body: {
     ppt_topic: string;

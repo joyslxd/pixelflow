@@ -6,9 +6,12 @@
 
 ## 关键事实（当前快照）
 - 页面入口：`web/src/pages/WorkspacePage.tsx` → `features/video-agent/VideoAgentWorkspace.tsx`。
-- `VideoAgentWorkspace` 目前仍返回 `LegacyWorkspace`（兼容承载期）。
-- V2 视频资产与执行状态已在 `web/features/video-agent/*` 内建模与渲染组件中（`state/workspace.ts`, `AgentPlanTimeline.tsx`, `SceneEvidencePanel.tsx`, `VideoAgentStoryboardSurface.tsx`, `hooks/useVideoAgent.ts` 等）。
-- 后端 VideoAgent 已有：`entrypoint`、`planner`、`executor`、`tools`、`adapters`、`runner`、`runtime`，以及相关快照/事件桥接。
+- `VideoAgentWorkspace` 目前仍返回 `LegacyWorkspace`（兼容承载期）；原生 UI 在 `features/native-video-agent/`。
+- **视频执行只走原生 VideoAgent**（`create_video_agent` / Thin Entrypoint / Tool Gateway）。
+- **已硬删除：** Intake JSON Planner、`run_plan`、对外 `/agent/flows/video*` 与剪映 Job **路由模块文件**、前端 Job HTTP 客户端。
+- `LegacyWorkspace.tsx` 已拆出 `legacyWorkspaceTypes` / `Helpers` / `LegacyVideoJobs`（约 9.9k 行兼容壳）。
+- 历史 `frontend_v2` 会话首次 Turn/脚本保存时升级为 `video_agent_v2`。
+- 后端 VideoAgent：`agent.py`、`native_invoke.py`、`tool_gateway.py`、`tools/*`、`workspace/*`、`events/*`。
 
 ## 目录地图（常改动区域）
 - 后端：`backend/pixelflow/video_agent/*`, `backend/pixelflow/agent_runtime/*`, `backend/app/gateway/*`

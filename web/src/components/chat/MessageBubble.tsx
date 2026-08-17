@@ -5,11 +5,17 @@ import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/chat";
 import { canAcceptImageResult } from "@/lib/imageReview";
 import { sceneAssetFailureDetails } from "@/lib/sceneAssetFailures";
+import { formatSceneVideoFailureReason } from "@/lib/sceneVideoFailures";
 import { api, type CreativeDirectionResponse, type ImageEditModelSelection, type ImageModelParamConfig, type PptPageImage } from "@/lib/api";
 import type { VideoResult } from "@/lib/types";
 import { draftButtonState, isJianyingDraftResultRetryable, isJianyingDraftSucceededResultValid, type JianyingDraftCapability, type JianyingDraftJobResponse } from "@/lib/jianyingDraft";
 import { splitScriptVersionPreviewParts } from "@/features/video-agent/scriptSkillStages";
 
+/**
+ * MessageBubble 只负责基础消息与历史 artifact 摘要渲染。
+ * 确认/额度/Operation/错误等原生领域卡走 `features/native-video-agent/cards`；
+ * 完整编辑面走右侧 Canvas（`features/native-video-agent/canvas`），避免在气泡内嵌完整编辑器。
+ */
 interface MessageBubbleProps {
   msg: ChatMessage;
   isLatestVideoScenePackage?: boolean;
@@ -30,7 +36,10 @@ interface MessageBubbleProps {
   onConfirmSceneAssetModel?: (msg: ChatMessage, selection: ImageEditModelSelection) => void;
   onAcceptImageResult?: (msg: ChatMessage) => void;
   onReviseImageResult?: (msg: ChatMessage) => void;
-  onGenerateVideoFromScenePackages?: (msg: ChatMessage) => void;
+  onGenerateVideoFromScenePackages?: (
+    msg: ChatMessage,
+    options?: { sceneId?: string },
+  ) => void;
   onAcceptVideoResult?: (msg: ChatMessage) => void;
   onReviseVideoResult?: (msg: ChatMessage) => void;
   onOpenVideoResult?: (msg: ChatMessage, video: VideoResult, results: VideoResult[]) => void;
@@ -93,7 +102,21 @@ function materialName(record: Record<string, unknown>, index: number): string {
   return stringValue(record.name) || stringValue(record.asset_name) || stringValue(record.filename) || `附件 ${index + 1}`;
 }
 
-function previewAssets(msg: ChatMessage): Array<{ id: string; title: string; image: string }> {
+function previewAssets(msg: ChatMessage): Array<{ id: string; title: string; image: string; kind: "image" | "video" }> {
+  // 分镜成片优先：去掉对话区 early「分镜视频」卡后，场景包顶栏必须能看到回填的视频。
+  const sceneVideos = (msg.artifact?.generatedSceneVideos?.scene_videos || [])
+    .filter((scene) => Boolean(scene.video_url))
+    .slice()
+    .sort((left, right) => Number(left.scene_index) - Number(right.scene_index))
+    .slice(0, 5)
+    .map((scene) => ({
+      id: String(scene.scene_id || `scene-${scene.scene_index}`),
+      title: `分镜 ${scene.scene_index}`,
+      image: String(scene.video_url),
+      kind: "video" as const,
+    }));
+  if (sceneVideos.length > 0) return sceneVideos;
+
   const videoScenePackages = msg.artifact?.videoScenePackages;
   const globalAssets = videoScenePackages?.global_assets;
   const globalRecords = [
@@ -102,11 +125,21 @@ function previewAssets(msg: ChatMessage): Array<{ id: string; title: string; ima
     ...globalAssetRecords(globalAssets, "props"),
   ];
   const fromGlobal = globalRecords
-    .map((asset, index) => ({ id: assetId(asset) || `asset-${index}`, title: assetTitle(asset, `素材 ${index + 1}`), image: assetImage(asset) }))
+    .map((asset, index) => ({
+      id: assetId(asset) || `asset-${index}`,
+      title: assetTitle(asset, `素材 ${index + 1}`),
+      image: assetImage(asset),
+      kind: "image" as const,
+    }))
     .filter((item) => item.image);
   if (fromGlobal.length > 0) return fromGlobal.slice(0, 5);
   const fromScenes = records(videoScenePackages?.scene_packages)
-    .flatMap((scene) => stringArray(scene.image_urls).map((image, index) => ({ id: `${stringValue(scene.scene_id) || "scene"}-${index}`, title: stringValue(scene.title) || "场景片段", image })));
+    .flatMap((scene) => stringArray(scene.image_urls).map((image, index) => ({
+      id: `${stringValue(scene.scene_id) || "scene"}-${index}`,
+      title: stringValue(scene.title) || "场景片段",
+      image,
+      kind: "image" as const,
+    })));
   return fromScenes.slice(0, 5);
 }
 
@@ -285,6 +318,14 @@ export function MessageBubble({
   const imageGenerationFailed = Boolean(msg.artifact?.imageResult && !canAcceptImageResult(msg.artifact.imageResult));
   const videoAnalysisFailed = Boolean(msg.artifact?.videoAnalysis && !msg.artifact.videoAnalysis.ok);
   const videoGenerationFailed = Boolean(msg.artifact?.generatedSceneVideos && !msg.artifact.generatedSceneVideos.ok && msg.artifact.videoScenePackages && !msg.artifact.sceneVideosGenerating);
+  const hasFailedSceneVideos = Boolean(
+    msg.artifact?.generatedSceneVideos?.failed_scenes?.length
+    && !msg.artifact.sceneVideosGenerating,
+  );
+  const canRetryFailedSceneVideos = Boolean(
+    (videoGenerationFailed || hasFailedSceneVideos)
+    && msg.artifact?.videoScenePackages
+  );
   const videoMergeFailed = Boolean(msg.artifact?.mergedVideo && !msg.artifact.mergedVideo.ok && msg.artifact.generatedSceneVideos?.scene_videos.length && !msg.artifact.sceneVideosGenerating);
   const imageAccepted = Boolean(msg.artifact?.imageAccepted);
   const sceneGlobalAssetEditReview = Boolean(msg.artifact?.sceneGlobalAssetEditReview);
@@ -904,10 +945,20 @@ export function MessageBubble({
               const choices = modelNames.length > 0
                 ? modelNames
                 : ["gpt-image-2", "seeddream-5.0"];
-              const preferred = choices.includes("gpt-image-2") ? "gpt-image-2" : choices[0];
-              const selected = selectedImageEditModel && choices.includes(selectedImageEditModel)
-                ? selectedImageEditModel
-                : preferred;
+              const confirmedModel = String(
+                (msg.artifact.videoScenePackages?.creation_contract as { image_model?: string } | null | undefined)?.image_model
+                || (msg.artifact.creationContract as { image_model?: string } | null | undefined)?.image_model
+                || "",
+              ).trim();
+              // 已确认时必须回显真实选择；禁止默认落到 gpt-image-2。
+              const preferred = confirmedModel && choices.includes(confirmedModel)
+                ? confirmedModel
+                : (choices.includes("gpt-image-2") ? "gpt-image-2" : choices[0]);
+              const selected = msg.artifact.sceneAssetModelConfirmed
+                ? preferred
+                : (selectedImageEditModel && choices.includes(selectedImageEditModel)
+                  ? selectedImageEditModel
+                  : preferred);
               return (
                 <>
                   <div className="grid gap-2 sm:grid-cols-2">
@@ -1069,7 +1120,17 @@ export function MessageBubble({
               {previewAssets(msg).length > 0 ? (
                 previewAssets(msg).map((asset) => (
                   <div key={asset.id} className="border-r border-line last:border-r-0">
-                    <img src={asset.image} alt={asset.title} className="aspect-[4/3] w-full object-cover" />
+                    {asset.kind === "video" ? (
+                      <video
+                        src={asset.image}
+                        muted
+                        playsInline
+                        preload="metadata"
+                        className="aspect-[4/3] w-full object-cover"
+                      />
+                    ) : (
+                      <img src={asset.image} alt={asset.title} className="aspect-[4/3] w-full object-cover" />
+                    )}
                   </div>
                 ))
               ) : (
@@ -1088,9 +1149,16 @@ export function MessageBubble({
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-[14px] font-semibold text-ink">{msg.artifact.title || "创意 Storyboard"}</span>
                   <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] text-accent">故事板</span>
+                  {msg.artifact.generatedSceneVideos?.scene_videos?.some((scene) => Boolean(scene.video_url)) ? (
+                    <span className="rounded-full bg-brand/10 px-2 py-0.5 text-[11px] text-brand">
+                      {msg.artifact.sceneVideosGenerating ? "分镜视频生成中" : "已含分镜视频"}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="mt-1 block text-[12px] leading-relaxed text-ink-soft">
-                  {scenePackages.length} 个分镜片段，点击查看分镜后可编辑故事线、镜头描述、旁白和 @参考图。
+                  {msg.artifact.generatedSceneVideos?.scene_videos?.some((scene) => Boolean(scene.video_url))
+                    ? `${scenePackages.length} 个分镜片段；顶栏可预览已生成成片，点击查看分镜可编辑与逐镜播放。`
+                    : `${scenePackages.length} 个分镜片段，点击查看分镜后可编辑故事线、镜头描述、旁白和 @参考图。`}
                 </span>
               </span>
             </div>
@@ -1141,7 +1209,7 @@ export function MessageBubble({
                 ) : null}
               </div>
             ) : null}
-            {(isLatestVideoScenePackage || msg.artifact.sceneAssetsGenerating || msg.artifact.sceneAssetsAwaitingModel) ? (
+            {(isLatestVideoScenePackage || msg.artifact.sceneAssetsGenerating || msg.artifact.sceneAssetsAwaitingModel || Boolean(msg.artifact.videoScenePackages)) ? (
               <div className="grid gap-2 border-t border-line p-3 sm:grid-cols-2">
                 {msg.artifact.videoScenePackages ? (
                   <button
@@ -1183,6 +1251,17 @@ export function MessageBubble({
                   </button>
                 )}
               </div>
+            ) : null}
+            {mergedVideoResult && msg.artifact.mergedVideo?.ok ? (
+              <section className="space-y-2 border-t border-line p-3">
+                <div className="text-[13px] font-semibold text-ink">成品视频</div>
+                <VideoResultCard
+                  result={mergedVideoResult}
+                  className="max-w-[324px]"
+                  onOpen={(video) => onOpenVideoResult?.(msg, video, videoResults)}
+                  onDownload={(video) => onDownloadArtifact?.(msg, video.url)}
+                />
+              </section>
             ) : null}
             </>
             )}
@@ -1601,7 +1680,7 @@ export function MessageBubble({
               </button>
             </div>
           </div>
-        ) : msg.artifact?.type === "video_result" && (msg.artifact.mergedVideo || msg.artifact.generatedSceneVideos) ? (
+        ) : msg.artifact?.type === "video_result" && msg.artifact.mergedVideo ? (
           <div className="mt-2 w-full max-w-[680px] space-y-3 rounded-2xl border border-line bg-surface p-3">
             <div className="flex items-start gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
@@ -1613,21 +1692,11 @@ export function MessageBubble({
               </span>
               <span className={cn(
                 "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
-                msg.artifact.sceneVideosGenerating
-                  ? "bg-amber/10 text-amber"
-                  : msg.artifact.mergedVideo?.ok
-                    ? "bg-emerald/10 text-emerald"
-                    : msg.artifact.generatedSceneVideos?.ok && !msg.artifact.mergedVideo
-                      ? "bg-emerald/10 text-emerald"
-                      : "bg-amber/10 text-amber",
+                msg.artifact.mergedVideo?.ok
+                  ? "bg-emerald/10 text-emerald"
+                  : "bg-amber/10 text-amber",
               )}>
-                {msg.artifact.sceneVideosGenerating
-                  ? "生成中"
-                  : msg.artifact.mergedVideo?.ok
-                    ? "已合并"
-                    : msg.artifact.generatedSceneVideos?.ok && !msg.artifact.mergedVideo
-                      ? "分镜就绪"
-                      : "失败"}
+                {msg.artifact.mergedVideo?.ok ? "已合并" : "失败"}
               </span>
             </div>
             {msg.artifact.mergedVideo?.error && (
@@ -1646,42 +1715,45 @@ export function MessageBubble({
                 />
               </section>
             )}
-            {sceneVideoResults.length > 0 ? (
-              <section className="space-y-2">
-                <div className="text-[13px] font-semibold text-ink">
-                  {msg.artifact.sceneVideosGenerating ? "分镜视频预览（生成中）" : "分镜视频生成结果"}
-                </div>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {sceneVideoResults.map((result) => (
-                    <VideoResultCard
-                      key={result.id}
-                      result={result}
-                      onOpen={(video) => onOpenVideoResult?.(msg, video, videoResults)}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : msg.artifact.sceneVideosGenerating ? (
-              <div className="rounded-xl border border-dashed border-line bg-canvas/50 px-3 py-4 text-center text-[12px] text-ink-soft">
-                分镜视频生成中，完成后可在此预览每段…
-              </div>
-            ) : null}
+            {/* 分镜片段预览改由「视频场景包」面板回填，对话区不再展示 early 分镜视频卡。 */}
             {msg.artifact.generatedSceneVideos?.failed_scenes.length ? (
               <div className="space-y-2 rounded-xl border border-amber/30 bg-amber/10 p-2 text-[12px] text-ink">
-                <div className="font-medium">失败场景：{msg.artifact.generatedSceneVideos.failed_scenes.length} 个</div>
-                {msg.artifact.generatedSceneVideos.failed_scenes.map((scene, index) => (
-                  <details key={`${String(scene.scene_id || index)}-${index}`} className="rounded-lg bg-white/70 px-2 py-1.5">
-                    <summary className="cursor-pointer text-amber">
-                      {String(scene.scene_index || index + 1)}. {String(scene.scene_id || "未知场景")} · 查看失败原因
-                    </summary>
-                    <pre className="mt-2 max-h-[180px] overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed text-ink-soft">
-                      {JSON.stringify(scene, null, 2)}
-                    </pre>
-                  </details>
-                ))}
+                <div className="font-medium">失败分镜：{msg.artifact.generatedSceneVideos.failed_scenes.length} 个</div>
+                {msg.artifact.generatedSceneVideos.failed_scenes.map((scene, index) => {
+                  const sceneIndex = String(scene.scene_index || index + 1);
+                  const sceneId = String(scene.scene_id || "未知场景");
+                  const packageScene = msg.artifact?.videoScenePackages?.scene_packages?.find(
+                    (item) => item.scene_id === sceneId,
+                  );
+                  const errorText = formatSceneVideoFailureReason(scene, {
+                    sceneTitle: String(packageScene?.title || scene.scene_title || "").trim() || null,
+                    storyline: String(packageScene?.storyline || "").trim() || null,
+                  });
+                  return (
+                    <details key={`${sceneId}-${index}`} className="rounded-lg bg-white/70 px-2 py-1.5" open={index < 3}>
+                      <summary className="cursor-pointer text-amber">
+                        第 {sceneIndex} 镜 · 查看失败原因
+                      </summary>
+                      <div className="mt-2 break-words text-[12px] leading-relaxed text-ink">
+                        {errorText}
+                      </div>
+                    </details>
+                  );
+                })}
               </div>
             ) : null}
-            {videoGenerationFailed ? (
+            {canRetryFailedSceneVideos ? (
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => onGenerateVideoFromScenePackages?.(msg)}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Sparkles size={15} />
+                重新生成失败分镜
+              </button>
+            ) : null}
+            {videoGenerationFailed && !hasFailedSceneVideos ? (
               <button
                 type="button"
                 onClick={() => onGenerateVideoFromScenePackages?.(msg)}
@@ -1764,7 +1836,7 @@ export function MessageBubble({
               </div>
             ) : null}
           </div>
-        ) : msg.artifact?.type === "jianying_draft" && msg.artifact.jianyingDraft ? (
+        ) : msg.artifact?.type === "video_result" ? null : msg.artifact?.type === "jianying_draft" && msg.artifact.jianyingDraft ? (
           <div className="mt-2 w-full max-w-[560px] space-y-3 rounded-2xl border border-line bg-surface p-3">
             <div className="flex items-start gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">

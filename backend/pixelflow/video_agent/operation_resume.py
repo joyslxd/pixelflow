@@ -19,6 +19,11 @@ from pixelflow.agent_runtime.persistence.repositories import (
 )
 from pixelflow.video_agent.contracts import AgentPlanStatus, PlanStepStatus, VideoWorkspace
 from pixelflow.video_agent.executor import VideoAgentExecutor
+from pixelflow.video_agent.operations.projector import (
+    build_scene_generation_failure_patch,
+    build_scene_generation_success_patch,
+    count_polling_scene_generation_jobs,
+)
 from pixelflow.video_agent.workspace import VideoAgentRepository
 
 _FAILED_OPERATION_STATUSES = frozenset(
@@ -63,16 +68,19 @@ async def _apply_workspace_patch_resilient(
 
 
 class VideoAgentOperationResumer:
-    """用完成事件ID作为checkpoint，恢复原Plan而不重新启动Provider。"""
+    """用完成事件ID作为checkpoint，恢复原Plan或不重复唤醒原生 Agent。"""
 
     def __init__(
         self,
         *,
         repository: VideoAgentRepository,
         executor: VideoAgentExecutor,
+        native_resume: object | None = None,
     ) -> None:
         self._repository = repository
         self._executor = executor
+        # native_resume: async (user_id, conversation_id, plan_id, job_id, status) -> None
+        self._native_resume = native_resume
 
     async def resume_external_job(
         self,
@@ -104,6 +112,10 @@ class VideoAgentOperationResumer:
             )
         plan = await self._repository.get_plan(user_id, plan_id)
         if plan is None or plan.conversation_id != conversation_id:
+            # 历史完成事件对应的 Plan 可能已被覆盖/清理；对场景包/生图/分镜终态直接 ack，
+            # 避免 delivering 永久刷屏并饿死后续 polling。
+            if _is_soft_ackable_scene_completion(stage=stage, status=status):
+                return
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent完成事件不属于当前用户或会话"
             )
@@ -115,28 +127,131 @@ class VideoAgentOperationResumer:
             workspace is None
             or workspace.conversation_id != conversation_id
         ):
+            if _is_soft_ackable_scene_completion(stage=stage, status=status):
+                return
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent完成事件未绑定原工作区Operation"
             )
         bound_step_ids = _operation_step_ids(workspace.payload, job_id)
-        if len(bound_step_ids) != 1:
+        bound_step = None
+        if len(bound_step_ids) == 1:
+            bound_step = next(
+                (
+                    step
+                    for step in plan.steps
+                    if step.step_id == next(iter(bound_step_ids))
+                ),
+                None,
+            )
+            if bound_step is not None and not _stage_matches_tool(
+                stage,
+                bound_step.tool_name,
+            ):
+                bound_step = None
+
+        # 分镜视频：即使 Workspace 尚未写入 generation_jobs（旧冲突批次），也按 stage digest 回填。
+        if stage.startswith("generate_scene:"):
+            if status == ExternalJobStatus.SUCCEEDED.value:
+                result = payload.get("result")
+                if isinstance(result, Mapping):
+                    fallback_step = bound_step or next(
+                        (
+                            step
+                            for step in plan.steps
+                            if step.tool_name == "generate_scenes"
+                        ),
+                        None,
+                    )
+                    scene_patch = build_scene_generation_success_patch(
+                        workspace.payload if isinstance(workspace.payload, Mapping) else {},
+                        job_id=job_id,
+                        result=result,
+                        now=completion_event.occurred_at,
+                        stage=stage,
+                        plan_step_id=fallback_step.step_id if fallback_step else None,
+                    )
+                    if scene_patch is not None:
+                        workspace = await _apply_workspace_patch_resilient(
+                            self._repository,
+                            user_id=user_id,
+                            workspace=workspace,
+                            patch=scene_patch,
+                            now=completion_event.occurred_at,
+                        )
+            elif status in _FAILED_OPERATION_STATUSES:
+                fallback_step = bound_step or next(
+                    (
+                        step
+                        for step in plan.steps
+                        if step.tool_name == "generate_scenes"
+                    ),
+                    None,
+                )
+                failure_patch = build_scene_generation_failure_patch(
+                    workspace.payload if isinstance(workspace.payload, Mapping) else {},
+                    job_id=job_id,
+                    status=status,
+                    reason_code=str(payload.get("reason_code") or "").strip() or None,
+                    message=str(payload.get("message") or "").strip() or None,
+                    now=completion_event.occurred_at,
+                    stage=stage,
+                    plan_step_id=fallback_step.step_id if fallback_step else None,
+                )
+                if failure_patch is not None:
+                    workspace = await _apply_workspace_patch_resilient(
+                        self._repository,
+                        user_id=user_id,
+                        workspace=workspace,
+                        patch=failure_patch,
+                        now=completion_event.occurred_at,
+                    )
+            remaining = count_polling_scene_generation_jobs(
+                workspace.payload if isinstance(workspace.payload, Mapping) else {},
+                plan_step_id=bound_step.step_id if bound_step else None,
+            )
+            if remaining > 0:
+                return
+            if bound_step is None or bound_step.status is not PlanStepStatus.RUNNING:
+                # 已投影或无可唤醒步骤：吞掉事件，停止 completion_dispatch 僵尸刷屏。
+                return
+            if status in _FAILED_OPERATION_STATUSES:
+                # 同批有成功镜时只投影失败并保留步骤，便于前端展示失败原因后局部重试。
+                payload_map = (
+                    workspace.payload if isinstance(workspace.payload, Mapping) else {}
+                )
+                has_success = False
+                for scene in payload_map.get("scenes") or []:
+                    if not isinstance(scene, Mapping):
+                        continue
+                    for job in scene.get("generation_jobs") or []:
+                        if (
+                            isinstance(job, Mapping)
+                            and str(job.get("status") or "").strip().casefold()
+                            == "succeeded"
+                        ):
+                            has_success = True
+                            break
+                    if has_success:
+                        break
+                if has_success:
+                    return
+                await self._repository.fail_step_with_event(
+                    user_id,
+                    plan_id,
+                    bound_step.step_id,
+                    reason_code=f"provider_{status}",
+                    public_summary="分镜视频未成功完成，请查看失败场景后重试。",
+                    run_id=idempotency_key,
+                    now=datetime.now(UTC),
+                )
+                return
+
+        if bound_step is None:
+            # prepare/assets/分镜视频旧完成事件：步骤已收口或 Workspace 未绑 job 时吞掉，避免 delivering 永久刷屏。
+            if _is_soft_ackable_scene_completion(stage=stage, status=status):
+                return
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent完成事件未绑定唯一Plan步骤"
-            )
-        bound_step = next(
-            (
-                step
-                for step in plan.steps
-                if step.step_id == next(iter(bound_step_ids))
-            ),
-            None,
-        )
-        if bound_step is None or not _stage_matches_tool(
-            stage,
-            bound_step.tool_name,
-        ):
-            raise AgentRuntimeRecordConflictError(
-                "VideoAgent完成事件未绑定唯一运行步骤"
             )
         if status == ExternalJobStatus.SUCCEEDED.value:
             if (
@@ -145,10 +260,23 @@ class VideoAgentOperationResumer:
             ):
                 return
             if bound_step.status is not PlanStepStatus.RUNNING:
+                if _is_soft_ackable_scene_completion(stage=stage, status=status):
+                    return
                 raise AgentRuntimeRecordConflictError(
                     "VideoAgent成功事件目标步骤不是运行中"
                 )
-            await self._executor.resume_plan(user_id, plan_id)
+            if self._native_resume is None:
+                raise AgentRuntimeRecordConflictError(
+                    "VideoAgent Operation 恢复缺少原生 resume handler"
+                )
+            await self._native_resume(  # type: ignore[operator]
+                user_id=user_id,
+                conversation_id=conversation_id,
+                plan_id=plan_id,
+                job_id=job_id,
+                status=status,
+                completion_event_id=completion_event.event_id,
+            )
             return
         if status not in _FAILED_OPERATION_STATUSES:
             raise AgentRuntimeRecordConflictError(
@@ -160,6 +288,9 @@ class VideoAgentOperationResumer:
         ):
             return
         if bound_step.status is not PlanStepStatus.RUNNING:
+            # 旧 failed 资产事件在步骤已收口后仍 delivering：吞掉以免饿死分镜 status 轮询。
+            if _is_soft_ackable_scene_completion(stage=stage, status=status):
+                return
             raise AgentRuntimeRecordConflictError(
                 "VideoAgent失败事件目标步骤不是运行中"
             )
@@ -289,6 +420,23 @@ class VideoAgentQuotaResumer:
             },
             now=quota_event.occurred_at,
         )
+
+
+def _is_soft_ackable_scene_completion(*, stage: str, status: str) -> bool:
+    """场景包/参考图/分镜视频的陈旧完成事件可安全吞掉（成功或失败终态）。"""
+
+    if not stage.startswith(
+        (
+            "prepare_scene_packages:",
+            "generate_scene_assets:",
+            "generate_scene:",
+        )
+    ):
+        return False
+    return status in {
+        ExternalJobStatus.SUCCEEDED.value,
+        *_FAILED_OPERATION_STATUSES,
+    }
 
 
 def _stage_matches_tool(stage: str, tool_name: str) -> bool:

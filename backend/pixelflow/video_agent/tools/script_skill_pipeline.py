@@ -33,11 +33,60 @@ logger = logging.getLogger(__name__)
 # 单阶段大模型生成超时；避免合规等步骤无限挂起导致执行卡假忙碌。
 SCRIPT_SKILL_STAGE_TIMEOUT_SECONDS = 180.0
 
+# 成稿拆解正文进 script_pipeline，Thought 只跟阶段进度，不跟全文 token。
+IMPORT_STRUCTURE_PROGRESS_MILESTONES: tuple[tuple[str, str], ...] = (
+    ("## 角色", "正在整理角色设定…"),
+    ("## 场景", "正在整理场景设定…"),
+    ("## 道具", "正在整理道具与产品设定…"),
+    ("## 剧本正文", "正在整理分镜表…"),
+    ("| 时间 |", "正在写入镜头列表…"),
+)
+
+
+def make_generation_progress_on_token(
+    emit_progress: Callable[..., Awaitable[None]],
+    *,
+    phase: str,
+    milestones: tuple[tuple[str, str], ...] = (),
+    heartbeat_every_chars: int = 1800,
+    heartbeat_message: str = "仍在生成中…",
+) -> Callable[[str], Awaitable[None]]:
+    """把生成 token 转成短进度文案，禁止把模型正文灌进 Thought。
+
+    Thought / reasoning 通道只应出现阶段提示；完整 Markdown 由 script_pipeline
+    与预览面板承接。长生成时用字数心跳避免「思考中」假死。
+    """
+
+    phase_key = phase.strip()
+    seen: set[str] = set()
+    buffer = ""
+    since_heartbeat = 0
+
+    async def on_token(delta: str) -> None:
+        nonlocal buffer, since_heartbeat
+        piece = delta or ""
+        if not piece or not phase_key:
+            return
+        buffer += piece
+        if len(buffer) > 12_000:
+            buffer = buffer[-6_000:]
+        for marker, message in milestones:
+            if marker in seen:
+                continue
+            if marker in buffer:
+                seen.add(marker)
+                await emit_progress(message, phase=phase_key)
+        since_heartbeat += len(piece)
+        if heartbeat_every_chars > 0 and since_heartbeat >= heartbeat_every_chars:
+            since_heartbeat = 0
+            await emit_progress(heartbeat_message, phase=phase_key)
+
+    return on_token
+
 ScriptSkillStage = Literal[
     "start",
     "plan",
     "characters",
-    "outline",
     "episode",
     "review",
     "compliance",
@@ -48,7 +97,6 @@ STAGE_ORDER: tuple[ScriptSkillStage, ...] = (
     "start",
     "plan",
     "characters",
-    "outline",
     "episode",
     "review",
     "compliance",
@@ -59,7 +107,6 @@ STAGE_TITLES: dict[ScriptSkillStage, str] = {
     "start": "选题与创作目标 /start",
     "plan": "三幕结构与爽点 /plan",
     "characters": "角色/场景/道具设定 /characters",
-    "outline": "分镜大纲 /outline",
     "episode": "生成剧本正文 /episode",
     "review": "五维自检 /review",
     "compliance": "合规检查 /compliance",
@@ -83,21 +130,23 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
     ),
     "characters": (
         "根据上游结果完成设定集（命令名仍为 /characters，但必须覆盖角色+场景+道具）：\n"
-        "1) 角色设定：主角/配角/产品拟人；每人含视觉形象、身份、核心标签、性格、金句；\n"
-        "2) 场景设定：本片关键场景清单；每场含名称、时空背景、陈设细节、光线氛围、可拍要点；\n"
+        "1) 角色设定：主角/配角/产品拟人；每人用三级标题写具体人名（### 安然），"
+        "其下再用列表写视觉形象、身份、核心标签、性格、金句；禁止把「视觉特征/动作习惯」当标题；\n"
+        "2) 场景设定：本片关键场景清单；每场用三级标题写具体场景名，下列表写时空背景、陈设细节、光线氛围、可拍要点；\n"
         "3) 道具与产品设定：用具体品牌/产品名做三级标题（如「蓝妹啤酒」），禁止用「核心产品」「产品」「商品」作标题；"
         "每项含名称、外观材质、品牌露出、使用动作。\n"
         "输出 Markdown，且必须包含三个二级标题：## 角色设定、## 场景设定、## 道具与产品设定。"
         "广告片至少 1 个产品道具；场景不得省略为“室内/室外”空泛描述。"
     ),
-    "outline": (
-        "根据上游结果完成 /outline：给出镜头/分集目录，标注关键钩子与 CTA。"
-        "若是单条广告，按秒级镜头列表输出。镜头中引用的场景/道具名称需与上游设定一致。输出 Markdown。"
-    ),
     "episode": (
         "根据上游全部结果完成 /episode：写出完整可拍摄脚本。"
-        "格式：时长、画幅、镜头列表（时间、景别、运镜、画面、旁白、屏幕文案、行动引导）。"
-        "画面描述须点名上游场景与道具/产品，禁止只写角色动作。必须覆盖用户故事主线与结尾 CTA。输出 Markdown。"
+        "写作质量遵循 bgrs（BGEC-SD2 / sedance-video-prompts-skill）Skill 的时长、对白、视听语言与节奏铁律；"
+        "但交付形态必须是 PixelFlow 六列 Markdown 表，禁止 △ 文学剧本格式。"
+        "格式：时长、画幅、镜头列表（时间、景别、运镜、画面、旁白/对白、屏幕文案、行动引导）。"
+        "画面描述须点名上游场景与道具/产品，禁止只写角色动作。"
+        "凡引用设定集中的角色/场景/道具名称，画面字段必须写成 @实体名"
+        "（如 形象参考@安然、地点@会议室、道具@氧气防晒），禁止只写裸名「安然盯着…」。"
+        "必须覆盖用户故事主线与结尾 CTA。输出 Markdown。"
     ),
     "review": (
         "根据上游脚本完成 /review 五维自检：钩子、节奏、角色清晰度、转化引导、可拍性；"
@@ -121,37 +170,181 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
     ),
 }
 
-# 成稿导入后的结构化拆解：一次产出角色/场景/道具 + 分镜提示词（供右侧预览与后续资产包）。
-_IMPORT_STRUCTURE_SYSTEM = (
-    "你是 PixelFlow 分镜脚本结构化拆解器。用户已提供完整或接近完整的成稿。"
-    "你必须调用「拆解」能力：把上下文拆成角色、场景、道具、分镜提示词，禁止只写一句笼统摘要。\n"
-    "输出 Markdown，且必须依次包含四个二级标题：\n"
-    "## 角色设定\n"
-    "## 场景设定\n"
-    "## 道具与产品设定\n"
-    "## 分镜提示词\n"
-    "规则：\n"
-    "1) 角色/场景/道具：逐项列出视觉与可拍要点；道具标题用具体产品名，禁止「核心产品」。\n"
-    "2) 分镜提示词：按成稿镜头顺序，每镜含时间码、景别/运镜、画面提示词、对白或旁白摘要；"
-    "时间码与镜头数尽量与成稿一致，不得大幅删镜或重写剧情。\n"
-    "3) 忠实原文，不编造未出现的人物/品牌/卖点。\n"
+
+def _entity_title_rules() -> str:
+    """角色/场景/道具命名硬约束：供 stage 与 import 拆解共用。"""
+
+    return (
+        "实体命名硬约束：每个可出镜实体必须用三级标题写具体名称"
+        "（如 ### 安然、### 办公室梳妆台、### 氧气防晒）；"
+        "视觉特征/动作习惯/人物弧光/时段/光线/功能等只能作为该实体下的列表字段，"
+        "禁止把字段名或身份长句当成标题。"
+    )
+
+
+def build_import_structure_system_prompt() -> str:
+    """成稿导入拆解+审核+优化：一次产出多阶段 Markdown，供 script_pipeline 预览。
+
+    写作细则复用 STAGE_PROMPTS；剧本正文段与 run_script_skill_stage(episode)
+    同样注入 bgrs 摘录 + 六列合同。切分器按固定二级标题写入 characters/…
+    """
+
+    from pixelflow.video_agent.skills.bgrs_episode_guidance import (
+        build_episode_six_column_contract,
+        load_bgrs_episode_guidance,
+    )
+
+    episode_bgrs = (
+        f"{build_episode_six_column_contract()}\n"
+        f"【bgrs Skill 写作指导摘录】\n{load_bgrs_episode_guidance()}"
+    )
+    return (
+        "你是 PixelFlow 成稿拆解与优化助手。用户已提供完整或接近完整的拍摄脚本。"
+        "请在忠实原文的前提下完成：设定拆解 → 分镜整理 → 五维自检 → 合规提示 → 导出终稿。"
+        "禁止只写一句笼统摘要；禁止大幅删镜或改写剧情主线。\n"
+        f"{_entity_title_rules()}\n"
+        "输出 Markdown，且必须依次包含以下六个二级标题（标题单独成行，不可改名）：\n"
+        "## 角色/场景/道具设定\n"
+        f"{STAGE_PROMPTS['characters']}\n"
+        "## 剧本正文\n"
+        "在忠实用户成稿的前提下整理可拍摄镜头正文；时间码与镜数尽量与成稿一致，"
+        "只做结构规范化与可拍性补全，禁止另起炉灶重写故事。"
+        "本节必须按 bgrs Skill + PixelFlow 六列合同输出镜头表，禁止 △ 文学剧本或散文场次。\n"
+        f"{STAGE_PROMPTS['episode']}\n"
+        f"{episode_bgrs}\n"
+        "## 五维自检\n"
+        f"{STAGE_PROMPTS['review']}\n"
+        "## 合规检查\n"
+        f"{STAGE_PROMPTS['compliance']}\n"
+        "## 导出终稿\n"
+        f"{STAGE_PROMPTS['export']}\n"
+        "额外规则：\n"
+        "1) 时间码与镜头数尽量与成稿一致，不得大幅删镜或重写剧情。\n"
+        "2) 忠实原文，不编造未出现的人物/品牌/卖点。\n"
+        "3) 道具标题禁止「核心产品」「产品」「商品」「分镜提示词」。\n"
+        "4) 五维自检与合规只列问题与改写建议，不要在这两节整篇重写脚本。\n"
+        "5) 导出终稿才汇总可交付全文，并注明「基于用户成稿导出」。\n"
+        "6) 「剧本正文」必须是六列 Markdown 表；不得把用户成稿原样粘贴充数。\n"
+    )
+
+
+# 兼容旧引用；运行时 extract 每次调用 build_import_structure_system_prompt()。
+_IMPORT_STRUCTURE_SYSTEM = None
+
+# 导入拆解稿二级标题 → script_pipeline 阶段；含历史别名以兼容旧模型输出。
+_IMPORT_SECTION_STAGE_PATTERNS: tuple[tuple[ScriptSkillStage, tuple[str, ...]], ...] = (
+    (
+        "characters",
+        (
+            r"角色/场景/道具设定",
+            r"角色设定\s*[&＆]\s*道具\s*[&＆]\s*场景设定",
+            r"角色设定",
+            r"设定集",
+        ),
+    ),
+    (
+        "outline",
+        (
+            r"分镜大纲",
+            r"分镜提示词",
+            r"镜头提示词",
+        ),
+    ),
+    (
+        "episode",
+        (
+            r"剧本正文",
+            r"分镜脚本",
+            r"完整镜头脚本",
+            r"镜头脚本",
+        ),
+    ),
+    (
+        "review",
+        (
+            r"五维自检",
+            r"脚本评审",
+            r"评审",
+        ),
+    ),
+    (
+        "compliance",
+        (
+            r"合规检查",
+            r"脚本合规检查",
+            r"合规",
+        ),
+    ),
+    (
+        "export",
+        (
+            r"导出终稿",
+            r"最终可交付脚本(?:\s*Markdown)?",
+            r"导出脚本产物",
+            r"终稿",
+        ),
+    ),
 )
 
 
-def _split_import_structure_markdown(markdown: str) -> tuple[str, str]:
-    """把综合拆解稿切成 characters / outline 两段，便于 script_pipeline 复用。"""
+def _match_import_section_stage(heading: str) -> ScriptSkillStage | None:
+    """把模型输出的二级标题映射到 script_pipeline 阶段 id。"""
+
+    title = heading.strip().lstrip("#").strip()
+    if not title:
+        return None
+    for stage, patterns in _IMPORT_SECTION_STAGE_PATTERNS:
+        for pattern in patterns:
+            if re.fullmatch(pattern, title, flags=re.IGNORECASE):
+                return stage
+    return None
+
+
+def _split_import_structure_markdown(markdown: str) -> dict[str, str]:
+    """把综合拆解稿按「已识别阶段标题」切成多段，供 script_pipeline 预览。
+
+    未映射的二级标题（如旧稿中的 ## 场景设定）并入上一阶段，避免设定被截断。
+    兼容旧输出：仅有设定正文 + ## 分镜提示词 时仍映射为 characters
+    """
 
     text = markdown.strip()
     if not text:
-        return "", ""
-    shot_match = re.search(r"^##\s*分镜提示词\s*$", text, flags=re.M)
-    if shot_match is None:
-        return text, ""
-    settings = text[: shot_match.start()].strip()
-    shots = text[shot_match.start() :].strip()
-    if not re.search(r"##\s*角色设定", settings):
-        settings = f"## 角色设定\n\n（待从成稿补全）\n\n{settings}".strip()
-    return settings, shots
+        return {}
+
+    heading_re = re.compile(r"^##\s+(.+?)\s*$", flags=re.M)
+    matches = list(heading_re.finditer(text))
+    boundaries: list[tuple[ScriptSkillStage, int]] = []
+    for match in matches:
+        stage = _match_import_section_stage(match.group(1))
+        if stage is not None:
+            boundaries.append((stage, match.start()))
+
+    if not boundaries:
+        return {"characters": text}
+
+    staged: dict[str, list[str]] = {}
+    first_stage, first_pos = boundaries[0]
+    if first_pos > 0 and first_stage == "outline":
+        preamble = text[:first_pos].strip()
+        if preamble:
+            if not re.search(r"##\s*角色设定", preamble):
+                preamble = f"## 角色设定\n\n（待从成稿补全）\n\n{preamble}".strip()
+            staged["characters"] = [preamble]
+
+    for index, (stage, start) in enumerate(boundaries):
+        end = boundaries[index + 1][1] if index + 1 < len(boundaries) else len(text)
+        chunk = text[start:end].strip()
+        if chunk:
+            staged.setdefault(stage, []).append(chunk)
+
+    result = {
+        stage: "\n\n".join(parts).strip()
+        for stage, parts in staged.items()
+        if any(part.strip() for part in parts)
+    }
+    if not result:
+        return {"characters": text}
+    return result
 
 
 async def extract_imported_script_structure(
@@ -160,7 +353,7 @@ async def extract_imported_script_structure(
     workspace_id: str,
     on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, dict[str, JsonValue]]:
-    """导入成稿后的强制结构化拆解：写入 characters + outline 阶段产物。"""
+    """导入成稿后强制结构化拆解/审核/优化，写入多阶段 script_pipeline 产物。"""
 
     body = markdown.strip()
     if not body:
@@ -172,8 +365,14 @@ async def extract_imported_script_structure(
     except TypeError:
         model = create_chat_model(thinking_enabled=False)
     messages = [
-        ("system", _IMPORT_STRUCTURE_SYSTEM),
-        ("human", f"【用户成稿】\n{body[:12_000]}\n\n只输出 Markdown，不要解释过程。"),
+        ("system", build_import_structure_system_prompt()),
+        (
+            "human",
+            f"【用户成稿】\n{body[:12_000]}\n\n"
+            "按系统提示依次输出六个二级标题对应的阶段 Markdown；"
+            "其中「剧本正文」必须是六列镜头表（时间/景别/运镜/画面/旁白对白/屏幕文案/行动引导），"
+            "不要解释过程。",
+        ),
     ]
     chunks: list[str] = []
 
@@ -196,9 +395,11 @@ async def extract_imported_script_structure(
     combined = ("".join(chunks) or (answer or "")).strip()
     if not combined:
         raise VideoToolValidationError("成稿结构化拆解结果为空")
-    settings_md, shots_md = _split_import_structure_markdown(combined)
-    if not settings_md.strip():
-        settings_md = combined
+
+    staged_markdown = _split_import_structure_markdown(combined)
+    if not staged_markdown.get("characters", "").strip():
+        staged_markdown["characters"] = combined
+
     fingerprint = hashlib.sha256(
         json.dumps(
             {"kind": "import_structure", "story": body[:4_000]},
@@ -206,26 +407,71 @@ async def extract_imported_script_structure(
             sort_keys=True,
         ).encode()
     ).hexdigest()
-    result: dict[str, dict[str, JsonValue]] = {
-        "characters": {
-            "stage": "characters",
-            "title": STAGE_TITLES["characters"],
-            "content": _with_stage_heading("characters", settings_md),
-            "artifact_ref": _artifact_ref(workspace_id, "characters", fingerprint),
-            "request_fingerprint": f"{fingerprint}:characters",
-            "change_summary": "从用户成稿拆解角色/场景/道具设定",
-        },
+
+    change_summaries: dict[ScriptSkillStage, str] = {
+        "characters": "从用户成稿拆解并优化角色/场景/道具设定",
+        "episode": "按 bgrs Skill 与六列合同整理可拍摄剧本正文",
+        "review": "对成稿做五维自检与改写建议",
+        "compliance": "对成稿做合规风险提示",
+        "export": "汇总导出基于用户成稿的可交付终稿",
     }
-    if shots_md.strip():
-        result["outline"] = {
-            "stage": "outline",
-            "title": STAGE_TITLES["outline"],
-            "content": _with_stage_heading("outline", shots_md),
-            "artifact_ref": _artifact_ref(workspace_id, "outline", fingerprint),
-            "request_fingerprint": f"{fingerprint}:outline",
-            "change_summary": "从用户成稿拆解分镜提示词",
+    result: dict[str, dict[str, JsonValue]] = {}
+    for stage_name, content in staged_markdown.items():
+        if stage_name not in STAGE_TITLES:
+            continue
+        stage: ScriptSkillStage = stage_name  # type: ignore[assignment]
+        body_md = content.strip()
+        if not body_md:
+            continue
+        result[stage] = {
+            "stage": stage,
+            "title": STAGE_TITLES[stage],
+            "content": _with_stage_heading(stage, body_md),
+            "artifact_ref": _artifact_ref(workspace_id, stage, fingerprint),
+            "request_fingerprint": f"{fingerprint}:{stage}",
+            "source": "import_structure",
+            "change_summary": change_summaries.get(stage, f"从用户成稿生成 {STAGE_TITLES[stage]}"),
         }
+    if "characters" not in result:
+        raise VideoToolValidationError("成稿结构化拆解缺少角色/场景/道具设定")
     return result
+
+
+def _stage_system_prompt(stage: ScriptSkillStage) -> str:
+    """单阶段执行 Prompt：角色定位 + STAGE_PROMPTS 精华 + 命名硬约束。
+
+    写作质量在此落地；Agent 系统提示只负责是否调用本 Tool / 选哪个 stage。
+    episode 额外注入 bgrs Skill 摘录，并强制六列输出合同。
+    """
+
+    parts = [
+        (
+            "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
+            "禁止输出与用户输入无关的模板化带货文案。"
+            "只输出当前阶段 Markdown，不要解释过程。"
+        ),
+        f"【阶段任务】{STAGE_PROMPTS[stage]}",
+    ]
+    if stage in {"characters", "export"}:
+        parts.append(_entity_title_rules())
+    if stage == "episode":
+        from pixelflow.video_agent.skills.bgrs_episode_guidance import (
+            build_episode_six_column_contract,
+            load_bgrs_episode_guidance,
+        )
+
+        parts.append(build_episode_six_column_contract())
+        parts.append("【bgrs Skill 写作指导摘录】\n" + load_bgrs_episode_guidance())
+    return "\n".join(parts)
+
+
+_RUN_SCRIPT_SKILL_STAGE_DESCRIPTION = (
+    "按需执行脚本创作/优化的单个阶段（不是必须跑完八阶段）。"
+    "参数 stage 取 start|plan|characters|episode|review|compliance|export；"
+    "按 Workspace 缺口与用户意图选择：从创意起步用 start→plan；补设定用 characters；"
+    "写/改正文用 episode；自检用 review；合规用 compliance；汇总终稿用 export。"
+    "成稿粘贴请改用 import_script，不要用本 Tool 重导入。"
+)
 
 
 class ScriptSkillStageInput(BaseModel):
@@ -308,13 +554,12 @@ async def _generate_stage_markdown(
         if name in prior and name != stage and prior[name].get("content")
     )
     human = (
-        f"【当前阶段】{STAGE_TITLES[stage]}\n"
-        f"【阶段任务】{STAGE_PROMPTS[stage]}\n\n"
+        f"【当前阶段】{STAGE_TITLES[stage]}\n\n"
         f"【用户输入】\n{user_story}\n"
     )
     if prior_text:
         human += f"\n【上游产物】\n{prior_text}\n"
-    human += "\n只输出 Markdown，不要解释过程。"
+    human += "\n按系统提示完成本阶段，只输出 Markdown。"
     try:
         model = create_chat_model(thinking_enabled=False, streaming=True)
     except TypeError:
@@ -322,8 +567,7 @@ async def _generate_stage_markdown(
     messages = [
         (
             "system",
-            "你是短剧/广告视频编剧助手，严格遵循用户故事与上游产物推进当前阶段。"
-            "禁止输出与用户输入无关的模板化带货文案。",
+            _stage_system_prompt(stage),
         ),
         ("human", human),
     ]
@@ -350,11 +594,11 @@ async def _generate_stage_markdown(
 
 
 class RunScriptSkillStageTool:
-    """执行 /start→…→/export 中的单阶段。"""
+    """执行脚本创作/优化的单个阶段（按需，非固定流水线）。"""
 
     spec = VideoToolSpec(
         name="run_script_skill_stage",
-        description="按 sedance 脚本 Skill 命令流执行单个创作阶段",
+        description=_RUN_SCRIPT_SKILL_STAGE_DESCRIPTION,
         input_model=ScriptSkillStageInput,
         cost_level=VideoToolCostLevel.EXTERNAL_READ,
         confirmation_required=False,
@@ -422,7 +666,11 @@ class RunScriptSkillStageTool:
                 stage=stage,
                 user_story=user_story,
                 prior=prior,
-                on_token=context.emit_thinking_delta,
+                on_token=make_generation_progress_on_token(
+                    context.emit_progress,
+                    phase=f"skill_{stage}_stream",
+                    heartbeat_message=f"{STAGE_TITLES[stage]}仍在生成…",
+                ),
             )
         except VideoToolValidationError as exc:
             # 超时返回可完成摘要，让后续阶段可继续，而不是把执行卡永远挂住。

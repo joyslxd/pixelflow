@@ -24,11 +24,21 @@ const storyboardPanelSource = readFileSync(
   "utf8",
 );
 
-test("移动端隐藏固定宽度历史侧栏并让主工作区占满宽度", () => {
+test("中等宽度起显示固定历史侧栏，窄屏用抽屉入口", () => {
   assert.match(
     sidebarSource,
-    /className="[^"]*\bhidden\b[^"]*\bxl:flex\b[^"]*w-\[244px\]/,
-    "历史侧栏必须默认隐藏，只在 1280px 以上桌面断点显示",
+    /className="[^"]*\bhidden\b[^"]*\blg:flex\b[^"]*w-\[244px\]/,
+    "固定历史侧栏须在 lg(1024px) 起显示，避免 iframe/笔记本 1280 断点下整列消失",
+  );
+  assert.match(
+    sidebarSource,
+    /打开历史对话/,
+    "窄屏必须提供历史对话抽屉入口",
+  );
+  assert.match(
+    sidebarSource,
+    /lg:hidden/,
+    "窄屏历史入口不得与固定侧栏叠显",
   );
   assert.match(
     appLayoutSource,
@@ -51,5 +61,15 @@ test("移动端画布以全屏层展示并取消桌面最小宽度", () => {
     storyboardPanelSource,
     /grid-cols-1[^"]*xl:grid-cols-\[minmax\(0,1fr\)_minmax\(280px,42%\)\]/,
     "分镜编辑器在 1280px 以下必须从双列折叠为单列",
+  );
+  assert.match(
+    storyboardPanelSource,
+    /shrink-0 border-t border-line bg-white px-4 py-3/,
+    "分镜保存/确认按钮必须固定在面板底部，避免小屏滚出视口",
+  );
+  assert.match(
+    storyboardPanelSource,
+    /确认并生成/,
+    "底部操作栏须包含确认并生成入口",
   );
 });

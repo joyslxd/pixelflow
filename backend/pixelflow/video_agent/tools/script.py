@@ -28,15 +28,15 @@ from .registry import (
 class ImportScriptInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    markdown: str = Field(min_length=1, max_length=100_000)
+    # 可省略：服务端从 Workspace script.content / latest_input 注入。
+    markdown: str = Field(default="", max_length=100_000)
+    # 「重新拆解」必须为 true：同正文指纹命中时仍重跑结构拆解，禁止静默 replay。
+    force_reextract: bool = False
 
     @field_validator("markdown")
     @classmethod
     def normalize_markdown(cls, value: str) -> str:
-        normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-        if not normalized:
-            raise ValueError("脚本内容不能为空")
-        return normalized
+        return value.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 class BrainstormScriptInput(BaseModel):
@@ -55,7 +55,9 @@ def _validated[T: BaseModel](model: type[T], arguments: Mapping[str, object]) ->
 
 
 def _fingerprint(tool_name: str, payload: Mapping[str, object]) -> str:
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # force_reextract 只影响是否重跑拆解，不进入正文指纹，避免同稿拆两次指纹漂移。
+    body = {key: value for key, value in payload.items() if key != "force_reextract"}
+    canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()
 
 
@@ -102,7 +104,15 @@ def _replay_result(tool_name: str, script: Mapping[str, object]) -> VideoToolRes
 class ImportScriptTool:
     spec = VideoToolSpec(
         name="import_script",
-        description="导入并标准化用户提供的完整视频脚本",
+        description=(
+            "导入或重新拆解视频脚本。"
+            "参数：markdown（可省略，省略时服务端读取 Workspace 现有 script.content）；"
+            "force_reextract（重新拆解时必须为 true，强制覆盖 script_pipeline，禁止同稿静默复用）。"
+            "服务端会拆解并优化为 script_pipeline 多阶段产物"
+            "（characters/outline/episode/review/compliance/export）；"
+            "不要传 script_content/title。"
+            "从一句话创意创作请改用 run_script_skill_stage，不要用本 Tool。"
+        ),
         input_model=ImportScriptInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,
@@ -145,10 +155,14 @@ class ImportScriptTool:
             if markdown:
                 payload["markdown"] = markdown
         request = _validated(ImportScriptInput, payload)
+        if not request.markdown.strip():
+            raise VideoToolValidationError("脚本内容不能为空")
         fingerprint = _fingerprint(self.spec.name, request.model_dump(mode="json"))
-        existing = _existing_script(context.workspace.payload, fingerprint)
-        if existing is not None:
-            return _replay_result(self.spec.name, existing)
+        # 重新拆解：即使正文指纹相同也必须重跑结构拆解，不能「已复用」跳过。
+        if not request.force_reextract:
+            existing = _existing_script(context.workspace.payload, fingerprint)
+            if existing is not None:
+                return _replay_result(self.spec.name, existing)
 
         versions = _script_versions(context.workspace.payload)
         version = _next_version(versions)
@@ -184,7 +198,11 @@ class ImportScriptTool:
         duration_sec = script.get("duration_sec")
         if not isinstance(duration_sec, int):
             duration_sec = analysis.duration_sec
-        summary = f"已导入脚本版本 {version}"
+        summary = (
+            f"已重新拆解脚本版本 {version}"
+            if request.force_reextract
+            else f"已导入脚本版本 {version}"
+        )
         if isinstance(duration_sec, int):
             summary += f"（已识别时长 {duration_sec} 秒）"
         if missing:
@@ -210,34 +228,51 @@ class ImportScriptTool:
         # 禁止只靠 Intake 自然语言「看起来完整」就宣称可推进。
         try:
             await context.emit_progress(
-                "正在拆解角色、场景、道具与分镜提示词…",
+                "正在拆解并优化设定、分镜、自检、合规与终稿…",
                 phase="import_structure_extract",
             )
             from pixelflow.video_agent.tools.script_skill_pipeline import (
+                IMPORT_STRUCTURE_PROGRESS_MILESTONES,
                 extract_imported_script_structure,
+                make_generation_progress_on_token,
             )
 
+            # 拆解正文写入 script_pipeline；Thought 只跟阶段进度，不跟全文。
             structure_stages = await extract_imported_script_structure(
                 markdown=request.markdown,
                 workspace_id=context.workspace.workspace_id,
-                on_token=context.emit_thinking_delta,
+                on_token=make_generation_progress_on_token(
+                    context.emit_progress,
+                    phase="import_structure_extract",
+                    milestones=IMPORT_STRUCTURE_PROGRESS_MILESTONES,
+                    heartbeat_message="拆解仍在进行…",
+                ),
             )
             prior_pipeline = context.workspace.payload.get("script_pipeline")
+            # 强制重拆时覆盖旧 pipeline，避免残留旧 episode 与新设定混用。
             pipeline: dict[str, JsonValue] = (
-                dict(prior_pipeline) if isinstance(prior_pipeline, dict) else {}
+                {}
+                if request.force_reextract
+                else (dict(prior_pipeline) if isinstance(prior_pipeline, dict) else {})
             )
-            # 用户成稿进 episode，拆解结果进 characters/outline。
-            pipeline["episode"] = {
-                "stage": "episode",
-                "title": "用户成稿 /episode",
-                "content": request.markdown,
-                "source": "user_complete_script",
-                "change_summary": "导入用户成稿作为 episode 权威正文",
-            }
+            # 多阶段拆解/审核/优化结果写入预览；若模型未产出 episode，保留用户成稿兜底。
             pipeline.update(structure_stages)
+            if "episode" not in pipeline:
+                pipeline["episode"] = {
+                    "stage": "episode",
+                    "title": "用户成稿 /episode",
+                    "content": request.markdown,
+                    "source": "user_complete_script",
+                    "change_summary": "导入用户成稿作为 episode 权威正文",
+                }
             workspace_patch["script_pipeline"] = pipeline
             workspace_patch["script_entry_path"] = "polish"
-            summary += "；已拆解角色/场景/道具与分镜提示词"
+            stage_names = "、".join(
+                str(item.get("title") or key)
+                for key, item in structure_stages.items()
+                if isinstance(item, dict)
+            )
+            summary += f"；已拆解并优化分阶段产物（{stage_names or '设定与分镜'}）"
         except Exception as exc:  # noqa: BLE001
             # 拆解失败不回滚导入；公开摘要提示需重试拆解。
             summary += f"；结构化拆解未完成（{type(exc).__name__}），可继续补字段或重试导入"

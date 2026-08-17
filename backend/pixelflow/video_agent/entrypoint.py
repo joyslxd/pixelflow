@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from pixelflow.agent_runtime.persistence.repositories import (
@@ -20,60 +18,24 @@ from pixelflow.agent_runtime.persistence.repositories import (
 from pixelflow.video_agent.contracts import (
     AgentPlan,
     AgentPlanStatus,
-    AgentPlanStep,
-    PlanStepStatus,
     VideoWorkspace,
 )
 from pixelflow.video_agent.executor.events import (
     build_plan_created_event,
     build_plan_updated_event,
 )
-from pixelflow.video_agent.operations.projector import (
-    ScenePackageCompletionProjector,
-    workspace_has_scene_packages as _workspace_has_scene_packages,
-)
-from pixelflow.video_agent.planner import (
-    VideoAgentPlanner,
-    VideoAgentPlanningContext,
-    VideoAgentPlanningError,
-)
-from pixelflow.video_agent.planner.entry_path import (
-    EntryPathModel,
-    select_entry_path_with_llm,
-)
-from pixelflow.video_agent.planner.workspace_digest import (
-    blocking_confirmation_from_plan,
-    build_workspace_digest,
-    summarize_operations,
-    workspace_has_scene_asset_images,
-)
+from pixelflow.video_agent.native_invoke import NativeVideoAgentInvoker
 from pixelflow.video_agent.production_fields import (
-    analyze_production_fields_with_llm,
-    apply_production_fields_to_script,
-    format_production_fields_update_notice,
     looks_like_production_field_reply,
     normalize_user_text,
-    production_fields_form_patch,
-    reconcile_missing_with_workspace,
-    workspace_missing_requirements,
-    workspace_resolved_aspect_ratio,
-    workspace_resolved_ending_cta,
 )
-from pixelflow.video_agent.thinking_stream import (
-    IntakeThinkingResult,
-    ThinkingStreamPublisher,
-    stream_intake_thinking,
-)
+from pixelflow.video_agent.workspace.ids import video_workspace_id_for_conversation
 from pixelflow.video_agent.workspace.repository import VideoAgentRepository
 
 logger = logging.getLogger(__name__)
 
-# V2.1：Planner 主路径超时后降级为 inspect，避免 turns/start 无限挂起。
-# DeepSeek 结构化规划单次常需 5–12s，且最多 3 次修复重试，10s 极易误降级。
-_DEFAULT_PLANNING_TIMEOUT_SEC = 90.0
 # 思考流耗时期间确认脚本/旧 Plan 执行器可能已 bump revision；冲突时重读再写。
 _WORKSPACE_PATCH_MAX_ATTEMPTS = 3
-
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -85,6 +47,12 @@ def video_agent_plan_id(conversation_id: str, turn_id: str) -> str:
     """由 conversation + turn 派生稳定 plan_id，供 Runtime 收尾/接力查找。"""
 
     return _stable_id("video_plan", conversation_id, turn_id)
+
+
+def video_workspace_id(conversation_id: str) -> str:
+    """Entrypoint 与 legacy upgrade 共用的会话 Workspace 身份。"""
+
+    return video_workspace_id_for_conversation(conversation_id)
 
 
 def _safe_materials(
@@ -130,10 +98,6 @@ def _product_info_from_materials(
     return product
 
 
-# A 全创作 / B 成稿润色 / C 直接成片 / inspect 资料探查
-ScriptEntryPath = Literal["create", "polish", "continue", "inspect"]
-
-
 def _should_seed_script_draft(
     content: str,
     materials: Sequence[Mapping[str, Any]],
@@ -167,10 +131,11 @@ def _looks_like_creative_followup(content: str) -> bool:
         return False
     if _is_continue_video_generation(text) or _is_confirm_script_plan(text):
         return False
+    if _is_merge_videos_intent(text):
+        return False
     if looks_like_complete_shooting_script(text):
         return False
-    if looks_like_production_field_reply(text):
-        return True
+    # 补字段判定必须带 workspace；无 payload 时 len<=48 会把「合并视频吧」等短句误判成补字段。
     lowered = text.casefold()
     markers = (
         "改成",
@@ -222,26 +187,6 @@ def _workspace_creative_brief(workspace: VideoWorkspace) -> str:
     return ""
 
 
-def _merge_creative_revision_with_brief(current: str, brief: str) -> str:
-    text = current.strip()
-    prior = brief.strip()
-    if not text or not prior:
-        return text
-    if text == prior or prior in text or "【本轮指令】" in text:
-        return text
-    return f"{prior}\n\n【本轮指令】{text}"
-
-
-def _turn_instruction(content: str) -> str:
-    """取出【本轮指令】后的短补丁；无标记则整段视为本轮指令。"""
-
-    text = content.strip()
-    marker = "【本轮指令】"
-    if marker in text:
-        return text.split(marker, 1)[1].strip()
-    return text
-
-
 def _merge_turn_with_workspace_context(
     text: str,
     workspace: VideoWorkspace,
@@ -264,6 +209,12 @@ def _merge_turn_with_workspace_context(
     if not instruction or "【本轮指令】" in instruction:
         return instruction
     if _is_continue_video_generation(instruction):
+        return instruction
+    # 合并成片短令：禁止拼回整篇脚本，否则 Plan 标题变成镜头正文、模型上下文被撑爆。
+    if _is_merge_videos_intent(instruction):
+        return instruction
+    # 重新生成分镜包必须保持短指令入模；拼回整篇脚本会撑爆 checkpointer 并空转。
+    if _is_reprepare_scene_packages(instruction) or _is_confirm_script_plan(instruction):
         return instruction
     if looks_like_complete_shooting_script(instruction):
         return instruction
@@ -295,6 +246,11 @@ def _is_confirm_script_plan(content: str) -> bool:
     lowered = content.strip().casefold()
     if not lowered:
         return False
+    # 「确认并生成分镜视频」是 generate_scenes，禁止被「确认并生成视频」子串误判为确认脚本。
+    if "确认并生成分镜视频" in lowered or "确认并生成分镜" in lowered:
+        return False
+    if "重新生成已修改的分镜视频" in lowered or "继续生成失败的分镜视频" in lowered:
+        return False
     markers = (
         "确认脚本",
         "确认方案",
@@ -306,8 +262,36 @@ def _is_confirm_script_plan(content: str) -> bool:
         "确认并生成资产包",
         "同意脚本",
         "同意方案",
+        "用户已确认当前脚本方案",
     )
     return any(marker.casefold() in lowered for marker in markers)
+
+
+def _is_reprepare_scene_packages(content: str) -> bool:
+    """用户明确要求重新生成分镜/场景/资产包（勿与「重新生成分镜视频」混淆）。"""
+
+    text = re.sub(r"\s+", "", content.strip())
+    if not text or len(text) > 80:
+        return False
+    if "分镜视频" in text or "场景视频" in text:
+        return False
+    markers = (
+        "重新生成视频分镜包",
+        "重新生成分镜包",
+        "重新生成视频场景包",
+        "重新生成场景包",
+        "重新生成资产包",
+        "重新生成视频资产包",
+        "重拆分镜包",
+        "重拆场景包",
+    )
+    return any(marker in text for marker in markers)
+
+
+def is_confirm_script_plan(content: str) -> bool:
+    """公开别名：供 native bootstrap 等模块判断确认意图。"""
+
+    return _is_confirm_script_plan(content)
 
 
 def _is_continue_video_generation(content: str) -> bool:
@@ -333,8 +317,65 @@ def _is_continue_video_generation(content: str) -> bool:
         "生成场景包",
         "准备场景包",
         "继续生成场景包",
+        # 工作台分镜视频短令：禁止拼回整篇脚本，交 generate_scenes bootstrap。
+        "确认并生成分镜视频",
+        "重新生成已修改的分镜视频",
+        "继续生成失败的分镜视频",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _is_merge_videos_intent(content: str) -> bool:
+    """「合并视频 / 合成成片」短令：禁止拼回脚本，交由 ReAct compose_or_export_video。"""
+
+    text = re.sub(r"\s+", "", content.strip())
+    if not text or len(text) > 80:
+        return False
+    if any(
+        token in text
+        for token in (
+            "合并视频",
+            "合并成片",
+            "合成视频",
+            "合成成片",
+            "合并分镜视频",
+            "合成分镜视频",
+            "导出成片",
+            "导出mp4",
+            "导出MP4",
+        )
+    ):
+        return True
+    if text in {
+        "合并",
+        "合并吧",
+        "合成",
+        "合成吧",
+        "开始合并",
+        "开始合成",
+        "帮我合并",
+        "请合并",
+    }:
+        return True
+    return bool(
+        re.match(
+            r"^(请)?(帮我)?(把)?(分镜)?(视频)?(合并|合成)(成片|成视频|视频|一下|吧)?$",
+            text,
+        )
+    )
+
+
+def _public_goal_seed(text: str) -> str:
+    """Plan 标题优先用【本轮指令】短句，避免拼回脚本后标题变成镜头正文。"""
+
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if "【本轮指令】" in raw:
+        followup = raw.rsplit("【本轮指令】", 1)[-1].strip()
+        if followup:
+            return followup
+    return raw
 
 
 def _extract_character_section(text: str) -> str:
@@ -649,68 +690,6 @@ def is_short_video_followup_instruction(content: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def _script_body_from_turn_text(text: str) -> str:
-    """从合并后的 Turn 文本取出脚本正文（去掉【本轮指令】补丁）。"""
-
-    raw = (text or "").strip()
-    if not raw:
-        return ""
-    marker = "【本轮指令】"
-    if marker in raw:
-        raw = raw.split(marker, 1)[0].strip()
-    return raw
-
-
-def _seed_script_draft_payload(
-    *,
-    text: str,
-    workspace: VideoWorkspace,
-    missing: Sequence[str] = (),
-    duration_sec: int | None = None,
-) -> dict[str, Any] | None:
-    """缺字段追问/跟进时，把成稿种子写入 workspace.script，避免后续 inspect 看到 0 份。"""
-
-    existing = workspace.payload.get("script")
-    if isinstance(existing, dict) and str(existing.get("content") or "").strip():
-        next_script = dict(existing)
-        next_script["missing_requirements"] = list(missing)
-        if duration_sec is not None:
-            next_script["duration_sec"] = duration_sec
-        # 历史 intake_draft 可能缺 artifact_ref，补齐以免前端投影丢脚本。
-        if not str(next_script.get("artifact_ref") or "").strip():
-            body = str(next_script.get("content") or "")
-            version = next_script.get("version")
-            ver = version if isinstance(version, int) and version >= 1 else 1
-            digest = hashlib.sha256(body.encode()).hexdigest()[:16]
-            next_script["artifact_ref"] = f"artifact:script:intake_draft:v{ver}:{digest}"
-            next_script["version"] = ver
-        return next_script
-
-    body = _script_body_from_turn_text(text)
-    if not body:
-        body = _workspace_creative_brief(workspace)
-    if not body.strip():
-        return None
-    if not (
-        looks_like_complete_shooting_script(body)
-        or len(body) >= 200
-        or _should_seed_script_draft(body, ())
-    ):
-        return None
-    payload: dict[str, Any] = {
-        "content": body,
-        "version": 1,
-        "source": "intake_draft",
-        "status": "draft",
-        # 前端 projectScript 依赖 artifact_ref；缺省会导致右侧脚本预览整块消失。
-        "artifact_ref": f"artifact:script:intake_draft:v1:{hashlib.sha256(body.encode()).hexdigest()[:16]}",
-        "missing_requirements": list(missing),
-    }
-    if duration_sec is not None:
-        payload["duration_sec"] = duration_sec
-    return payload
-
-
 def merge_video_turn_content_with_history(
     current: str,
     prior_user_contents: Sequence[str],
@@ -732,7 +711,13 @@ def merge_video_turn_content_with_history(
     # 短跟进才归一全角冒号（如 9：16 → 9:16），不改写长脚本正文。
     text = normalize_user_text(raw)
     # 「确认脚本并生成资产包」等成片确认短令不得拼回整篇脚本，否则 Intake 会误判 clarify。
-    if _is_continue_video_generation(text) or _is_confirm_script_plan(text):
+    # 「重新生成分镜包」同理：拼回成稿会让原生 Agent 重复吃长文，易空转「已完成本轮处理」。
+    if (
+        _is_continue_video_generation(text)
+        or _is_confirm_script_plan(text)
+        or _is_reprepare_scene_packages(text)
+        or _is_merge_videos_intent(text)
+    ):
         return text
     if (
         not is_short_video_followup_instruction(text)
@@ -766,77 +751,6 @@ def merge_video_turn_content_with_history(
     return f"{best}\n\n【本轮指令】{text}"
 
 
-def _ready_to_prepare_scene_packages(
-    *,
-    instruction: str,
-    workspace: VideoWorkspace,
-) -> bool:
-    """可推进 prepare 的工作区事实闸门（脚本齐、未出包、无缺项）。"""
-
-    if not _workspace_has_generatable_script(workspace):
-        return False
-    if _workspace_has_scene_packages(workspace):
-        return False
-    if workspace_missing_requirements(workspace.payload):
-        return False
-    return True
-
-
-def _is_confirmed_asset_generation_instruction(instruction: str) -> bool:
-    """本轮是否为确认脚本/生成资产包短令。"""
-
-    return _is_confirm_script_plan(instruction) or _is_continue_video_generation(
-        instruction
-    )
-
-
-def _should_skip_intake_for_confirmed_assets(
-    *,
-    instruction: str,
-    workspace: VideoWorkspace,
-) -> bool:
-    """仅当结构化确认已落库时跳过长思考；避免抢在 confirm_for_generation 写 flag 之前短路。"""
-
-    if workspace.payload.get("script_plan_confirmed") is not True:
-        return False
-    if not _is_confirmed_asset_generation_instruction(instruction):
-        return False
-    return _ready_to_prepare_scene_packages(
-        instruction=instruction,
-        workspace=workspace,
-    )
-
-
-def _should_force_prepare_intake_evidence(
-    *,
-    instruction: str,
-    workspace: VideoWorkspace,
-) -> bool:
-    """确认短令或已确认 flag：纠正 Intake 误报的 clarify/inspect。"""
-
-    if not _ready_to_prepare_scene_packages(
-        instruction=instruction,
-        workspace=workspace,
-    ):
-        return False
-    if workspace.payload.get("script_plan_confirmed") is True:
-        return _is_confirmed_asset_generation_instruction(instruction)
-    return _is_confirm_script_plan(instruction)
-
-
-def _confirmed_assets_thinking_result() -> IntakeThinkingResult:
-    """已确认脚本生成资产包：跳过长思考，直接给 Planner 明确证据。"""
-
-    return IntakeThinkingResult(
-        user_message="已确认脚本方案，开始生成视频资产包。",
-        entry_path="continue",
-        intent="continue_assets",
-        target_capability="prepare_scene_packages",
-        needs_user_reply=False,
-        missing_requirements=(),
-    )
-
-
 def _workspace_script_markdown(workspace: VideoWorkspace) -> str:
     script = workspace.payload.get("script")
     if isinstance(script, dict):
@@ -857,199 +771,6 @@ def _workspace_script_markdown(workspace: VideoWorkspace) -> str:
     return ""
 
 
-def _workspace_has_generatable_script(workspace: VideoWorkspace) -> bool:
-    return bool(_workspace_script_markdown(workspace))
-
-
-def _default_generate_scene_assets_arguments() -> dict[str, Any]:
-    """规划失败降级用的参考图默认参数；正常主链路由 Registry/Planner 决定。"""
-
-    return {
-        "image_model": "seeddream-5.0",
-        "image_ratio": "9:16",
-        "image_size": "2K",
-    }
-
-
-def _resolve_script_entry_path(
-    *,
-    content: str,
-    materials: Sequence[Mapping[str, Any]],
-    workspace: VideoWorkspace,
-    continue_generation: bool,
-) -> ScriptEntryPath:
-    """解析本轮入口路径：C 成片 > B 成稿润色 > A 全创作 > inspect。"""
-
-    workspace_script = _workspace_script_markdown(workspace)
-    character_source = workspace_script or content
-    if continue_generation:
-        # 多人戏角色设定不清：即使要成片也先走全流程补设定。
-        if script_needs_full_character_plan(character_source, workspace=workspace):
-            return "create"
-        # 资产包前门禁：未确认脚本时不走 C。
-        if workspace.payload.get("script_plan_confirmed") is True:
-            return "continue"
-        return "inspect"
-    # 用户贴成稿要润色（即使会话里已有旧脚本也不走 C）。
-    if _is_complete_script_polish(content):
-        if script_needs_full_character_plan(content, workspace=workspace):
-            return "create"
-        return "polish"
-    if _should_seed_script_draft(content, materials):
-        return "create"
-    # 会话已有选题/故事：改创意、补镜头类跟进继续 Path A，避免落成 inspect。
-    if _workspace_creative_brief(workspace) and _looks_like_creative_followup(content):
-        return "create"
-    return "inspect"
-
-
-def _user_episode_pipeline_item(content: str) -> dict[str, Any]:
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
-    return {
-        "stage": "episode",
-        "title": "用户成稿 /episode",
-        "content": content,
-        "artifact_ref": f"artifact:video-script-episode-user-{digest}",
-        "change_summary": "载入用户完整脚本作为待审成稿",
-        "source": "user_complete_script",
-    }
-
-
-def _looks_like_confirmation_response(content: str) -> bool:
-    """用户是否在回应待确认闸门（同意/取消/修改），而非开新编排。"""
-
-    text = content.strip().casefold()
-    if not text or len(text) > 80:
-        return False
-    # 「继续资产 / 继续生成视频」含「继续」，不得误判为确认闸门回执。
-    if _is_continue_video_generation(content) or is_short_video_followup_instruction(content):
-        return False
-    markers = (
-        "同意",
-        "确认",
-        "取消",
-        "拒绝",
-        "不同意",
-        "换个方向",
-        "重新选题",
-        "已充值",
-        "继续",
-        "同意创作",
-        "同意创意",
-    )
-    return any(marker.casefold() in text for marker in markers)
-
-
-def _thinking_public_goal(thinking: IntakeThinkingResult, *, fallback: str) -> str:
-    """执行方案卡标题必须与思考流对用户文案一致。
-
-    思考流失败时的通用兜底句不算权威 answer，此时沿用调用方 fallback。
-    """
-
-    goal = (thinking.user_message or "").strip()
-    if goal and goal not in {
-        "已完成初步判断，继续生成执行方案。",
-        "思考预热超时，先按现有判断继续。",
-        "思考流暂时中断，继续生成执行方案。",
-    }:
-        return goal[:2_000]
-    return fallback[:2_000]
-
-
-def _thinking_facts_workspace_patch(
-    thinking: IntakeThinkingResult,
-    workspace: VideoWorkspace,
-) -> dict[str, Any]:
-    """把思考流已确认事实写入 workspace，供后续 Tool 消费。
-
-    不擅自清空工作区已有的 missing / awaiting；缺项由后续 field_followup 或
-    reconcile 基于落库事实处理。
-    """
-
-    patch: dict[str, Any] = {
-        "last_intake_thinking": thinking.as_planner_digest(),
-    }
-    if thinking.entry_path is not None:
-        patch["script_entry_path"] = thinking.entry_path
-
-    prior_missing = workspace_missing_requirements(workspace.payload)
-    has_facts = (
-        thinking.duration_sec is not None
-        or bool(thinking.aspect_ratio)
-        or thinking.ending_cta is not None
-    )
-    script_obj = workspace.payload.get("script")
-    if has_facts or isinstance(script_obj, dict):
-        next_script = dict(script_obj) if isinstance(script_obj, dict) else {}
-        if thinking.duration_sec is not None:
-            next_script["duration_sec"] = thinking.duration_sec
-        if thinking.aspect_ratio:
-            next_script["aspect_ratio"] = thinking.aspect_ratio
-            next_script["video_ratio"] = thinking.aspect_ratio
-        if thinking.ending_cta is not None:
-            next_script["ending_cta"] = thinking.ending_cta
-        if thinking.missing_requirements or thinking.needs_user_reply:
-            next_script["missing_requirements"] = list(thinking.missing_requirements)
-        elif has_facts:
-            next_script["missing_requirements"] = reconcile_missing_with_workspace(
-                prior_missing,
-                {
-                    "script": next_script,
-                    "form_values": workspace.payload.get("form_values"),
-                    "creation_contract": workspace.payload.get("creation_contract"),
-                },
-            )
-        if next_script:
-            patch["script"] = next_script
-            versions = workspace.payload.get("script_versions")
-            next_versions = list(versions) if isinstance(versions, list) else []
-            if next_versions and isinstance(next_versions[-1], dict):
-                next_versions[-1] = {**dict(next_versions[-1]), **next_script}
-                patch["script_versions"] = next_versions
-            elif next_script.get("content"):
-                patch["script_versions"] = [next_script]
-
-    if thinking.needs_user_reply or thinking.missing_requirements:
-        patch["awaiting_production_fields"] = True
-    elif has_facts:
-        script_after = patch.get("script")
-        gaps = (
-            workspace_missing_requirements({"script": script_after})
-            if isinstance(script_after, dict)
-            else prior_missing
-        )
-        patch["awaiting_production_fields"] = bool(gaps)
-
-    if thinking.aspect_ratio:
-        form_values = workspace.payload.get("form_values")
-        next_form = dict(form_values) if isinstance(form_values, dict) else {}
-        next_form["video_ratio"] = thinking.aspect_ratio
-        if thinking.ending_cta is not None:
-            next_form["ending_cta"] = thinking.ending_cta
-        patch["form_values"] = next_form
-    elif thinking.ending_cta is not None:
-        form_values = workspace.payload.get("form_values")
-        next_form = dict(form_values) if isinstance(form_values, dict) else {}
-        next_form["ending_cta"] = thinking.ending_cta
-        patch["form_values"] = next_form
-    return patch
-
-
-def _public_goal(content: str, *, entry_path: ScriptEntryPath = "create") -> str:
-    if entry_path == "continue":
-        return "准备视频资产包"
-    if entry_path == "polish":
-        return "成稿自检与导出"
-    if entry_path == "create" and script_needs_full_character_plan(content):
-        readiness = analyze_script_character_readiness(content)
-        hint = readiness["missing_hints"][0] if readiness["missing_hints"] else "角色设定不完整"
-        return f"全流程补齐设定（{hint}）"
-    compact = " ".join(content.split())
-    if len(compact) <= 40:
-        return f"处理视频创作请求：{compact}"
-    return f"处理视频创作请求：{compact[:37]}..."
-
-
 @dataclass(frozen=True)
 class VideoAgentSubmission:
     workspace: VideoWorkspace
@@ -1057,30 +778,20 @@ class VideoAgentSubmission:
 
 
 class VideoAgentEntrypoint:
-    """Turn 入口协调器：登记上下文、运行 Intake、调用 Planner、持久化短 Plan。
-
-    V2.1：Intake 只产出上下文事实；确定性代码只做允许/禁止闸门。
-    Planner 独占可执行 Tool 选择（最多 3 步）；缺失/超时/失败时仅允许严格单步降级。
-    入口不得根据关键词直接写确认事实或硬编码业务 Tool 步骤。
-    """
+    """Thin Turn 入口：只登记 Workspace / 观察 Plan，由原生 Agent 选 Tool。"""
 
     def __init__(
         self,
         *,
         runtime_repository: AgentRuntimeRepository,
         video_repository: VideoAgentRepository,
-        planner: VideoAgentPlanner | None = None,
-        entry_path_model: EntryPathModel | None = None,
+        native_invoker: NativeVideoAgentInvoker,
         clock: Callable[[], datetime] | None = None,
-        planning_timeout_sec: float = _DEFAULT_PLANNING_TIMEOUT_SEC,
     ) -> None:
         self._runtime_repository = runtime_repository
         self._video_repository = video_repository
-        self._planner = planner
-        # entry_path 仅用于 workspace 诊断/润色种子，不再展开完整步骤表。
-        self._entry_path_model = entry_path_model
+        self._native_invoker = native_invoker
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._planning_timeout_sec = max(0.1, float(planning_timeout_sec))
 
     async def _apply_workspace_patch_resilient(
         self,
@@ -1120,13 +831,6 @@ class VideoAgentEntrypoint:
         assert last_error is not None
         raise last_error
 
-    def _scene_package_projector(self) -> ScenePackageCompletionProjector:
-        return ScenePackageCompletionProjector(
-            runtime_repository=self._runtime_repository,
-            video_repository=self._video_repository,
-            apply_patch=self._apply_workspace_patch_resilient,
-        )
-
     async def submit_turn(
         self,
         *,
@@ -1148,7 +852,7 @@ class VideoAgentEntrypoint:
         if not owner or not conversation_id.strip() or not turn_id.strip() or not text:
             raise ValueError("VideoAgent 输入必须包含用户、对话、Turn 和内容")
         occurred_at = self._clock()
-        workspace_id = _stable_id("video_workspace", conversation_id)
+        workspace_id = video_workspace_id_for_conversation(conversation_id)
         plan_id = video_agent_plan_id(conversation_id, turn_id)
         existing_plan = await self._video_repository.get_plan(owner, plan_id)
         if existing_plan is not None:
@@ -1160,552 +864,96 @@ class VideoAgentEntrypoint:
                 raise ValueError("VideoAgent plan 缺少对应 workspace")
             return VideoAgentSubmission(workspace=workspace, plan=existing_plan)
 
-        safe_materials = _safe_materials(materials)
-        product_info = _product_info_from_materials(safe_materials)
-        payload = {
-            "latest_input": text,
-            "artifact_refs": list(artifact_refs),
-            "materials": safe_materials,
-            "product_info": product_info,
-            "active_turn_id": turn_id,
-        }
-        workspace = await self._video_repository.create_workspace(
-            owner,
-            VideoWorkspace(
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                payload=payload,
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            ),
-        )
-        # 必须先合并 workspace/历史上下文，再思考与规划；否则短补字段会被当成新成稿。
-        original_instruction = _turn_instruction(text)
-        text = _merge_turn_with_workspace_context(
-            text,
-            workspace,
-            materials=safe_materials,
-        )
-        thinking = ThinkingStreamPublisher(
-            repository=self._runtime_repository,
-            user_id=owner,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            clock=self._clock,
-        )
-        # 结构化确认已落库后的短令：跳过长 Intake，避免拼回整篇脚本后误判 clarify。
-        if _should_skip_intake_for_confirmed_assets(
-            instruction=original_instruction,
-            workspace=workspace,
-        ):
-            thinking_result = _confirmed_assets_thinking_result()
-            try:
-                await thinking.complete()
-            except Exception:  # noqa: BLE001
-                pass
-        else:
-            state_before = await self._video_repository.load_conversation_state(
-                owner,
-                conversation_id,
-            )
-            latest_before = state_before[1] if state_before is not None else None
-            thinking_result = await stream_intake_thinking(
-                publisher=thinking,
-                content=text,
-                materials=safe_materials,
-                workspace_digest=build_workspace_digest(workspace),
-                blocking_confirmation=blocking_confirmation_from_plan(latest_before),
-            )
-        return await self._submit_turn_after_thinking(
+        return await self._submit_turn_native(
             owner=owner,
             conversation_id=conversation_id,
             turn_id=turn_id,
             text=text,
-            original_instruction=original_instruction,
+            raw_content=raw_content,
             artifact_refs=artifact_refs,
-            safe_materials=safe_materials,
-            product_info=product_info,
-            workspace=workspace,
+            materials=materials,
+            workspace_id=workspace_id,
             plan_id=plan_id,
             occurred_at=occurred_at,
-            thinking_result=thinking_result,
         )
 
-    async def _submit_turn_after_thinking(
+    async def _submit_turn_native(
         self,
         *,
         owner: str,
         conversation_id: str,
         turn_id: str,
         text: str,
-        original_instruction: str,
+        raw_content: str,
         artifact_refs: tuple[str, ...],
-        safe_materials: list[dict[str, Any]],
-        product_info: dict[str, Any],
-        workspace: VideoWorkspace,
+        materials: Sequence[Mapping[str, Any]] | None,
+        workspace_id: str,
         plan_id: str,
         occurred_at: datetime,
-        thinking_result: IntakeThinkingResult,
     ) -> VideoAgentSubmission:
-        # 思考流可能很长：期间确认脚本/旧执行器会 bump revision，必须先重读。
-        refreshed = await self._video_repository.get_workspace(
+        """Thin Entrypoint：只登记 Workspace 与观察 Plan，交由原生 Agent 选 Tool。"""
+
+        del raw_content  # 已在 submit_turn 归一化为 text
+        safe_materials = _safe_materials(materials)
+        product_info = _product_info_from_materials(safe_materials)
+        workspace = await self._video_repository.create_workspace(
             owner,
-            workspace.workspace_id,
-        )
-        if refreshed is not None:
-            workspace = refreshed
-        # Intake 可能误报画幅/CTA；用工作区已落库事实剔除，避免确认脚本后假卡 waiting。
-        original_missing = tuple(thinking_result.missing_requirements)
-        reconciled_missing = tuple(
-            reconcile_missing_with_workspace(original_missing, workspace.payload)
-        )
-        thinking_patch: dict[str, Any] = {
-            "missing_requirements": reconciled_missing,
-        }
-        if thinking_result.aspect_ratio is None:
-            ratio = workspace_resolved_aspect_ratio(workspace.payload)
-            if ratio is not None:
-                thinking_patch["aspect_ratio"] = ratio
-        if thinking_result.ending_cta is None:
-            cta = workspace_resolved_ending_cta(workspace.payload)
-            if cta is not None:
-                thinking_patch["ending_cta"] = cta
-        if (
-            thinking_result.needs_user_reply
-            and original_missing
-            and not reconciled_missing
-        ):
-            thinking_patch["needs_user_reply"] = False
-        thinking_result = replace(thinking_result, **thinking_patch)
-        # 确认生成资产包：即便 Intake 误报 clarify/inspect，也用工作区事实纠正证据。
-        if _should_force_prepare_intake_evidence(
-            instruction=original_instruction,
-            workspace=workspace,
-        ):
-            thinking_result = replace(
-                thinking_result,
-                entry_path="continue",
-                intent="continue_assets",
-                target_capability="prepare_scene_packages",
-                needs_user_reply=False,
-                missing_requirements=(),
-                user_message=(
-                    thinking_result.user_message.strip()
-                    or "已确认脚本方案，开始生成视频资产包。"
-                ),
-            )
-        # 思考流已确认的画幅/CTA 等事实尽早写入，避免后续 import 只看正文又判缺。
-        facts_patch = _thinking_facts_workspace_patch(thinking_result, workspace)
-        if facts_patch:
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch=facts_patch,
-                now=occurred_at,
-            )
-        continue_generation = (
-            _workspace_has_generatable_script(workspace)
-            and _is_continue_video_generation(original_instruction)
-        )
-        if workspace.payload.get("latest_input") != text or (
-            safe_materials and workspace.payload.get("materials") != safe_materials
-        ):
-            # 同会话后续 Turn 复用 workspace，需要写入本轮输入与素材。
-            # 「继续生成视频」不得覆盖已有故事/脚本 latest_input。
-            merged_product = {
-                **(
-                    dict(workspace.payload["product_info"])
-                    if isinstance(workspace.payload.get("product_info"), dict)
-                    else {}
-                ),
-                **product_info,
-            }
-            patch: dict[str, Any] = {
-                "artifact_refs": list(artifact_refs),
-                "materials": safe_materials or list(
-                    workspace.payload.get("materials") or []
-                ),
-                "product_info": merged_product,
-                "pending_generation_request": text,
-            }
-            if not continue_generation:
-                patch["latest_input"] = text
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch=patch,
-                now=occurred_at,
-            )
-        # 缺字段追问：持久化 WAITING_FOR_INPUT Plan（无 Tool 步），前端可展示等待态。
-        if thinking_result.needs_user_reply or thinking_result.missing_requirements:
-            seeded = _seed_script_draft_payload(
-                text=text,
-                workspace=workspace,
-                missing=thinking_result.missing_requirements,
-                duration_sec=thinking_result.duration_sec,
-            )
-            patch: dict[str, Any] = {
-                "last_production_fields_notice": thinking_result.user_message,
-                "last_intake_thinking": thinking_result.as_planner_digest(),
-                "awaiting_production_fields": True,
-            }
-            if seeded is not None:
-                versions = workspace.payload.get("script_versions")
-                next_versions = list(versions) if isinstance(versions, list) else []
-                if next_versions and isinstance(next_versions[-1], dict):
-                    next_versions[-1] = {
-                        **dict(next_versions[-1]),
-                        "missing_requirements": list(thinking_result.missing_requirements),
-                        **(
-                            {"duration_sec": thinking_result.duration_sec}
-                            if thinking_result.duration_sec is not None
-                            else {}
-                        ),
-                    }
-                elif not next_versions:
-                    next_versions = [seeded]
-                patch.update(
-                    {
-                        "script": seeded,
-                        "script_versions": next_versions,
-                        "script_entry_path": thinking_result.entry_path or "polish",
-                    }
-                )
-            elif thinking_result.entry_path is not None:
-                patch["script_entry_path"] = thinking_result.entry_path
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch=patch,
-                now=occurred_at,
-            )
-            return await self._persist_waiting_for_input_plan(
-                owner=owner,
+            VideoWorkspace(
+                workspace_id=workspace_id,
                 conversation_id=conversation_id,
-                turn_id=turn_id,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                thinking_result=thinking_result,
-            )
-        # 可推进执行前，取消会话里旧的等待补充 Plan。
-        await self._video_repository.cancel_waiting_for_input_plans(
-            owner,
-            conversation_id,
-            now=occurred_at,
-            exclude_plan_id=plan_id,
-        )
-        # completion_dispatch 失败时资产包可能只在完成事件里：规划前由 projector 对账回填。
-        workspace = await self._scene_package_projector().hydrate_if_missing(
-            owner=owner,
-            conversation_id=conversation_id,
-            workspace=workspace,
-            occurred_at=occurred_at,
-        )
-        # 补生产字段降级：仅结构门闩 + 工作区缺项态；话术语义看 Intake。
-        # 场景包已出、参考图未出时禁止补字段降级吞回合（交给 Planner）。
-        intake_wants_assets = (
-            thinking_result.target_capability == "generate_scene_assets"
-            or thinking_result.intent == "continue_images"
-        )
-        intake_wants_video = (
-            thinking_result.target_capability == "generate_scenes"
-            or thinking_result.intent == "continue_video"
-        )
-        scene_assets_pending = (
-            _workspace_has_scene_packages(workspace)
-            and not workspace_has_scene_asset_images(workspace.payload)
-        )
-        logger.info(
-            "思考后裁决 turn_id=%s intent=%s has_packages=%s assets_pending=%s "
-            "wants_assets=%s wants_video=%s",
-            turn_id,
-            thinking_result.intent,
-            _workspace_has_scene_packages(workspace),
-            scene_assets_pending,
-            intake_wants_assets,
-            intake_wants_video,
-        )
-        field_followup = (
-            len(original_instruction.strip()) <= 80
-            and looks_like_production_field_reply(
-                original_instruction,
-                workspace_payload=workspace.payload,
-            )
-            and not scene_assets_pending
-            and not intake_wants_assets
-            and not intake_wants_video
-            and not _is_continue_video_generation(original_instruction)
-            and not _looks_like_confirmation_response(original_instruction)
-            and not _is_confirm_script_plan(original_instruction)
-            and (
-                thinking_result.needs_user_reply
-                or bool(thinking_result.missing_requirements)
-                or workspace.payload.get("awaiting_production_fields") is True
-                or bool(workspace_missing_requirements(workspace.payload))
-            )
-        )
-        if field_followup and (
-            _workspace_has_generatable_script(workspace)
-            or _seed_script_draft_payload(text=text, workspace=workspace) is not None
-        ):
-            analysis = await analyze_production_fields_with_llm(text=text)
-            seeded = _seed_script_draft_payload(
-                text=text,
-                workspace=workspace,
-                missing=analysis.missing,
-                duration_sec=analysis.duration_sec,
-            )
-            script_version: int | None = None
-            if seeded is not None:
-                next_script = apply_production_fields_to_script(
-                    seeded,
-                    analysis,
-                    workspace_payload=workspace.payload,
-                )
-                raw_version = next_script.get("version")
-                if isinstance(raw_version, int) and not isinstance(raw_version, bool):
-                    script_version = raw_version
-                versions = workspace.payload.get("script_versions")
-                next_versions = list(versions) if isinstance(versions, list) else []
-                if next_versions and isinstance(next_versions[-1], dict):
-                    next_versions[-1] = {
-                        **dict(next_versions[-1]),
-                        **next_script,
-                    }
-                elif not next_versions:
-                    next_versions = [next_script]
-                notice = format_production_fields_update_notice(
-                    analysis,
-                    script_version=script_version,
-                )
-                form_patch = production_fields_form_patch(analysis)
-                form_values = workspace.payload.get("form_values")
-                next_form = dict(form_values) if isinstance(form_values, dict) else {}
-                next_form.update(form_patch)
-                patch: dict[str, Any] = {
-                    "script": next_script,
-                    "script_versions": next_versions,
-                    "script_entry_path": thinking_result.entry_path or "inspect",
-                    "awaiting_production_fields": bool(next_script.get("missing_requirements")),
-                    "last_production_fields_notice": notice,
-                    "last_intake_thinking": thinking_result.as_planner_digest(),
-                }
-                if next_form:
-                    patch["form_values"] = next_form
-                workspace = await self._apply_workspace_patch_resilient(
-                    owner=owner,
-                    workspace=workspace,
-                    patch=patch,
-                    now=occurred_at,
-                )
-            else:
-                notice = format_production_fields_update_notice(analysis)
-            # 补字段后仍缺项：落 WAITING_FOR_INPUT；已齐则继续走下方 Planner。
-            remaining = reconcile_missing_with_workspace(
-                workspace_missing_requirements(workspace.payload) or analysis.missing,
-                workspace.payload,
-            )
-            if remaining:
-                return await self._persist_waiting_for_input_plan(
-                    owner=owner,
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    workspace=workspace,
-                    plan_id=plan_id,
-                    occurred_at=occurred_at,
-                    thinking_result=thinking_result,
-                    public_goal=notice.split("\n", 1)[0][:500],
-                    missing=tuple(remaining),
-                )
-        # 确定性闸门：只负责允许/禁止，不负责选择 Tool。
-        # Intake 要参考图但工作区尚无资产包 → 禁止进 Planner 静默挂起。
-        if intake_wants_assets and not intake_wants_video:
-            if not _workspace_has_scene_packages(workspace):
-                return await self._persist_waiting_for_input_plan(
-                    owner=owner,
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    workspace=workspace,
-                    plan_id=plan_id,
-                    occurred_at=occurred_at,
-                    thinking_result=thinking_result,
-                    public_goal=(
-                        "当前工作区尚未写入视频资产包。若对话里已有资产包结果，"
-                        "请刷新后再试；否则请先确认生成资产包。"
-                    ),
-                    missing=(),
-                )
-        continue_generation = (
-            _workspace_has_generatable_script(workspace)
-            and _is_continue_video_generation(original_instruction)
-        )
-        # entry_path 仅作 Planner 诊断上下文；失败降级才可当路径展开。
-        if thinking_result.entry_path is not None:
-            entry_path = thinking_result.entry_path
-        else:
-            entry_path = _resolve_script_entry_path(
-                content=text,
-                materials=safe_materials,
-                workspace=workspace,
-                continue_generation=continue_generation,
-            )
-            entry_path = await select_entry_path_with_llm(
-                content=text,
-                materials=safe_materials,
-                workspace=workspace,
-                rule_path=entry_path,
-                model=self._entry_path_model,
-                is_complete_script=_is_complete_script_polish,
-                has_generatable_script=_workspace_has_generatable_script,
-            )
-        # 推进资产/成片前确保成稿种子在 workspace，避免 Plan 执行时「脚本 0 份」。
-        # 长期应由 import_script Tool 写入；此处仅补空工作区的只读前置。
-        if entry_path in ("polish", "continue") and not _workspace_has_generatable_script(workspace):
-            seeded = _seed_script_draft_payload(
-                text=text,
-                workspace=workspace,
-                missing=(),
-                duration_sec=thinking_result.duration_sec,
-            )
-            if seeded is not None:
-                workspace = await self._apply_workspace_patch_resilient(
-                    owner=owner,
-                    workspace=workspace,
-                    patch={
-                        "script": seeded,
-                        "script_versions": [seeded],
-                        "awaiting_production_fields": False,
-                    },
-                    now=occurred_at,
-                )
-        intake_digest = thinking_result.as_planner_digest()
-        if entry_path == "create" and script_needs_full_character_plan(
-            _workspace_script_markdown(workspace) or text,
-            workspace=workspace,
-        ):
-            readiness = analyze_script_character_readiness(
-                _workspace_script_markdown(workspace) or text,
-                workspace=workspace,
-            )
-            hints = "；".join(readiness["missing_hints"][:2]) or "角色设定不完整"
-            # 角色完整度只作为 Planner 证据，不改写 latest_input / 确认位。
-            prior_constraints = intake_digest.get("constraints")
-            next_constraints: dict[str, Any] = (
-                dict(prior_constraints) if isinstance(prior_constraints, dict) else {}
-            )
-            next_constraints["character_plan"] = (
-                f"角色设定不清晰（{hints}）；优先走全流程补设定，勿只保留单一主角。"
-            )
-            intake_digest = {
-                **intake_digest,
-                "character_plan_required": True,
-                "character_missing_hints": readiness["missing_hints"][:4],
-                "constraints": next_constraints,
-            }
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch={
-                    "last_intake_thinking": intake_digest,
-                    "script_entry_path": "create",
-                    "character_plan_required": True,
-                    "awaiting_production_fields": False,
-                },
-                now=occurred_at,
-            )
-        else:
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch={
-                    "last_intake_thinking": intake_digest,
-                    "awaiting_production_fields": False,
-                },
-                now=occurred_at,
-            )
-        if entry_path == "polish":
-            # 兼容：润色 Skill 仍读 script_pipeline.episode；正式迁移到 import_script 后删除。
-            existing_pipeline = workspace.payload.get("script_pipeline")
-            pipeline: dict[str, Any] = (
-                dict(existing_pipeline) if isinstance(existing_pipeline, dict) else {}
-            )
-            pipeline["episode"] = _user_episode_pipeline_item(text)
-            workspace = await self._apply_workspace_patch_resilient(
-                owner=owner,
-                workspace=workspace,
-                patch={
-                    "script_pipeline": pipeline,
-                    "script_entry_path": "polish",
+                payload={
                     "latest_input": text,
+                    "artifact_refs": list(artifact_refs),
+                    "materials": safe_materials,
+                    "product_info": product_info,
+                    "active_turn_id": turn_id,
+                    "native_agent": True,
                 },
+                created_at=occurred_at,
+                updated_at=occurred_at,
+            ),
+        )
+        workspace = await self._apply_workspace_patch_resilient(
+            owner=owner,
+            workspace=workspace,
+            patch={
+                "latest_input": text,
+                "artifact_refs": list(artifact_refs),
+                "materials": safe_materials,
+                "product_info": product_info,
+                "active_turn_id": turn_id,
+                "native_agent": True,
+            },
+            now=occurred_at,
+        )
+        merged = _merge_turn_with_workspace_context(
+            text,
+            workspace,
+            materials=safe_materials,
+        )
+        if merged != text:
+            workspace = await self._apply_workspace_patch_resilient(
+                owner=owner,
+                workspace=workspace,
+                patch={"latest_input": merged},
                 now=occurred_at,
             )
-        elif entry_path in ("create", "continue", "inspect"):
-            if workspace.payload.get("script_entry_path") != entry_path:
-                workspace = await self._apply_workspace_patch_resilient(
-                    owner=owner,
-                    workspace=workspace,
-                    patch={"script_entry_path": entry_path},
-                    now=occurred_at,
-                )
+            text = merged
 
-        plan = await self._plan_turn_or_fallback(
-            owner=owner,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            content=text,
-            artifact_refs=artifact_refs,
-            materials=safe_materials,
-            workspace=workspace,
-            plan_id=plan_id,
-            occurred_at=occurred_at,
-            entry_path=entry_path,
-            intake_thinking=intake_digest,
+        compact = " ".join(_public_goal_seed(text).split())
+        public_goal = (
+            f"处理视频请求：{compact[:37]}..."
+            if len(compact) > 40
+            else f"处理视频请求：{compact}"
+            if compact
+            else "处理视频请求"
         )
-        return await self._persist_and_publish_plan(
-            owner=owner,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            workspace=workspace,
-            plan=plan,
-            occurred_at=occurred_at,
-        )
-
-    async def _persist_waiting_for_input_plan(
-        self,
-        *,
-        owner: str,
-        conversation_id: str,
-        turn_id: str,
-        workspace: VideoWorkspace,
-        plan_id: str,
-        occurred_at: datetime,
-        thinking_result: IntakeThinkingResult,
-        public_goal: str | None = None,
-        missing: tuple[str, ...] | None = None,
-    ) -> VideoAgentSubmission:
-        """持久化无 Tool 步的等待补充 Plan，并取消会话内旧等待卡。"""
-
-        await self._video_repository.cancel_waiting_for_input_plans(
-            owner,
-            conversation_id,
-            now=occurred_at,
-            exclude_plan_id=plan_id,
-        )
-        missing_items = missing if missing is not None else thinking_result.missing_requirements
-        goal = (public_goal or thinking_result.user_message or "").strip()
-        if not goal:
-            if missing_items:
-                goal = f"请补充：{'、'.join(missing_items)}"
-            else:
-                goal = "请补充继续创作所需信息"
         plan = AgentPlan(
             plan_id=plan_id,
             workspace_id=workspace.workspace_id,
             conversation_id=conversation_id,
-            status=AgentPlanStatus.WAITING_FOR_INPUT,
-            public_goal=goal[:2_000],
+            status=AgentPlanStatus.RUNNING,
+            public_goal=public_goal[:2_000],
             steps=(),
             created_at=occurred_at,
             updated_at=occurred_at,
@@ -1769,310 +1017,3 @@ class VideoAgentEntrypoint:
             ),
         )
         return VideoAgentSubmission(workspace=workspace, plan=plan)
-
-
-    async def _plan_turn_or_fallback(
-        self,
-        *,
-        owner: str,
-        conversation_id: str,
-        turn_id: str,
-        content: str,
-        artifact_refs: tuple[str, ...],
-        materials: list[dict[str, Any]],
-        workspace: VideoWorkspace,
-        plan_id: str,
-        occurred_at: datetime,
-        entry_path: ScriptEntryPath,
-        intake_thinking: Mapping[str, Any] | None = None,
-    ) -> AgentPlan:
-        state = await self._video_repository.load_conversation_state(owner, conversation_id)
-        latest_plan = state[1] if state is not None else None
-        blocking = blocking_confirmation_from_plan(latest_plan)
-        instruction = _turn_instruction(content)
-        if blocking is not None and _looks_like_confirmation_response(instruction):
-            # 「同意创作/确认」必须走确认卡 API，禁止 Planner 再排 import+confirm 造成参数失败与假排队。
-            return self._inspect_fallback_plan(
-                conversation_id=conversation_id,
-                content=content,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                public_goal="请点击确认卡完成确认或取消；如需改方向，直接说明想怎么改",
-            )
-        if blocking is not None and not _looks_like_confirmation_response(instruction):
-            # 补生产字段 / 改创意自然语言：必须带着更新后的 workspace 重新走 Planner，
-            # 不能被「待确认」闸门吞成无上下文的 inspect。
-            allow_replan = looks_like_production_field_reply(
-                instruction,
-                workspace_payload=workspace.payload,
-            ) or _looks_like_creative_followup(instruction)
-            if not allow_replan:
-                return self._inspect_fallback_plan(
-                    conversation_id=conversation_id,
-                    content=content,
-                    workspace=workspace,
-                    plan_id=plan_id,
-                    occurred_at=occurred_at,
-                    public_goal="当前有待确认步骤，请先确认或取消后再继续",
-                )
-
-        operation_summaries: list[dict[str, Any]] = []
-        try:
-            operations = await asyncio.wait_for(
-                self._runtime_repository.list_operations(owner, conversation_id),
-                timeout=5.0,
-            )
-            operation_summaries = summarize_operations(operations)
-        except Exception:  # noqa: BLE001 — Operation 读取失败不得阻断规划
-            logger.exception("VideoAgent list_operations failed; planning without ops")
-
-        if self._planner is None:
-            return self._inspect_fallback_plan(
-                conversation_id=conversation_id,
-                content=content,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                public_goal=_public_goal(content, entry_path=entry_path),
-            )
-
-        context = VideoAgentPlanningContext(
-            user_id=owner,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            content=content,
-            artifact_refs=artifact_refs,
-            materials=tuple(materials),
-            workspace=workspace,
-            workspace_digest=build_workspace_digest(workspace),
-            operation_summaries=tuple(operation_summaries),
-            blocking_confirmation=blocking,
-            intake_thinking=dict(intake_thinking) if intake_thinking else None,
-        )
-        try:
-            plan = await asyncio.wait_for(
-                self._planner.plan_turn(context),
-                timeout=self._planning_timeout_sec,
-            )
-        except TimeoutError:
-            logger.warning(
-                "VideoAgent planner timed out after %.1fs; using safe fallback",
-                self._planning_timeout_sec,
-            )
-            return self._planning_failure_fallback_plan(
-                conversation_id=conversation_id,
-                content=content,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                intake_thinking=intake_thinking,
-                inspect_goal="规划超时，先读取项目资料",
-            )
-        except VideoAgentPlanningError as exc:
-            logger.warning("VideoAgent planner rejected proposal: %s", exc)
-            return self._planning_failure_fallback_plan(
-                conversation_id=conversation_id,
-                content=content,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                intake_thinking=intake_thinking,
-                inspect_goal="规划失败，先读取项目资料",
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("VideoAgent planner failed; falling back to inspect")
-            return self._planning_failure_fallback_plan(
-                conversation_id=conversation_id,
-                content=content,
-                workspace=workspace,
-                plan_id=plan_id,
-                occurred_at=occurred_at,
-                intake_thinking=intake_thinking,
-                inspect_goal="规划异常，先读取项目资料",
-            )
-
-        # 保证 plan_id 与 Turn 派生一致（幂等回放依赖）。
-        if plan.plan_id != plan_id:
-            remapped_steps = tuple(
-                step.model_copy(update={"plan_id": plan_id}) for step in plan.steps
-            )
-            plan = plan.model_copy(update={"plan_id": plan_id, "steps": remapped_steps})
-        return plan
-
-    def _planning_failure_fallback_plan(
-        self,
-        *,
-        conversation_id: str,
-        content: str,
-        workspace: VideoWorkspace,
-        plan_id: str,
-        occurred_at: datetime,
-        intake_thinking: Mapping[str, Any] | None,
-        inspect_goal: str,
-    ) -> AgentPlan:
-        """Planner 故障时只恢复 Intake 已裁决且无参数的安全单步。"""
-
-        intake = intake_thinking or {}
-        missing = intake.get("missing_requirements")
-        can_import = (
-            (
-                intake.get("target_capability") == "import_script"
-                or looks_like_complete_shooting_script(content)
-            )
-            and intake.get("needs_user_reply") is not True
-            and not missing
-            and _workspace_has_generatable_script(workspace)
-            and not workspace_missing_requirements(workspace.payload)
-        )
-        if can_import:
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal="导入完整分镜脚本并结构化",
-                steps=(
-                    AgentPlanStep(
-                        step_id=_stable_id("video_step", plan_id, "1"),
-                        plan_id=plan_id,
-                        sequence=1,
-                        tool_name="import_script",
-                        title="导入脚本",
-                        status=PlanStepStatus.PENDING,
-                    ),
-                ),
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-        can_assets = (
-            (
-                intake.get("target_capability") == "generate_scene_assets"
-                or intake.get("intent") == "continue_images"
-            )
-            and _workspace_has_scene_packages(workspace)
-            and not workspace_has_scene_asset_images(workspace.payload)
-            and intake.get("needs_user_reply") is not True
-        )
-        if can_assets:
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal="生成角色、场景与道具参考图",
-                steps=(
-                    AgentPlanStep(
-                        step_id=_stable_id("video_step", plan_id, "1"),
-                        plan_id=plan_id,
-                        sequence=1,
-                        tool_name="generate_scene_assets",
-                        title="生成参考图",
-                        status=PlanStepStatus.PENDING,
-                        confirmation_required=True,
-                        arguments=_default_generate_scene_assets_arguments(),
-                    ),
-                ),
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-        can_prepare = (
-            (
-                intake.get("target_capability") == "prepare_scene_packages"
-                or intake.get("intent") == "continue_assets"
-                or _is_confirm_script_plan(content)
-                or _is_continue_video_generation(content)
-            )
-            and workspace.payload.get("script_plan_confirmed") is True
-            and _workspace_has_generatable_script(workspace)
-            and not _workspace_has_scene_packages(workspace)
-            and not workspace_missing_requirements(workspace.payload)
-            and intake.get("needs_user_reply") is not True
-        )
-        if can_prepare:
-            return AgentPlan(
-                plan_id=plan_id,
-                workspace_id=workspace.workspace_id,
-                conversation_id=conversation_id,
-                status=AgentPlanStatus.PLANNING,
-                public_goal="生成视频场景资产包",
-                steps=(
-                    AgentPlanStep(
-                        step_id=_stable_id("video_step", plan_id, "1"),
-                        plan_id=plan_id,
-                        sequence=1,
-                        tool_name="prepare_scene_packages",
-                        title="生成资产包",
-                        status=PlanStepStatus.PENDING,
-                    ),
-                ),
-                created_at=occurred_at,
-                updated_at=occurred_at,
-            )
-        return self._inspect_fallback_plan(
-            conversation_id=conversation_id,
-            content=content,
-            workspace=workspace,
-            plan_id=plan_id,
-            occurred_at=occurred_at,
-            public_goal=inspect_goal,
-        )
-
-    def _inspect_fallback_plan(
-        self,
-        *,
-        conversation_id: str,
-        content: str,
-        workspace: VideoWorkspace,
-        plan_id: str,
-        occurred_at: datetime,
-        public_goal: str | None = None,
-    ) -> AgentPlan:
-        """Planner 故障时的最小降级：单步 inspect，禁止展开完整流水线。"""
-
-        return AgentPlan(
-            plan_id=plan_id,
-            workspace_id=workspace.workspace_id,
-            conversation_id=conversation_id,
-            status=AgentPlanStatus.PLANNING,
-            public_goal=public_goal or _public_goal(content, entry_path="inspect"),
-            steps=(
-                AgentPlanStep(
-                    step_id=_stable_id("video_step", plan_id, "1"),
-                    plan_id=plan_id,
-                    sequence=1,
-                    tool_name="inspect_video_workspace",
-                    title="读取项目资料",
-                    status=PlanStepStatus.PENDING,
-                ),
-            ),
-            created_at=occurred_at,
-            updated_at=occurred_at,
-        )
-
-    def _deterministic_plan(
-        self,
-        *,
-        conversation_id: str,
-        content: str,
-        materials: list[dict[str, Any]],
-        workspace: VideoWorkspace,
-        plan_id: str,
-        occurred_at: datetime,
-        entry_path: ScriptEntryPath | None = None,
-        continue_generation: bool = False,
-    ) -> AgentPlan:
-        """DEPRECATED stub：兼容旧调用点，一律降级为 inspect。
-
-        V2.1 主路径已走 ``VideoAgentPlanner.plan_turn``；勿新增对此方法的依赖。
-        生产观测稳定后可随批次 E 硬删一并移除。
-        """
-
-        del materials, entry_path, continue_generation
-        return self._inspect_fallback_plan(
-            conversation_id=conversation_id,
-            content=content,
-            workspace=workspace,
-            plan_id=plan_id,
-            occurred_at=occurred_at,
-        )

@@ -39,6 +39,7 @@ from pixelflow.video_agent.executor.events import (
     build_step_progressed_event,
     build_step_started_event,
 )
+from pixelflow.video_agent.workspace.ids import video_workspace_id_for_conversation
 
 
 def _clone[T](record: T) -> T:
@@ -65,6 +66,37 @@ def _sortable_time(value: datetime | None) -> datetime:
     return _restore_utc(value) or datetime.min.replace(tzinfo=UTC)
 
 
+def _pick_authoritative_workspace[T](
+    conversation_id: str,
+    workspaces: list[T],
+    *,
+    workspace_id_of,
+    updated_at_of,
+    plan_workspace_ids: set[str],
+) -> T:
+    """多 Workspace 时择一权威：稳定 ID > 有 Plan > 最近更新。"""
+
+    if not workspaces:
+        raise AgentRuntimeRecordConflictError("VideoAgent 会话缺少 workspace")
+    if len(workspaces) == 1:
+        return workspaces[0]
+    preferred_id = video_workspace_id_for_conversation(conversation_id)
+    for item in workspaces:
+        if workspace_id_of(item) == preferred_id:
+            return item
+    with_plans = [
+        item for item in workspaces if workspace_id_of(item) in plan_workspace_ids
+    ]
+    pool = with_plans or workspaces
+    return max(
+        pool,
+        key=lambda item: (
+            _sortable_time(updated_at_of(item)),
+            workspace_id_of(item),
+        ),
+    )
+
+
 def _workspace_patch(patch: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     normalized = deepcopy(dict(patch))
     for key in normalized:
@@ -73,15 +105,78 @@ def _workspace_patch(patch: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return normalized
 
 
+def _merge_scenes_by_id(existing: object, incoming: object) -> list[JsonValue]:
+    """按 scene_id 合并镜头列表：incoming 覆盖同 id，保留现有未提及镜。
+
+    并发生成时，后到的 generate_scenes / Operation 完成补丁若整表替换，
+    会把另一镜已写回的 video_url 盖掉；合并写入可避免丢成片。
+    """
+
+    existing_list = (
+        [dict(item) for item in existing if isinstance(item, dict)]
+        if isinstance(existing, list)
+        else []
+    )
+    incoming_list = (
+        [dict(item) for item in incoming if isinstance(item, dict)]
+        if isinstance(incoming, list)
+        else []
+    )
+    if not existing_list:
+        return list(incoming_list)
+    by_id: dict[str, dict[str, JsonValue]] = {}
+    order: list[str] = []
+    for scene in existing_list:
+        scene_id = str(scene.get("scene_id") or "").strip()
+        if not scene_id:
+            continue
+        if scene_id not in by_id:
+            order.append(scene_id)
+        by_id[scene_id] = scene
+    for scene in incoming_list:
+        scene_id = str(scene.get("scene_id") or "").strip()
+        if not scene_id:
+            continue
+        if scene_id not in by_id:
+            order.append(scene_id)
+        by_id[scene_id] = scene
+    return [by_id[scene_id] for scene_id in order]
+
+
 def _is_workspace_patch_replay(
     workspace: VideoWorkspace,
     patch: Mapping[str, JsonValue],
     *,
     expected_revision: int,
 ) -> bool:
-    return workspace.revision == expected_revision + 1 and all(
-        workspace.payload.get(key) == value for key, value in patch.items()
-    )
+    # scenes_replace 只是写入指令，不会落进 payload，比较时排除。
+    comparable = {
+        key: value
+        for key, value in patch.items()
+        if key != "scenes_replace"
+    }
+    if workspace.revision != expected_revision + 1:
+        return False
+    for key, value in comparable.items():
+        if key in {"scenes", "scene_packages"} and isinstance(value, list):
+            # 合并写入后 payload 可能比补丁更长，按 id 比对补丁内各镜即可。
+            current = workspace.payload.get(key)
+            current_list = current if isinstance(current, list) else []
+            current_by_id = {
+                str(item.get("scene_id") or "").strip(): item
+                for item in current_list
+                if isinstance(item, dict)
+            }
+            for item in value:
+                if not isinstance(item, dict):
+                    return False
+                scene_id = str(item.get("scene_id") or "").strip()
+                if not scene_id or current_by_id.get(scene_id) != item:
+                    return False
+            continue
+        if workspace.payload.get(key) != value:
+            return False
+    return True
 
 
 def _assert_expected_revision(expected_revision: int) -> None:
@@ -134,11 +229,24 @@ def _updated_workspace(
     *,
     now: datetime,
 ) -> VideoWorkspace:
+    raw_patch = dict(patch)
+    # 用途：prepare / 全量重建时整表替换；默认按 scene_id 合并，避免并发生成互相覆盖。
+    replace_scenes = bool(raw_patch.pop("scenes_replace", False))
+    payload = dict(workspace.payload)
+    for key in ("scenes", "scene_packages"):
+        if key not in raw_patch:
+            continue
+        incoming = raw_patch.pop(key)
+        if replace_scenes:
+            payload[key] = deepcopy(incoming)
+        else:
+            payload[key] = _merge_scenes_by_id(payload.get(key), incoming)
+    payload.update(raw_patch)
     return VideoWorkspace.model_validate(
         {
             **workspace.model_dump(mode="python"),
             "revision": workspace.revision + 1,
-            "payload": {**workspace.payload, **patch},
+            "payload": payload,
             "updated_at": now,
         }
     )
@@ -199,6 +307,10 @@ class VideoAgentRepository(Protocol):
     async def create_workspace(self, user_id: str, workspace: VideoWorkspace) -> VideoWorkspace: ...
 
     async def get_workspace(self, user_id: str, workspace_id: str) -> VideoWorkspace | None: ...
+
+    async def discard_workspace(self, user_id: str, workspace_id: str) -> None:
+        """补偿删除：仅用于升级失败回滚；已切模式的权威工作区禁止调用。"""
+        ...
 
     async def load_conversation_state(
         self,
@@ -398,6 +510,16 @@ class MemoryVideoAgentRepository:
         record = self._workspace_by_owner.get((_owner(user_id), workspace_id))
         return None if record is None else _clone(record)
 
+    async def discard_workspace(self, user_id: str, workspace_id: str) -> None:
+        owner = _owner(user_id)
+        key = (owner, workspace_id)
+        async with self._transition_lock:
+            existing = self._workspace_by_owner.get(key)
+            if existing is None:
+                return
+            del self._workspace_by_owner[key]
+            self._workspace_owner_by_id.pop(workspace_id, None)
+
     async def load_conversation_state(
         self,
         user_id: str,
@@ -414,11 +536,25 @@ class MemoryVideoAgentRepository:
         ]
         if not workspaces:
             return None
-        if len(workspaces) != 1:
-            raise AgentRuntimeRecordConflictError(
-                "VideoAgent 会话存在多个权威 workspace"
-            )
-        workspace = workspaces[0]
+        plan_workspace_ids = {
+            plan.workspace_id
+            for (plan_owner, _), plan in self._plan_by_owner.items()
+            if plan_owner == owner and plan.conversation_id == conversation_id
+        }
+        workspace = _pick_authoritative_workspace(
+            conversation_id,
+            workspaces,
+            workspace_id_of=lambda item: item.workspace_id,
+            updated_at_of=lambda item: item.updated_at,
+            plan_workspace_ids=plan_workspace_ids,
+        )
+        # 清理无 Plan 的历史双写孤儿，避免会话长期卡在多权威状态。
+        for item in workspaces:
+            if (
+                item.workspace_id != workspace.workspace_id
+                and item.workspace_id not in plan_workspace_ids
+            ):
+                await self.discard_workspace(owner, item.workspace_id)
         plans = [
             plan
             for (plan_owner, _), plan in self._plan_by_owner.items()
@@ -452,11 +588,24 @@ class MemoryVideoAgentRepository:
         ]
         if not workspaces:
             return []
-        if len(workspaces) != 1:
-            raise AgentRuntimeRecordConflictError(
-                "VideoAgent 会话存在多个权威 workspace"
-            )
-        workspace = workspaces[0]
+        plan_workspace_ids = {
+            plan.workspace_id
+            for (plan_owner, _), plan in self._plan_by_owner.items()
+            if plan_owner == owner and plan.conversation_id == conversation_id
+        }
+        workspace = _pick_authoritative_workspace(
+            conversation_id,
+            workspaces,
+            workspace_id_of=lambda item: item.workspace_id,
+            updated_at_of=lambda item: item.updated_at,
+            plan_workspace_ids=plan_workspace_ids,
+        )
+        for item in workspaces:
+            if (
+                item.workspace_id != workspace.workspace_id
+                and item.workspace_id not in plan_workspace_ids
+            ):
+                await self.discard_workspace(owner, item.workspace_id)
         plans = [
             plan
             for (plan_owner, _), plan in self._plan_by_owner.items()
@@ -466,7 +615,7 @@ class MemoryVideoAgentRepository:
         ]
         plans.sort(
             key=lambda item: (
-                _sortable_time(item.created_at or item.updated_at),
+                _sortable_time(item.created_at),
                 item.plan_id,
             )
         )
@@ -536,9 +685,12 @@ class MemoryVideoAgentRepository:
                 raise AgentRuntimeRecordConflictError("VideoAgent plan 已属于其他用户")
             return _clone(self._plan_by_owner[(owner, plan.plan_id)])
         if not steps:
-            if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+            if plan.status not in {
+                AgentPlanStatus.WAITING_FOR_INPUT,
+                AgentPlanStatus.RUNNING,
+            }:
                 raise AgentRuntimeRecordConflictError(
-                    "VideoAgent plan 缺少 steps（仅 waiting_for_input 允许空步骤）"
+                    "VideoAgent plan 缺少 steps（仅 waiting_for_input / running 观察计划允许空步骤）"
                 )
         elif (
             {step.plan_id for step in steps} != {plan.plan_id}
@@ -1193,6 +1345,147 @@ class SQLVideoAgentRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """与 SQLPixelFlowTaskStore 共享同一 session_factory，供同库事务升级。"""
+
+        return self._session_factory
+
+    async def commit_legacy_upgrade(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        expected_conversation_revision: int,
+        workspace_id: str,
+        create_workspace: VideoWorkspace | None,
+        workspace_patch: Mapping[str, JsonValue] | None,
+        expected_workspace_revision: int | None,
+        orchestration_mode: str,
+        orchestration_version: int,
+        runtime_patch: Mapping[str, object],
+        now: datetime,
+    ) -> VideoWorkspace:
+        """同一数据库事务内写入 Workspace 并切换 conversation orchestration_mode。"""
+
+        from pixelflow.tasks.model import PixelFlowConversationRow
+        from pixelflow.tasks.store import (
+            _check_conversation_revision,
+            _patch_agent_runtime_context,
+            _require_conversation_revision,
+        )
+
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                conversation = (
+                    await session.execute(
+                        select(PixelFlowConversationRow)
+                        .where(
+                            PixelFlowConversationRow.conversation_id
+                            == conversation_id,
+                            PixelFlowConversationRow.user_id == owner,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if conversation is None:
+                    raise AgentRuntimeRecordConflictError("会话不存在，无法升级")
+                _check_conversation_revision(
+                    conversation.revision,
+                    expected_conversation_revision,
+                )
+
+                workspace_row = (
+                    await session.execute(
+                        select(PixelFlowVideoAgentWorkspaceRow)
+                        .where(
+                            PixelFlowVideoAgentWorkspaceRow.workspace_id
+                            == workspace_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+
+                if create_workspace is not None:
+                    if workspace_row is not None:
+                        if workspace_row.user_id != owner:
+                            raise AgentRuntimeRecordConflictError(
+                                "VideoAgent workspace 已属于其他用户"
+                            )
+                        stored_workspace = _workspace_from_row(workspace_row)
+                    else:
+                        stored = create_workspace.model_copy(
+                            update={
+                                "created_at": _stored_time(create_workspace.created_at),
+                                "updated_at": _stored_time(create_workspace.updated_at),
+                            }
+                        )
+                        session.add(
+                            PixelFlowVideoAgentWorkspaceRow(
+                                workspace_id=stored.workspace_id,
+                                conversation_id=stored.conversation_id,
+                                user_id=owner,
+                                revision=stored.revision,
+                                payload_json=stored.payload,
+                                created_at=stored.created_at,
+                                updated_at=stored.updated_at,
+                            )
+                        )
+                        await session.flush()
+                        workspace_row = await session.get(
+                            PixelFlowVideoAgentWorkspaceRow,
+                            stored.workspace_id,
+                        )
+                        assert workspace_row is not None
+                        stored_workspace = _workspace_from_row(workspace_row)
+                else:
+                    if workspace_row is None or workspace_row.user_id != owner:
+                        raise AgentRuntimeRecordConflictError(
+                            "VideoAgent workspace 不存在或不属于当前用户"
+                        )
+                    stored_workspace = _workspace_from_row(workspace_row)
+                    if workspace_patch:
+                        if expected_workspace_revision is None:
+                            raise AgentRuntimeRecordConflictError(
+                                "VideoAgent workspace revision 无效"
+                            )
+                        normalized_patch = _workspace_patch(workspace_patch)
+                        if _is_workspace_patch_replay(
+                            stored_workspace,
+                            normalized_patch,
+                            expected_revision=expected_workspace_revision,
+                        ):
+                            pass
+                        elif stored_workspace.revision != expected_workspace_revision:
+                            raise AgentRuntimeRecordConflictError(
+                                "VideoAgent workspace revision 已变化"
+                            )
+                        else:
+                            updated = _updated_workspace(
+                                stored_workspace,
+                                normalized_patch,
+                                now=now,
+                            )
+                            workspace_row.revision = updated.revision
+                            workspace_row.payload_json = updated.payload
+                            workspace_row.updated_at = updated.updated_at
+                            await session.flush()
+                            stored_workspace = _workspace_from_row(workspace_row)
+
+                conversation.orchestration_mode = orchestration_mode
+                conversation.orchestration_version = orchestration_version
+                conversation.context_json = _patch_agent_runtime_context(
+                    conversation.context_json,
+                    dict(runtime_patch),
+                )
+                conversation.revision = (
+                    _require_conversation_revision(conversation.revision) + 1
+                )
+                conversation.updated_at = now
+                await session.flush()
+                return stored_workspace
+
     async def create_workspace(self, user_id: str, workspace: VideoWorkspace) -> VideoWorkspace:
         owner = _owner(user_id)
         async with self._session_factory() as session:
@@ -1230,6 +1523,20 @@ class SQLVideoAgentRepository:
             row = (await session.scalars(statement)).one_or_none()
         return None if row is None else _workspace_from_row(row)
 
+    async def discard_workspace(self, user_id: str, workspace_id: str) -> None:
+        """补偿删除：升级失败时回滚新建的 Workspace。"""
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowVideoAgentWorkspaceRow, workspace_id)
+                if row is None:
+                    return
+                if row.user_id != owner:
+                    raise AgentRuntimeRecordConflictError(
+                        "VideoAgent workspace 不存在或不属于当前用户"
+                    )
+                await session.delete(row)
+
     async def load_conversation_state(
         self,
         user_id: str,
@@ -1245,48 +1552,65 @@ class SQLVideoAgentRepository:
                 PixelFlowVideoAgentWorkspaceRow.conversation_id == conversation_id,
             )
             .order_by(PixelFlowVideoAgentWorkspaceRow.workspace_id)
-            .limit(2)
         )
         async with self._session_factory() as session:
-            workspace_rows = (await session.scalars(workspace_statement)).all()
-            if not workspace_rows:
-                return None
-            if len(workspace_rows) != 1:
-                raise AgentRuntimeRecordConflictError(
-                    "VideoAgent 会话存在多个权威 workspace"
-                )
-            workspace_row = workspace_rows[0]
-            plan_statement = (
-                select(PixelFlowVideoAgentPlanRow)
-                .where(
+            async with session.begin():
+                workspace_rows = list((await session.scalars(workspace_statement)).all())
+                if not workspace_rows:
+                    return None
+                plan_ids_statement = select(PixelFlowVideoAgentPlanRow.workspace_id).where(
                     PixelFlowVideoAgentPlanRow.user_id == owner,
                     PixelFlowVideoAgentPlanRow.conversation_id == conversation_id,
-                    PixelFlowVideoAgentPlanRow.workspace_id
-                    == workspace_row.workspace_id,
                 )
-                .order_by(
-                    PixelFlowVideoAgentPlanRow.updated_at.desc(),
-                    PixelFlowVideoAgentPlanRow.created_at.desc(),
-                    PixelFlowVideoAgentPlanRow.plan_id.desc(),
+                plan_workspace_ids = {
+                    workspace_id
+                    for workspace_id in (await session.scalars(plan_ids_statement)).all()
+                    if isinstance(workspace_id, str) and workspace_id
+                }
+                workspace_row = _pick_authoritative_workspace(
+                    conversation_id,
+                    workspace_rows,
+                    workspace_id_of=lambda item: item.workspace_id,
+                    updated_at_of=lambda item: item.updated_at,
+                    plan_workspace_ids=plan_workspace_ids,
                 )
-                .limit(1)
-            )
-            plan_row = (await session.scalars(plan_statement)).one_or_none()
-            if plan_row is None:
-                return _workspace_from_row(workspace_row), None
-            step_statement = (
-                select(PixelFlowVideoAgentPlanStepRow)
-                .where(
-                    PixelFlowVideoAgentPlanStepRow.user_id == owner,
-                    PixelFlowVideoAgentPlanStepRow.plan_id == plan_row.plan_id,
+                for orphan in workspace_rows:
+                    if (
+                        orphan.workspace_id != workspace_row.workspace_id
+                        and orphan.workspace_id not in plan_workspace_ids
+                    ):
+                        await session.delete(orphan)
+                plan_statement = (
+                    select(PixelFlowVideoAgentPlanRow)
+                    .where(
+                        PixelFlowVideoAgentPlanRow.user_id == owner,
+                        PixelFlowVideoAgentPlanRow.conversation_id == conversation_id,
+                        PixelFlowVideoAgentPlanRow.workspace_id
+                        == workspace_row.workspace_id,
+                    )
+                    .order_by(
+                        PixelFlowVideoAgentPlanRow.updated_at.desc(),
+                        PixelFlowVideoAgentPlanRow.created_at.desc(),
+                        PixelFlowVideoAgentPlanRow.plan_id.desc(),
+                    )
+                    .limit(1)
                 )
-                .order_by(PixelFlowVideoAgentPlanStepRow.sequence)
-            )
-            step_rows = (await session.scalars(step_statement)).all()
-        plan = _plan_from_row(plan_row).model_copy(
-            update={"steps": tuple(_step_from_row(row) for row in step_rows)}
-        )
-        return _workspace_from_row(workspace_row), plan
+                plan_row = (await session.scalars(plan_statement)).one_or_none()
+                if plan_row is None:
+                    return _workspace_from_row(workspace_row), None
+                step_statement = (
+                    select(PixelFlowVideoAgentPlanStepRow)
+                    .where(
+                        PixelFlowVideoAgentPlanStepRow.user_id == owner,
+                        PixelFlowVideoAgentPlanStepRow.plan_id == plan_row.plan_id,
+                    )
+                    .order_by(PixelFlowVideoAgentPlanStepRow.sequence)
+                )
+                step_rows = (await session.scalars(step_statement)).all()
+                plan = _plan_from_row(plan_row).model_copy(
+                    update={"steps": tuple(_step_from_row(row) for row in step_rows)}
+                )
+                return _workspace_from_row(workspace_row), plan
 
     async def list_conversation_plans(
         self,
@@ -1301,55 +1625,74 @@ class SQLVideoAgentRepository:
                 PixelFlowVideoAgentWorkspaceRow.conversation_id == conversation_id,
             )
             .order_by(PixelFlowVideoAgentWorkspaceRow.workspace_id)
-            .limit(2)
         )
         async with self._session_factory() as session:
-            workspace_rows = (await session.scalars(workspace_statement)).all()
-            if not workspace_rows:
-                return []
-            if len(workspace_rows) != 1:
-                raise AgentRuntimeRecordConflictError(
-                    "VideoAgent 会话存在多个权威 workspace"
-                )
-            workspace_row = workspace_rows[0]
-            plan_statement = (
-                select(PixelFlowVideoAgentPlanRow)
-                .where(
+            async with session.begin():
+                workspace_rows = list((await session.scalars(workspace_statement)).all())
+                if not workspace_rows:
+                    return []
+                plan_ids_statement = select(PixelFlowVideoAgentPlanRow.workspace_id).where(
                     PixelFlowVideoAgentPlanRow.user_id == owner,
                     PixelFlowVideoAgentPlanRow.conversation_id == conversation_id,
-                    PixelFlowVideoAgentPlanRow.workspace_id
-                    == workspace_row.workspace_id,
                 )
-                .order_by(
-                    PixelFlowVideoAgentPlanRow.created_at.asc(),
-                    PixelFlowVideoAgentPlanRow.plan_id.asc(),
+                plan_workspace_ids = {
+                    workspace_id
+                    for workspace_id in (await session.scalars(plan_ids_statement)).all()
+                    if isinstance(workspace_id, str) and workspace_id
+                }
+                workspace_row = _pick_authoritative_workspace(
+                    conversation_id,
+                    workspace_rows,
+                    workspace_id_of=lambda item: item.workspace_id,
+                    updated_at_of=lambda item: item.updated_at,
+                    plan_workspace_ids=plan_workspace_ids,
                 )
-            )
-            plan_rows = (await session.scalars(plan_statement)).all()
-            if not plan_rows:
-                return []
-            plan_ids = [row.plan_id for row in plan_rows]
-            step_statement = (
-                select(PixelFlowVideoAgentPlanStepRow)
-                .where(
-                    PixelFlowVideoAgentPlanStepRow.user_id == owner,
-                    PixelFlowVideoAgentPlanStepRow.plan_id.in_(plan_ids),
+                for orphan in workspace_rows:
+                    if (
+                        orphan.workspace_id != workspace_row.workspace_id
+                        and orphan.workspace_id not in plan_workspace_ids
+                    ):
+                        await session.delete(orphan)
+                plan_statement = (
+                    select(PixelFlowVideoAgentPlanRow)
+                    .where(
+                        PixelFlowVideoAgentPlanRow.user_id == owner,
+                        PixelFlowVideoAgentPlanRow.conversation_id == conversation_id,
+                        PixelFlowVideoAgentPlanRow.workspace_id
+                        == workspace_row.workspace_id,
+                    )
+                    .order_by(
+                        PixelFlowVideoAgentPlanRow.created_at.asc(),
+                        PixelFlowVideoAgentPlanRow.plan_id.asc(),
+                    )
                 )
-                .order_by(
-                    PixelFlowVideoAgentPlanStepRow.plan_id,
-                    PixelFlowVideoAgentPlanStepRow.sequence,
+                plan_rows = list((await session.scalars(plan_statement)).all())
+                if not plan_rows:
+                    return []
+                plan_ids = [row.plan_id for row in plan_rows]
+                step_statement = (
+                    select(PixelFlowVideoAgentPlanStepRow)
+                    .where(
+                        PixelFlowVideoAgentPlanStepRow.user_id == owner,
+                        PixelFlowVideoAgentPlanStepRow.plan_id.in_(plan_ids),
+                    )
+                    .order_by(
+                        PixelFlowVideoAgentPlanStepRow.plan_id,
+                        PixelFlowVideoAgentPlanStepRow.sequence,
+                    )
                 )
-            )
-            step_rows = (await session.scalars(step_statement)).all()
-        steps_by_plan: dict[str, list[AgentPlanStep]] = {plan_id: [] for plan_id in plan_ids}
-        for row in step_rows:
-            steps_by_plan.setdefault(row.plan_id, []).append(_step_from_row(row))
-        return [
-            _plan_from_row(plan_row).model_copy(
-                update={"steps": tuple(steps_by_plan.get(plan_row.plan_id, []))}
-            )
-            for plan_row in plan_rows
-        ]
+                step_rows = (await session.scalars(step_statement)).all()
+                steps_by_plan: dict[str, list[AgentPlanStep]] = {
+                    plan_id: [] for plan_id in plan_ids
+                }
+                for row in step_rows:
+                    steps_by_plan.setdefault(row.plan_id, []).append(_step_from_row(row))
+                return [
+                    _plan_from_row(plan_row).model_copy(
+                        update={"steps": tuple(steps_by_plan.get(plan_row.plan_id, []))}
+                    )
+                    for plan_row in plan_rows
+                ]
 
     async def apply_workspace_patch(
         self,
@@ -1421,9 +1764,12 @@ class SQLVideoAgentRepository:
     ) -> AgentPlan:
         owner = _owner(user_id)
         if not steps:
-            if plan.status is not AgentPlanStatus.WAITING_FOR_INPUT:
+            if plan.status not in {
+                AgentPlanStatus.WAITING_FOR_INPUT,
+                AgentPlanStatus.RUNNING,
+            }:
                 raise AgentRuntimeRecordConflictError(
-                    "VideoAgent plan 缺少 steps（仅 waiting_for_input 允许空步骤）"
+                    "VideoAgent plan 缺少 steps（仅 waiting_for_input / running 观察计划允许空步骤）"
                 )
         elif (
             {step.plan_id for step in steps} != {plan.plan_id}

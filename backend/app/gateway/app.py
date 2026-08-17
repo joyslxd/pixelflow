@@ -33,12 +33,10 @@ from app.gateway.routers import (
     pixelflow_conversations,
     pixelflow_image,
     pixelflow_intake,
-    pixelflow_jianying_draft,
     pixelflow_planning,
     pixelflow_ppt,
     pixelflow_preferences,
     pixelflow_tasks,
-    pixelflow_video,
     runs,
     skills,
     suggestions,
@@ -115,12 +113,30 @@ def _configure_jianying_draft_service(app: FastAPI) -> None:
 
 
 def _status_service_authorization_from_env() -> str:
-    """即时读取服务状态凭据，禁止把值缓存到Gateway对象或日志。"""
+    """即时读取服务状态凭据，禁止把值缓存到Gateway对象或日志。
 
-    authorization = os.environ.get(
-        "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION",
+    优先读 PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION_FILE（每次轮询重读，
+    便于本地刷新 JWT 后无需重启网关）；否则读环境变量。
+    """
+
+    authorization = ""
+    file_path = os.environ.get(
+        "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION_FILE",
         "",
     ).strip()
+    if file_path:
+        try:
+            with open(file_path, encoding="utf-8") as handle:
+                authorization = handle.read().strip()
+        except OSError:
+            authorization = ""
+    if not authorization:
+        authorization = os.environ.get(
+            "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION",
+            "",
+        ).strip()
+    if authorization and not authorization.startswith("Bearer "):
+        authorization = f"Bearer {authorization}"
     if (
         not authorization.startswith("Bearer ")
         or len(authorization) <= len("Bearer ")
@@ -358,6 +374,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from pixelflow.video_agent.runtime import make_video_agent_runtime_assembly
         from pixelflow.video_agent.adapters.domain_jobs import (
             make_generate_scene_assets_runner,
+            make_scene_assets_workspace_progress,
         )
         from pixelflow.skills import get_image_skill
         from pixelflow.skills.base import is_quota_insufficient
@@ -411,43 +428,71 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             scene_assets_runner=make_generate_scene_assets_runner(
                 image_skill_factory=get_image_skill,
                 quota_checker=is_quota_insufficient,
+                workspace_progress=(
+                    make_scene_assets_workspace_progress(
+                        video_agent_repository,
+                        clock=live_clock.now,
+                    )
+                    if video_agent_repository is not None
+                    else None
+                ),
             ),
             lease_owner=f"gateway-video-agent:{os.getpid()}",
             clock=live_clock.now,
         )
         app.state.pixelflow_video_agent_runtime = video_agent_runtime
+        native_invoker = None
+        video_agent_entrypoint = None
         if video_agent_repository is not None:
-            from pixelflow.video_agent.planner import (
-                DeepSeekEntryPathModel,
-                DeepSeekVideoPlanningModel,
-                VideoAgentPlanner,
-            )
+            from deerflow.config.memory_config import MemoryConfig
+            from deerflow.models import create_chat_model
+            from pixelflow.video_agent.native_invoke import NativeVideoAgentInvoker
             from pixelflow.video_agent.skills import SkillCatalog
 
-            planner = None
-            if video_agent_runtime.registry is not None:
-                planner = VideoAgentPlanner(
-                    model=DeepSeekVideoPlanningModel(app_config=startup_config),
+            skill_catalog = SkillCatalog()
+            if (
+                video_agent_runtime.registry is not None
+                and video_agent_runtime.executor is not None
+            ):
+                native_invoker = NativeVideoAgentInvoker(
+                    model=create_chat_model(
+                        thinking_enabled=True,
+                        app_config=startup_config,
+                    ),
                     registry=video_agent_runtime.registry,
-                    skill_catalog=SkillCatalog(),
+                    executor=video_agent_runtime.executor,
+                    video_repository=video_agent_repository,
+                    runtime_repository=agent_runtime_repository,
+                    skill_catalog=skill_catalog,
+                    checkpointer=getattr(app.state, "checkpointer", None),
+                    app_config=startup_config,
+                    memory_config=getattr(startup_config, "memory", None)
+                    or MemoryConfig(enabled=True),
+                )
+                video_agent_entrypoint = VideoAgentEntrypoint(
+                    runtime_repository=agent_runtime_repository,
+                    video_repository=video_agent_repository,
+                    native_invoker=native_invoker,
                     clock=live_clock.now,
                 )
-            video_agent_entrypoint = VideoAgentEntrypoint(
-                runtime_repository=agent_runtime_repository,
-                video_repository=video_agent_repository,
-                planner=planner,
-                entry_path_model=DeepSeekEntryPathModel(app_config=startup_config),
-                clock=live_clock.now,
-            )
         video_agent_runner = (
             VideoAgentRunner(
                 repository=video_agent_repository,
-                executor=video_agent_runtime.executor,
+                native_invoker=native_invoker,
             )
-            if video_agent_repository is not None
-            and video_agent_runtime.executor is not None
+            if video_agent_repository is not None and native_invoker is not None
             else None
         )
+        native_resume_handler = None
+        if native_invoker is not None and video_agent_repository is not None:
+            from pixelflow.video_agent.native_operation_resume import (
+                NativeOperationResumeHandler as _NativeOperationResumeHandler,
+            )
+
+            native_resume_handler = _NativeOperationResumeHandler(
+                repository=video_agent_repository,
+                native_invoker=native_invoker,
+            )
         video_agent_operation_recovery = (
             OperationRecoveryRuntime(
                 agent_runtime_repository,
@@ -455,6 +500,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 resumer=VideoAgentOperationResumer(
                     repository=video_agent_repository,
                     executor=video_agent_runtime.executor,
+                    native_resume=native_resume_handler,
                 ),
                 quota_resumer=VideoAgentQuotaResumer(
                     repository=video_agent_repository,
@@ -735,11 +781,7 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
     # PixelFlow 智能 PPT 生成 API：/agent/flows/ppt。
     app.include_router(pixelflow_ppt.router)
 
-    # PixelFlow 视频生成和分析 API：/agent/flows/video。
-    app.include_router(pixelflow_video.router)
-
-    # PixelFlow 剪映草稿 API：/agent/flows/video/jianying-draft。
-    app.include_router(pixelflow_jianying_draft.router)
+    # P0-5：旧 /agent/flows/video* 与剪映 Job HTTP 路由模块已物理删除。
 
     # PixelFlow 对话历史 API：/agent/conversations。
     app.include_router(pixelflow_conversations.router)

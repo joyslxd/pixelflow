@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
@@ -60,7 +61,33 @@ class SceneMutablePatch(BaseModel):
     duration_sec: float | None = Field(default=None, gt=0, le=15)
     duration_ms: int | None = Field(default=None, ge=1_000, le=15_000)
     title: str | None = Field(default=None, max_length=256)
+    # FE 分镜面板编辑镜头描述文本；落库时同步到 shot_description.text 与 prompt。
+    # 允许模型误传 {text, mentions} 对象，只取 text。
+    shot_description: str | None = Field(default=None, max_length=10_000)
+    # FE「参考素材：character-1、scene-x」；写入 reference_asset_ids，并尽量对齐 mentions。
+    reference_asset_ids: tuple[str, ...] | None = Field(default=None, max_length=12)
     asset_refs: tuple[str, ...] | None = Field(default=None, max_length=12)
+
+    @field_validator("shot_description", mode="before")
+    @classmethod
+    def coerce_shot_description(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            return str(text) if text is not None else ""
+        return value
+
+    @field_validator("reference_asset_ids", mode="before")
+    @classmethod
+    def coerce_reference_asset_ids(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            parts = [part.strip() for part in re.split(r"[、,，\s]+", value) if part.strip()]
+            return tuple(parts[:12])
+        if isinstance(value, (list, tuple)):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            return tuple(parts[:12])
+        return value
 
     @model_validator(mode="after")
     def validate_patch(self) -> SceneMutablePatch:
@@ -68,6 +95,11 @@ class SceneMutablePatch(BaseModel):
             raise ValueError("镜头补丁不能为空")
         if any(getattr(self, field_name) is None for field_name in self.model_fields_set):
             raise ValueError("镜头补丁不能把字段写为 null")
+        if self.reference_asset_ids is not None:
+            if any(not item.strip() for item in self.reference_asset_ids):
+                raise ValueError("reference_asset_ids 不能包含空标识")
+            if len(set(self.reference_asset_ids)) != len(self.reference_asset_ids):
+                raise ValueError("reference_asset_ids 不能重复")
         if self.asset_refs is not None:
             for value in self.asset_refs:
                 if not _is_artifact_ref(value):
@@ -256,6 +288,70 @@ class PatchSceneTool:
             patch["duration_ms"] = int(round(float(patch["duration_sec"]) * 1000))
         if "narration" in patch and "narration_text" not in patch:
             patch["narration_text"] = patch["narration"]
+        # 镜头描述：写入嵌套 shot_description，并补 prompt 供成片生成读取。
+        if "shot_description" in patch:
+            shot_text = str(patch.pop("shot_description") or "").strip()
+            existing_shot = target.get("shot_description")
+            if isinstance(existing_shot, Mapping):
+                patch["shot_description"] = {
+                    **dict(existing_shot),
+                    "text": shot_text,
+                }
+            else:
+                patch["shot_description"] = {"text": shot_text, "mentions": []}
+            if "prompt" not in patch:
+                patch["prompt"] = shot_text
+        # 参考素材 ID：写入镜头，并按已有 mentions / 全局资产尽量对齐 chip。
+        if "reference_asset_ids" in patch:
+            raw_ids = patch.get("reference_asset_ids")
+            next_ids = [
+                str(item).strip()
+                for item in (raw_ids if isinstance(raw_ids, (list, tuple)) else [])
+                if str(item).strip()
+            ][:12]
+            patch["reference_asset_ids"] = next_ids
+            shot_obj = patch.get("shot_description")
+            if not isinstance(shot_obj, dict):
+                existing_shot = target.get("shot_description")
+                shot_obj = dict(existing_shot) if isinstance(existing_shot, Mapping) else {"text": "", "mentions": []}
+                patch["shot_description"] = shot_obj
+            existing_mentions = shot_obj.get("mentions")
+            mention_by_id: dict[str, dict[str, object]] = {}
+            if isinstance(existing_mentions, list):
+                for item in existing_mentions:
+                    if not isinstance(item, Mapping):
+                        continue
+                    asset_id = str(item.get("asset_id") or "").strip()
+                    if asset_id:
+                        mention_by_id[asset_id] = dict(item)
+            global_assets = payload.get("global_assets")
+            name_by_id = _global_asset_names(global_assets)
+            image_by_id = _global_asset_image_urls(global_assets)
+            next_mentions: list[dict[str, object]] = []
+            for asset_id in next_ids:
+                if asset_id in mention_by_id:
+                    mention = dict(mention_by_id[asset_id])
+                    if not str(mention.get("image_url") or mention.get("url") or "").strip():
+                        image_url = image_by_id.get(asset_id)
+                        if image_url:
+                            mention["image_url"] = image_url
+                    next_mentions.append(mention)
+                    continue
+                mention: dict[str, object] = {
+                    "asset_id": asset_id,
+                    "name": name_by_id.get(asset_id) or asset_id,
+                }
+                image_url = image_by_id.get(asset_id)
+                if image_url:
+                    mention["image_url"] = image_url
+                next_mentions.append(mention)
+            shot_obj["mentions"] = next_mentions
+            # 同步 image_urls，供 generate_scenes / 旧路径直接读取。
+            patch["image_urls"] = [
+                str(item.get("image_url") or item.get("url") or "").strip()
+                for item in next_mentions
+                if str(item.get("image_url") or item.get("url") or "").strip().lower().startswith("https://")
+            ][:9]
         updated = {**target, **patch, "edit_status": "待重新生成"}
         next_scenes = [
             updated if scene.get("scene_id") == request.scene_id else scene
@@ -281,6 +377,7 @@ class PatchSceneTool:
                 next_scenes,
                 dirty_scene_ids=dirty,
                 qc=qc,
+                only_scene_ids=(request.scene_id,),
             ),
         )
 
@@ -348,7 +445,11 @@ class ReplaceProjectAssetsTool:
             tool_name=self.spec.name,
             public_summary=f"已替换素材引用，影响 {len(affected)} 个镜头",
             workspace_patch={
-                **_scenes_workspace_patch(next_scenes, dirty_scene_ids=dirty),
+                **_scenes_workspace_patch(
+                    next_scenes,
+                    dirty_scene_ids=dirty,
+                    only_scene_ids=affected,
+                ),
                 "asset_replacements": audit,
             },
             artifact_refs=tuple(replacements.values()),
@@ -365,7 +466,16 @@ class GenerateScenesTool:
         confirmation_required=True,
         idempotency_mode=VideoToolIdempotencyMode.OPERATION,
         recovery_mode=VideoToolRecoveryMode.OPERATION,
-        workspace_mutations=("scenes", "scene_packages", "dirty_scene_ids", "assets"),
+        # 用途：成功/轮询路径会写 quota_interrupt（含显式清空）；缺声明会撞 Registry 白名单。
+        # scene_video_progress：启动时写入 0/N，供前端立刻切到分镜视频进度板。
+        workspace_mutations=(
+            "scenes",
+            "scene_packages",
+            "dirty_scene_ids",
+            "assets",
+            "quota_interrupt",
+            "scene_video_progress",
+        ),
     )
 
     def __init__(
@@ -505,6 +615,7 @@ class GenerateScenesTool:
         workspace_patch = _scenes_workspace_patch(
             next_scenes,
             dirty_scene_ids=remaining_dirty,
+            only_scene_ids=scene_ids,
         )
         start_paused_jobs = [
             job
@@ -537,6 +648,54 @@ class GenerateScenesTool:
                 ],
                 *generated_assets,
             ]
+        total_jobs = sum(len(jobs) for jobs in jobs_by_scene.values())
+        succeeded_jobs = sum(
+            1
+            for jobs in jobs_by_scene.values()
+            for job in jobs
+            if job.status == "succeeded"
+        )
+        # 并发生成：进度按 workspace 全部 generation_jobs 汇总，避免后启的单镜把 total 覆盖成 1。
+        progress_completed = 0
+        progress_total = 0
+        for scene in next_scenes:
+            scene_jobs = _record_list(scene.get("generation_jobs"))
+            if not scene_jobs:
+                variants = _record_list(scene.get("variants"))
+                if any(
+                    isinstance(item, Mapping) and str(item.get("video_url") or "").strip()
+                    for item in variants
+                ):
+                    progress_total += 1
+                    progress_completed += 1
+                continue
+            for job in scene_jobs:
+                progress_total += 1
+                status = str(job.get("status") or "").strip().casefold()
+                if status and status not in {"polling", "start_paused_quota", "created"}:
+                    progress_completed += 1
+        if progress_total <= 0:
+            progress_total = total_jobs
+            progress_completed = succeeded_jobs
+        # 单镜重生时写入 scene_id，前端可立刻给该镜盖「生成中」蒙版（旧成片仍在）。
+        progress_scene_id = (
+            str(scene_ids[0]).strip() if len(scene_ids) == 1 else None
+        ) or None
+        progress_scene_index = None
+        if progress_scene_id:
+            for scene in selected:
+                if str(scene.get("scene_id") or "").strip() == progress_scene_id:
+                    raw_index = scene.get("scene_index")
+                    if isinstance(raw_index, int) and not isinstance(raw_index, bool):
+                        progress_scene_index = raw_index
+                    break
+        workspace_patch["scene_video_progress"] = {
+            "completed": progress_completed,
+            "total": progress_total,
+            "scene_id": progress_scene_id,
+            "scene_index": progress_scene_index,
+            "ok": True,
+        }
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"已为 {len(selected)} 个镜头启动 {request.variant_count} 版定向生成",
@@ -654,8 +813,74 @@ class ReviewGeneratedScenesTool:
                 next_scenes,
                 dirty_scene_ids=dirty,
                 qc=qc,
+                only_scene_ids=(request.scene_id,),
             ),
         )
+
+
+def _global_asset_names(value: object) -> dict[str, str]:
+    """从 global_assets 抽出 asset_id → 展示名，供 patch mentions 对齐。"""
+
+    if not isinstance(value, Mapping):
+        return {}
+    names: dict[str, str] = {}
+    for key in ("characters", "scenes", "props"):
+        items = value.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+            if not asset_id:
+                continue
+            name = str(item.get("name") or "").strip() or asset_id
+            names[asset_id] = name
+    return names
+
+
+def _global_asset_image_urls(value: object) -> dict[str, str]:
+    """从 global_assets 抽出 asset_id → HTTPS 图片 URL。"""
+
+    if not isinstance(value, Mapping):
+        return {}
+    urls: dict[str, str] = {}
+    for key in ("characters", "scenes", "props"):
+        items = value.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+            if not asset_id or asset_id in urls:
+                continue
+            url = _first_https_asset_url(item)
+            if url:
+                urls[asset_id] = url
+    return urls
+
+
+def _first_https_asset_url(item: Mapping[str, object]) -> str | None:
+    for key in ("image_url", "url", "generation_reference_url"):
+        raw = item.get(key)
+        if isinstance(raw, str) and raw.strip().lower().startswith("https://"):
+            return raw.strip()
+    for key in ("images", "three_view_images", "image_urls"):
+        values = item.get(key)
+        if isinstance(values, str) and values.strip().lower().startswith("https://"):
+            return values.strip()
+        if not isinstance(values, (list, tuple)):
+            continue
+        for entry in values:
+            if isinstance(entry, Mapping):
+                for nested in ("url", "image_url", "src"):
+                    raw = entry.get(nested)
+                    if isinstance(raw, str) and raw.strip().lower().startswith("https://"):
+                        return raw.strip()
+            elif isinstance(entry, str) and entry.strip().lower().startswith("https://"):
+                return entry.strip()
+    return None
 
 
 def _validate(model: type[BaseModel], arguments: Mapping[str, object], message: str):
@@ -677,12 +902,30 @@ def _scenes_workspace_patch(
     *,
     dirty_scene_ids: list[str],
     qc: dict[str, dict[str, JsonValue]] | None = None,
+    only_scene_ids: Sequence[str] | None = None,
+    replace_all: bool = False,
 ) -> dict[str, JsonValue]:
+    """构造镜头补丁。
+
+    only_scene_ids：只写入这些镜，配合 repository 按 id 合并，避免并发生成整表覆盖。
+    replace_all：prepare 等全量重建时整表替换。
+    """
+
+    selected = scenes
+    if only_scene_ids is not None:
+        allowed = {str(item).strip() for item in only_scene_ids if str(item).strip()}
+        selected = [
+            scene
+            for scene in scenes
+            if str(scene.get("scene_id") or "").strip() in allowed
+        ]
     patch: dict[str, JsonValue] = {
-        "scenes": scenes,
-        "scene_packages": scenes,
+        "scenes": selected,
+        "scene_packages": selected,
         "dirty_scene_ids": dirty_scene_ids,
     }
+    if replace_all:
+        patch["scenes_replace"] = True
     if qc is not None:
         patch["qc"] = qc
     return patch

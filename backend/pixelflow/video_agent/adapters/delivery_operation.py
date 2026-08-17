@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from pydantic import JsonValue, ValidationError
@@ -14,6 +15,7 @@ from pixelflow.agent_runtime.jobs import (
     OperationStartCoordinator,
     OperationStartQuotaPausedError,
     ProviderJobAdapter,
+    ProviderJobCallError,
     build_operation_request,
 )
 from pixelflow.agent_runtime.persistence.repositories import AgentRuntimeRepository
@@ -31,6 +33,12 @@ from pixelflow.video_agent.tools.registry import (
     VideoToolContext,
     VideoToolExecutionError,
 )
+
+logger = logging.getLogger(__name__)
+
+# content-app `/api/video/merge` 为同步终态；14 镜常需数分钟。
+# start 租约必须覆盖整段 HTTP，否则合并成功后 finalize 会因「租约无效」丢结果。
+_DEFAULT_DELIVERY_START_LEASE = timedelta(hours=1)
 
 _TERMINAL_FAILURES = frozenset(
     {
@@ -54,6 +62,7 @@ class M06DeliveryOperationPort:
         authorization_provider: Callable[[VideoToolContext], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         job_id_factory: Callable[[], str] | None = None,
+        start_lease_duration: timedelta | None = None,
     ) -> None:
         if not isinstance(merge_adapter, ProviderJobAdapter):
             raise TypeError("merge_adapter必须是ProviderJobAdapter")
@@ -81,6 +90,11 @@ class M06DeliveryOperationPort:
         self._lease_owner = normalized_owner
         self._clock = clock or (lambda: datetime.now(UTC))
         self._job_id_factory = job_id_factory
+        self._start_lease_duration = (
+            start_lease_duration
+            if start_lease_duration is not None
+            else _DEFAULT_DELIVERY_START_LEASE
+        )
 
     async def start_delivery(
         self,
@@ -112,6 +126,7 @@ class M06DeliveryOperationPort:
             conversation_id=context.workspace.conversation_id,
             clock=self._clock,
             job_id_factory=self._job_id_factory,
+            lease_duration=self._start_lease_duration,
         )
         try:
             operation = await coordinator.start(
@@ -129,7 +144,25 @@ class M06DeliveryOperationPort:
                 status="start_paused_quota",
             )
         except OperationConflictError as exc:
-            raise VideoToolExecutionError("视频交付Operation启动失败") from exc
+            detail = str(exc).strip()[:200] or "未知冲突"
+            logger.warning(
+                "delivery operation start conflict output_type=%s detail=%s",
+                output_type,
+                detail,
+            )
+            raise VideoToolExecutionError(
+                f"视频交付Operation启动失败：{detail}"
+            ) from exc
+        except ProviderJobCallError as exc:
+            logger.warning(
+                "delivery provider call failed output_type=%s",
+                output_type,
+                exc_info=True,
+            )
+            raise VideoToolExecutionError(
+                "视频交付合并连接中断：成片可能已在服务端生成，请稍后重试；"
+                "若约5分钟必断，需运维将 /api/video/merge 的 proxy_read_timeout 调至≥3600秒"
+            ) from exc
 
         if operation.status in {
             ExternalJobStatus.CREATED,
@@ -140,8 +173,15 @@ class M06DeliveryOperationPort:
                 output_type=output_type,
                 status="polling",
             )
+        if operation.status is ExternalJobStatus.TIMEOUT:
+            raise VideoToolExecutionError(
+                "视频交付合并超时：网关可能在约5分钟切断长连接，成片或已在服务端生成，请重试；"
+                "持续失败时需将 /api/video/merge 的 proxy_read_timeout 调至≥3600秒"
+            )
         if operation.status in _TERMINAL_FAILURES:
-            raise VideoToolExecutionError("视频交付Operation执行失败")
+            raise VideoToolExecutionError(
+                "视频交付合并失败，请稍后重试或检查分镜视频后重新发起"
+            )
         if operation.status is not ExternalJobStatus.SUCCEEDED:
             raise VideoToolExecutionError("视频交付Operation状态不受支持")
         return await self._completed_job(
@@ -183,6 +223,7 @@ class M06DeliveryOperationPort:
                     "output_type": output_type,
                     "status": "succeeded",
                     "artifact_ref": f"artifact:video-delivery-{artifact_digest}",
+                    "delivery_url": delivery_url,
                 }
             )
         except ValidationError as exc:
@@ -203,10 +244,26 @@ def _provider_request(
     if output_type == "mp4":
         video_params = context.workspace.payload.get("video_params")
         if not isinstance(video_params, Mapping):
-            raise VideoToolExecutionError("视频合并缺少视频参数")
-        model = str(video_params.get("model") or "").strip()
-        size = str(video_params.get("size") or "").strip()
+            video_params = {}
+        contract = context.workspace.payload.get("creation_contract")
+        contract_map = contract if isinstance(contract, Mapping) else {}
+        model = str(
+            video_params.get("model")
+            or video_params.get("video_model")
+            or contract_map.get("video_model")
+            or ""
+        ).strip()
+        size = str(
+            video_params.get("size")
+            or video_params.get("video_size")
+            or contract_map.get("video_size")
+            or ""
+        ).strip()
         duration = video_params.get("duration_sec")
+        if duration is None:
+            duration = video_params.get("video_duration_sec")
+        if duration is None:
+            duration = contract_map.get("video_duration_sec")
         if (
             not model
             or not size

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -12,6 +13,8 @@ import httpx
 from pydantic import JsonValue
 
 from pixelflow.agent_runtime.jobs import ExistingJobService
+
+logger = logging.getLogger(__name__)
 
 ProviderRequestBuilder = Callable[
     [Mapping[str, JsonValue]],
@@ -256,22 +259,64 @@ class ContentAppMergeJobService(ExistingJobService):
         duration = request.get("duration")
         if isinstance(duration, bool) or not isinstance(duration, (int, float)):
             raise ContentAppTaskContractError("视频合并时长无效")
-        response = await self._client.post(
-            self._merge_url,
-            json={"videoUrls": video_urls},
-            headers={
-                "Authorization": normalized_authorization,
-                "Idempotency-Key": normalized_key,
-                "modelType": model,
-                "billType": "3",
-                "duration": str(duration),
-                "apiModelParamObj": '{"size":"' + size + '"}',
-            },
-            timeout=self._request_timeout_seconds,
-        )
-        response.raise_for_status()
+        try:
+            response = await self._client.post(
+                self._merge_url,
+                json={"videoUrls": video_urls},
+                headers={
+                    "Authorization": normalized_authorization,
+                    "Idempotency-Key": normalized_key,
+                    "modelType": model,
+                    "billType": "3",
+                    "duration": str(duration),
+                    "apiModelParamObj": '{"size":"' + size + '"}',
+                },
+                timeout=self._request_timeout_seconds,
+            )
+        except httpx.TimeoutException:
+            # 读超时：本进程等待上限到点。成片可能已在 content-app 侧生成。
+            logger.warning(
+                "content-app video merge read timeout seconds=%s",
+                self._request_timeout_seconds,
+            )
+            return {
+                "ok": False,
+                "job_id": provider_job_id,
+                "status": "timeout",
+                "result": None,
+            }
+        except httpx.TransportError as exc:
+            # 网关 proxy_read_timeout（常见 300s）会在长合并中途掐断连接，
+            # 而 content-app 异步任务仍可能继续 ffmpeg 并上传 TOS。
+            logger.warning(
+                "content-app video merge transport failed error_type=%s",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "job_id": provider_job_id,
+                "status": "timeout",
+                "result": None,
+            }
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "content-app video merge http failed status_code=%s",
+                exc.response.status_code if exc.response is not None else None,
+            )
+            return {
+                "ok": False,
+                "job_id": provider_job_id,
+                "status": "failed",
+                "result": None,
+            }
         payload = _response_mapping(response)
         if payload.get("success") is False:
+            logger.warning(
+                "content-app video merge business failed status_code=%s",
+                response.status_code,
+            )
             return {
                 "ok": False,
                 "job_id": provider_job_id,

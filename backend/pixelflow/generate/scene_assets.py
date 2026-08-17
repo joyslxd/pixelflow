@@ -745,7 +745,8 @@ async def generate_scene_assets(
                     _asset_context(prop_image, asset_type="prop_image", scene_packages=enriched, scene_id=scene_id, scene_index=scene_index),
                 )
 
-    if target_assets is not None:
+    # 空列表表示「全量生成」（Tool 默认 target_assets=()）；仅非空列表才按失败重试过滤。
+    if target_assets:
         requested_targets: dict[tuple[str, str], dict[str, Any]] = {}
         for target_asset in target_assets:
             if not isinstance(target_asset, dict):

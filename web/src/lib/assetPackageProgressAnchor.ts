@@ -1,6 +1,7 @@
 /** 资产包进度卡锚点解析：应挂在脚本确认后的回执消息下方，不能回落到首条用户消息。 */
 
-const ASSET_PACKAGE_NOTICE_RE = /正在生成视频资产包|已确认脚本方案，正在生成|场景包结构已就绪/;
+const ASSET_PACKAGE_NOTICE_RE =
+  /正在生成视频资产包|已确认脚本方案，正在生成|场景包结构已就绪|视频场景包结构已就绪|视频场景包已就绪|已根据脚本预览/;
 
 export function isAssetPackageNoticeContent(content: string | null | undefined): boolean {
   return ASSET_PACKAGE_NOTICE_RE.test(String(content || ""));
@@ -25,8 +26,15 @@ export function isScriptPlanConfirmMessage(message: {
 export function resolveAssetPackageProgressAnchorId(input: {
   preferredAnchorId?: string | null;
   messages: Array<{ id: string; role: string; content?: string; artifact?: unknown }>;
+  /** 进度仍在执行时，挂到最近用户回复后，避免卡在对话中段空转。 */
+  preferLatestUserWhenActive?: boolean;
 }): string {
   const messages = input.messages || [];
+  if (input.preferLatestUserWhenActive) {
+    const latestUser = [...messages].reverse().find((message) => message.role === "user");
+    if (latestUser) return latestUser.id;
+  }
+
   const preferred = String(input.preferredAnchorId || "").trim();
   if (preferred && messages.some((message) => message.id === preferred)) {
     return preferred;

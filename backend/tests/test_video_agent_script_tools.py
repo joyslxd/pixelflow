@@ -62,14 +62,41 @@ def test_split_import_structure_markdown_separates_shots() -> None:
         _split_import_structure_markdown,
     )
 
-    settings, shots = _split_import_structure_markdown(
+    staged = _split_import_structure_markdown(
         "## 角色设定\nA\n\n## 场景设定\nB\n\n## 道具与产品设定\nC\n\n"
         "## 分镜提示词\n1. 0-3秒\n"
     )
-    assert "角色设定" in settings
-    assert "道具" in settings
-    assert shots.startswith("## 分镜提示词")
-    assert "0-3秒" in shots
+    assert "角色设定" in staged["characters"]
+    assert "场景设定" in staged["characters"]
+    assert "道具" in staged["characters"]
+    assert staged["outline"].startswith("## 分镜提示词")
+    assert "0-3秒" in staged["outline"]
+
+
+def test_split_import_structure_markdown_multi_stage_headings() -> None:
+    from pixelflow.video_agent.tools.script_skill_pipeline import (
+        _split_import_structure_markdown,
+    )
+
+    staged = _split_import_structure_markdown(
+        "## 角色/场景/道具设定\n### 安然\n\n"
+        "## 分镜大纲\n## 分镜提示词\n1. 0-3秒\n\n"
+        "## 剧本正文\n镜头1\n\n"
+        "## 五维自检\n钩子不足\n\n"
+        "## 合规检查\n无违规\n\n"
+        "## 导出终稿\n完整终稿\n"
+    )
+    assert set(staged) >= {
+        "characters",
+        "outline",
+        "episode",
+        "review",
+        "compliance",
+        "export",
+    }
+    assert "安然" in staged["characters"]
+    assert "钩子不足" in staged["review"]
+    assert "完整终稿" in staged["export"]
 
 
 @pytest.mark.asyncio
@@ -156,8 +183,8 @@ async def test_import_script_creates_ready_version_without_plan_review(
     pipeline = result.workspace_patch["script_pipeline"]
     assert pipeline["episode"]["source"] == "user_complete_script"
     assert "角色设定" in pipeline["characters"]["content"]
+    assert "已拆解并优化分阶段产物" in result.public_summary
     assert "分镜提示词" in pipeline["outline"]["content"]
-    assert "已拆解角色/场景/道具与分镜提示词" in result.public_summary
 
 
 @pytest.mark.asyncio
@@ -300,6 +327,71 @@ async def test_import_script_replay_reuses_same_version(
 
     assert replay.workspace_patch == {}
     assert replay.artifact_refs == first.artifact_refs
+
+
+@pytest.mark.asyncio
+async def test_import_script_force_reextract_skips_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同正文「重新拆解」必须重跑结构拆解，不得静默复用旧 pipeline。"""
+
+    from pixelflow.video_agent.production_fields import ProductionFieldsAnalysis
+
+    calls = {"structure": 0}
+
+    async def _fake_analysis(*, text: str, **_kwargs):  # noqa: ANN001, ARG001
+        return ProductionFieldsAnalysis(
+            duration_sec=15,
+            missing=(),
+            has_aspect_ratio=True,
+            has_ending_cta=True,
+        )
+
+    async def _fake_structure(**_kwargs):  # noqa: ANN003
+        calls["structure"] += 1
+        return {
+            "characters": {
+                "stage": "characters",
+                "title": "角色/场景/道具设定 /characters",
+                "content": f"## 角色设定\n安然-v{calls['structure']}",
+                "artifact_ref": f"artifact:video-script-characters-{calls['structure']}",
+                "change_summary": "拆解",
+            },
+            "episode": {
+                "stage": "episode",
+                "title": "生成剧本正文 /episode",
+                "content": (
+                    f"## 剧本正文\n| 时间 | 景别 | 运镜 | 画面 | 旁白/对白 | 屏幕文案 | 行动引导 |\n"
+                    f"| 0-10秒 | 近景 | 推 | @安然 v{calls['structure']} | 无 | 无 | 无 |"
+                ),
+                "artifact_ref": f"artifact:video-script-episode-{calls['structure']}",
+                "change_summary": "拆解",
+            },
+        }
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.tools.script.analyze_production_fields_with_llm",
+        _fake_analysis,
+    )
+    monkeypatch.setattr(
+        "pixelflow.video_agent.tools.script_skill_pipeline.extract_imported_script_structure",
+        _fake_structure,
+    )
+    tool = ImportScriptTool()
+    first = await tool.execute(_context(), {"markdown": MATURE_SCRIPT})
+    assert calls["structure"] == 1
+    forced = await tool.execute(
+        _context(first.workspace_patch),
+        {"markdown": MATURE_SCRIPT, "force_reextract": True},
+    )
+    assert calls["structure"] == 2
+    assert "重新拆解" in forced.public_summary
+    pipeline = forced.workspace_patch.get("script_pipeline")
+    assert isinstance(pipeline, dict)
+    episode = pipeline.get("episode")
+    assert isinstance(episode, dict)
+    assert "v2" in str(episode.get("content") or "")
+    assert "安然-v2" in str(pipeline.get("characters", {}).get("content") or "")
 
 
 class FakeVideoDomainAdapter:

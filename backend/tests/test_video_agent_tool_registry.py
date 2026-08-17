@@ -146,7 +146,10 @@ async def test_inspect_workspace_returns_compact_evidence_without_hidden_values(
         {},
     )
 
-    assert result.public_summary == "项目资料：脚本 1 份，参考视频 1 个，素材 2 项，分镜 1 个，输出 1 项"
+    assert result.public_summary == (
+        "项目资料：脚本 1 份，参考视频 1 个，素材 2 项，分镜 1 个，输出 1 项；"
+        "分镜视频：成片就绪 0、轮询中 0、失败 0、未启动 1"
+    )
     assert result.artifact_refs == ("artifact:script-1", "artifact:scene-1")
     serialized = result.model_dump_json()
     assert "secret" not in serialized

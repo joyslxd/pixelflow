@@ -66,8 +66,35 @@ test("reconcile clears stale generating spinner when no active job", () => {
   const next = reconcileStaleSceneAssetUiFlags(messages, { hasActiveAssetJob: false });
   assert.equal(next[0].artifact.sceneAssetsGenerating, false);
   assert.equal(next[0].artifact.sceneAssetsAwaitingModel, true);
-  // 历史模型卡保持已确认，避免对话记录被原地翻牌
-  assert.equal(next[1].artifact.sceneAssetModelConfirmed, true);
+  // 无图时必须解锁模型卡，否则热重载后「已确认」永久挡住再生图。
+  assert.equal(next[1].artifact.sceneAssetModelConfirmed, false);
+});
+
+test("reconcile unlocks confirmed model card when packages already idle without images", () => {
+  const messages = [
+    {
+      id: "pkg",
+      artifact: {
+        type: "video_scene_packages",
+        sceneAssetsGenerating: false,
+        sceneAssetsAwaitingModel: false,
+        videoScenePackages: {
+          global_assets: { characters: [{ asset_id: "c1" }] },
+          scene_packages: [{ scene_id: "s1", image_urls: [] }],
+        },
+      },
+    },
+    {
+      id: "model",
+      artifact: {
+        type: "scene_asset_model_options",
+        sceneAssetModelConfirmed: true,
+      },
+    },
+  ];
+  const next = reconcileStaleSceneAssetUiFlags(messages, { hasActiveAssetJob: false });
+  assert.equal(next[0].artifact.sceneAssetsAwaitingModel, true);
+  assert.equal(next[1].artifact.sceneAssetModelConfirmed, false);
 });
 
 test("media result message id is stable for poll dedupe", () => {

@@ -193,6 +193,40 @@ test("Snapshot 原子恢复 VideoAgent workspace revision、计划和步骤", ()
   assert.equal(projection.videoAgentConfirmation.submittable, false);
 });
 
+test("原生 confirmation 无 Plan waiting step 时 Snapshot 仍可投影", () => {
+  const projection = projectSupervisorSnapshot(snapshot({
+    videoAgent: {
+      workspace: {
+        workspace_id: "workspace-video-1",
+        conversation_id: "conv-1",
+        revision: 54,
+        payload: { scenes: [], assets: [] },
+      },
+      plan: {
+        plan_id: "plan-native-merge",
+        workspace_id: "workspace-video-1",
+        status: "completed",
+        public_goal: "合并视频吧",
+      },
+      steps: [],
+      confirmation: {
+        confirmation_id: "video_confirmation_native_1",
+        plan_id: "plan-native-merge",
+        step_id: "call_compose_1",
+        title: "合并分镜视频为成片",
+        cost_summary: "将生成视频交付产物，执行后可能产生合成、存储或导出费用。",
+        affected_scene_ids: [],
+        submittable: true,
+        unavailable_reason: null,
+      },
+    },
+  }), "conv-1");
+
+  assert.equal(projection.videoAgentConfirmation.confirmationId, "video_confirmation_native_1");
+  assert.equal(projection.videoAgentConfirmation.stepId, "call_compose_1");
+  assert.equal(projection.videoAgentPlan.status, "completed");
+});
+
 test("V2.1 batch D Snapshot 有 VideoAgent 时清空 Workflow 影子状态", () => {
   const projection = projectSupervisorSnapshot(snapshot({
     videoAgent: {

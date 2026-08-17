@@ -1030,8 +1030,8 @@ def _image_size_from_params(params: dict[str, Any], model: str | None) -> str:
         return str(legacy_size)
     defaults = {
         "gpt-image-2": "4K",
-        "seeddream-4.5": "2K",
-        "seeddream-5.0": "2K",
+        "seedream-4.5": "2K",
+        "seedream-5.0": "2K",
         "nanobanana-pro": "1080p",
         "nano-banana": "1080p",
     }

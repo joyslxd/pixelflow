@@ -42,6 +42,15 @@ export interface VideoAgentSceneEvidence {
   variants: VideoAgentSceneVariant[];
   editStatus: string | null;
   regeneratedAt: string | null;
+  /** 本镜 generation_jobs 状态摘要，供分镜视频进度板恢复。 */
+  generationJobStatuses: string[];
+  /** 本镜失败 job 的公开错误，供「分镜视频」卡展示失败原因。 */
+  generationFailures: Array<{
+    jobId: string | null;
+    status: string;
+    reasonCode: string | null;
+    error: string;
+  }>;
 }
 
 export interface VideoAgentWorkspaceProjection {
@@ -58,6 +67,32 @@ export interface VideoAgentWorkspaceProjection {
   globalAssets: Record<string, unknown> | null;
   creationContract: Record<string, unknown> | null;
   targetDurationMs: number | null;
+  /** 脚本方案是否已确认（用于刷新后恢复资产包进度卡）。 */
+  scriptPlanConfirmed: boolean;
+  /** Workspace 内场景包 Job 摘要；刷新后判断 prepare 是否仍在跑。 */
+  scenePackageJob: {
+    jobId: string;
+    status: string;
+  } | null;
+  /** 参考图生成增量进度（completed/total），供分镜与执行规划逐步刷新。 */
+  sceneAssetProgress: {
+    completed: number;
+    total: number;
+    assetId: string | null;
+    assetName: string | null;
+    assetType: string | null;
+    ok: boolean | null;
+  } | null;
+  /** 分镜视频生成增量进度（completed/total）。 */
+  sceneVideoProgress: {
+    completed: number;
+    total: number;
+    sceneId: string | null;
+    sceneIndex: number | null;
+    ok: boolean | null;
+  } | null;
+  /** 合并成片 HTTPS URL；供资产包底部「查看合并后的视频」。 */
+  mergedVideoUrl: string | null;
 }
 
 export interface VideoWorkspaceProjectionState {
@@ -167,13 +202,34 @@ function projectScene(
       ?? optionalText(value.storyline)
       ?? optionalText(value.description)
       ?? `分镜${sceneIndex as number}`,
-    mediaUrl: selectedVariant?.videoUrl ?? safeMediaUrl(value.video_url),
+    mediaUrl: selectedVariant?.videoUrl
+      ?? variants.find((item) => Boolean(item.videoUrl))?.videoUrl
+      ?? safeMediaUrl(value.video_url),
     artifactRefs: [...references],
     issues: qcIssues,
     repairSuggestion: optionalText(qc.repair_suggestion),
     variants,
     editStatus: optionalText(value.edit_status),
     regeneratedAt: optionalText(value.regenerated_at),
+    generationJobStatuses: records(value.generation_jobs)
+      .map((job) => optionalText(job.status))
+      .filter((item): item is string => item !== null),
+    generationFailures: records(value.generation_jobs)
+      .map((job) => {
+        const status = optionalText(job.status)?.toLowerCase() || "";
+        if (!["failed", "timeout", "expired", "error"].includes(status)) return null;
+        const error = optionalText(job.error)
+          || optionalText(job.message)
+          || optionalText(job.reason_code)
+          || "分镜视频生成失败";
+        return {
+          jobId: optionalText(job.job_id),
+          status,
+          reasonCode: optionalText(job.reason_code),
+          error,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null),
   };
 }
 
@@ -264,6 +320,33 @@ function projectTargetDurationMs(value: unknown): number | null {
     : null;
 }
 
+function httpsUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.toLowerCase().startsWith("https://") ? normalized : null;
+}
+
+/** 从 deliveries / outputs / merged_video 解析可预览成片 URL。 */
+function projectMergedVideoUrl(payload: Record<string, unknown>): string | null {
+  const merged = isRecord(payload.merged_video) ? payload.merged_video : null;
+  if (merged) {
+    const fromLegacy = httpsUrl(merged.merged_video_url) || httpsUrl(merged.video_url);
+    if (fromLegacy && merged.ok !== false) return fromLegacy;
+  }
+  for (const key of ["outputs", "deliveries"] as const) {
+    for (const item of records(payload[key])) {
+      if (String(item.output_type || "") !== "mp4") continue;
+      const status = String(item.status || "").toLowerCase();
+      if (status && !["succeeded", "success", "completed"].includes(status)) {
+        continue;
+      }
+      const url = httpsUrl(item.video_url) || httpsUrl(item.merged_video_url);
+      if (url) return url;
+    }
+  }
+  return null;
+}
+
 export function projectVideoWorkspaceSnapshot(
   value: unknown,
   expectedConversationId: string,
@@ -289,6 +372,32 @@ export function projectVideoWorkspaceSnapshot(
   const scenePackages = projectScenePackages(
     value.payload.scene_packages ?? value.payload.scenes,
   );
+  const rawJob = isRecord(value.payload.scene_package_job)
+    ? value.payload.scene_package_job
+    : null;
+  const jobId = rawJob ? optionalText(rawJob.job_id) : null;
+  const jobStatus = rawJob ? optionalText(rawJob.status) : null;
+  const rawProgress = isRecord(value.payload.scene_asset_progress)
+    ? value.payload.scene_asset_progress
+    : null;
+  const progressCompleted = rawProgress && Number.isFinite(Number(rawProgress.completed))
+    ? Number(rawProgress.completed)
+    : null;
+  const progressTotal = rawProgress && Number.isFinite(Number(rawProgress.total))
+    ? Number(rawProgress.total)
+    : null;
+  const rawVideoProgress = isRecord(value.payload.scene_video_progress)
+    ? value.payload.scene_video_progress
+    : null;
+  const videoProgressCompleted = rawVideoProgress && Number.isFinite(Number(rawVideoProgress.completed))
+    ? Number(rawVideoProgress.completed)
+    : null;
+  const videoProgressTotal = rawVideoProgress && Number.isFinite(Number(rawVideoProgress.total))
+    ? Number(rawVideoProgress.total)
+    : null;
+  const videoSceneIndex = rawVideoProgress && Number.isSafeInteger(Number(rawVideoProgress.scene_index))
+    ? Number(rawVideoProgress.scene_index)
+    : null;
   return {
     workspaceId: requiredText(value.workspace_id, "workspace_id"),
     conversationId,
@@ -303,6 +412,30 @@ export function projectVideoWorkspaceSnapshot(
     globalAssets: projectGlobalAssets(value.payload.global_assets),
     creationContract: projectCreationContract(value.payload.creation_contract),
     targetDurationMs: projectTargetDurationMs(value.payload.target_duration_ms),
+    scriptPlanConfirmed: value.payload.script_plan_confirmed === true,
+    scenePackageJob: jobId && jobStatus
+      ? { jobId, status: jobStatus }
+      : null,
+    sceneAssetProgress: progressCompleted !== null && progressTotal !== null
+      ? {
+          completed: progressCompleted,
+          total: progressTotal,
+          assetId: optionalText(rawProgress?.asset_id) || null,
+          assetName: optionalText(rawProgress?.asset_name) || null,
+          assetType: optionalText(rawProgress?.asset_type) || null,
+          ok: typeof rawProgress?.ok === "boolean" ? rawProgress.ok : null,
+        }
+      : null,
+    sceneVideoProgress: videoProgressCompleted !== null && videoProgressTotal !== null
+      ? {
+          completed: videoProgressCompleted,
+          total: videoProgressTotal,
+          sceneId: optionalText(rawVideoProgress?.scene_id) || null,
+          sceneIndex: videoSceneIndex && videoSceneIndex >= 1 ? videoSceneIndex : null,
+          ok: typeof rawVideoProgress?.ok === "boolean" ? rawVideoProgress.ok : null,
+        }
+      : null,
+    mergedVideoUrl: projectMergedVideoUrl(value.payload),
   };
 }
 
@@ -350,6 +483,10 @@ export function cloneVideoWorkspaceProjectionState(
               : [],
             edit_status: scene.editStatus,
             regenerated_at: scene.regeneratedAt,
+            // 克隆须保留 job 状态，否则单镜重生蒙版依赖的 busy 判定会丢。
+            generation_jobs: Array.isArray(scene.generationJobStatuses)
+              ? scene.generationJobStatuses.map((status) => ({ status }))
+              : [],
           } : scene)
           : [],
         assets: Array.isArray(current.assets)
@@ -390,6 +527,53 @@ export function cloneVideoWorkspaceProjectionState(
         target_duration_ms: typeof current.targetDurationMs === "number"
           ? current.targetDurationMs
           : null,
+        script_plan_confirmed: current.scriptPlanConfirmed === true,
+        scene_package_job: (() => {
+          const job = isRecord(current.scenePackageJob) ? current.scenePackageJob : null;
+          const jobId = job ? optionalText(job.jobId) : null;
+          const status = job ? optionalText(job.status) : null;
+          return jobId && status ? { job_id: jobId, status } : null;
+        })(),
+        scene_asset_progress: (() => {
+          const progress = isRecord(current.sceneAssetProgress) ? current.sceneAssetProgress : null;
+          if (!progress) return null;
+          const completed = Number(progress.completed);
+          const total = Number(progress.total);
+          if (!Number.isFinite(completed) || !Number.isFinite(total)) return null;
+          return {
+            completed,
+            total,
+            asset_id: optionalText(progress.assetId) || "",
+            asset_name: optionalText(progress.assetName) || "",
+            asset_type: optionalText(progress.assetType) || "",
+            ok: typeof progress.ok === "boolean" ? progress.ok : null,
+          };
+        })(),
+        scene_video_progress: (() => {
+          const progress = isRecord(current.sceneVideoProgress) ? current.sceneVideoProgress : null;
+          if (!progress) return null;
+          const completed = Number(progress.completed);
+          const total = Number(progress.total);
+          if (!Number.isFinite(completed) || !Number.isFinite(total)) return null;
+          return {
+            completed,
+            total,
+            scene_id: optionalText(progress.sceneId) || "",
+            scene_index: typeof progress.sceneIndex === "number" ? progress.sceneIndex : null,
+            ok: typeof progress.ok === "boolean" ? progress.ok : null,
+          };
+        })(),
+        // 克隆时必须带回成片 URL，否则 Snapshot 经 reducer 二次投影后按钮/成品卡全丢。
+        merged_video: (() => {
+          const url = typeof current.mergedVideoUrl === "string"
+            ? current.mergedVideoUrl.trim()
+            : "";
+          if (!url.toLowerCase().startsWith("https://")) return null;
+          return {
+            ok: true,
+            merged_video_url: url,
+          };
+        })(),
         qc: Array.isArray(current.scenes)
           ? Object.fromEntries(current.scenes.flatMap((scene) => (
             isRecord(scene) && typeof scene.sceneId === "string"
@@ -411,7 +595,14 @@ export function applyVideoWorkspaceSnapshot(
   snapshot: VideoAgentWorkspaceProjection,
 ): VideoWorkspaceProjectionState {
   if (snapshot.conversationId !== state.conversationId) return state;
-  if (state.current && snapshot.revision <= state.current.revision) return state;
+  // 同会话换了 workspace 身份时必须替换，即使 revision 数字相同或更小。
+  if (
+    state.current
+    && state.current.workspaceId === snapshot.workspaceId
+    && snapshot.revision <= state.current.revision
+  ) {
+    return state;
+  }
   return { ...state, current: snapshot };
 }
 

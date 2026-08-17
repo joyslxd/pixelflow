@@ -79,6 +79,7 @@ def test_core_runtime_assembly_registers_all_tools_without_jianying() -> None:
         "inspect_scene",
         "inspect_video_workspace",
         "patch_scene",
+        "polish_seedance_shot_prompts",
         "prepare_scene_packages",
         "replace_project_assets",
         "review_generated_scenes",

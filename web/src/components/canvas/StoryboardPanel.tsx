@@ -1,10 +1,11 @@
-import { ArrowLeft, Box, Download, ImageIcon, MapPin, Plus, Replace, Sparkles, Trash2, UserRound, X } from "lucide-react";
+import { ArrowLeft, Box, Download, ImageIcon, LoaderCircle, Maximize2, MapPin, Plus, Replace, Sparkles, Trash2, UserRound, X } from "lucide-react";
 import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import { SceneAssetReplacementPicker } from "@/components/canvas/SceneAssetReplacementPicker";
 import type { ChatMessage } from "@/lib/chat";
 import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
 import {
   collectSceneImageUrls,
+  MAX_REFERENCE_IMAGE_COUNT,
   stringArray,
   type GlobalSceneAssetGroup,
   type GlobalSceneAssets,
@@ -13,12 +14,16 @@ import {
   type ScenePackagePatch,
   type ScenePackageRecord,
 } from "@/lib/scenePackages";
-import { parseShotDescriptionFields, shotDescriptionHasStructuredFields } from "@/lib/shotDescriptionDisplay";
+import { composeShotDescriptionFields, parseShotDescriptionFields, shotDescriptionHasStructuredFields } from "@/lib/shotDescriptionDisplay";
 import { cn } from "@/lib/utils";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface StoryboardPanelProps {
   msg: ChatMessage;
+  /** 正在生成分镜视频的 scene_id；主预览与缩略图盖灰蒙版+转圈。 */
+  generatingSceneIds?: readonly string[];
+  /** Workspace / 资产包已合并成功的成片 HTTPS URL。 */
+  mergedVideoUrl?: string | null;
   onUpdateVideoScenePackage?: (sceneId: string, patch: ScenePackagePatch) => void | Promise<void>;
   deferSceneUpdates?: boolean;
   onReferenceGlobalAsset?: (asset: SceneGlobalAssetReference) => void;
@@ -26,7 +31,7 @@ export interface StoryboardPanelProps {
   onReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
   onSupervisorReplaceGlobalAsset?: (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => void;
   onAddGlobalAsset?: (assetGroup: GlobalSceneAssetGroup, replacement: SceneGlobalAssetReplacement) => void;
-  onGenerateVideo?: () => void;
+  onGenerateVideo?: (sceneId?: string) => void;
   onRetrySceneAssets?: () => void;
   onSave?: () => void | Promise<void>;
   onClose?: () => void;
@@ -118,42 +123,90 @@ function shotDescriptionText(shot: Record<string, unknown>): string {
   return legacyParts.filter(Boolean).join("");
 }
 
-function renderShotValueWithMentions(value: string) {
-  const parts = value.split(/(@[\w\-.\u4e00-\u9fff]+)/u);
-  return parts.map((part, index) => {
-    if (part.startsWith("@") && part.length > 1) {
-      return (
-        <span
-          key={`${part}-${index}`}
-          className="mx-0.5 inline-flex rounded-md bg-accent-soft px-1.5 py-0.5 text-[12px] font-medium text-accent"
-        >
-          {part}
-        </span>
-      );
-    }
-    return <span key={`text-${index}`}>{part}</span>;
-  });
+function mentionsStillInText(
+  mentions: SceneMention[],
+  text: string,
+): SceneMention[] {
+  return mentions.filter((mention) => (
+    text.includes(`@${mention.name}`) || text.includes(`@${mention.asset_id}`)
+  ));
 }
 
-function ShotDescriptionStructuredView({ text }: { text: string }) {
-  const fields = useMemo(() => parseShotDescriptionFields(text), [text]);
+function ShotDescriptionStructuredEditor({
+  text,
+  mentions,
+  candidates,
+  shotDescription,
+  onChange,
+}: {
+  text: string;
+  mentions: SceneMention[];
+  candidates: ReturnType<typeof buildMentionCandidates>;
+  shotDescription: Record<string, unknown>;
+  onChange: (next: { text: string; mentions: SceneMention[] }) => void;
+}) {
+  // 本地字段态：打字时不要每次 compose→parse 重建表格行，否则 contentEditable 光标会乱跳。
+  const emittedTextRef = useRef(text);
+  const [fields, setFields] = useState(() => parseShotDescriptionFields(text));
+
+  useEffect(() => {
+    if (text === emittedTextRef.current) return;
+    emittedTextRef.current = text;
+    setFields(parseShotDescriptionFields(text));
+  }, [text]);
+
   if (fields.length === 0) return null;
+
+  const updateField = (index: number, next: { text: string; mentions: SceneMention[] }) => {
+    setFields((current) => {
+      const nextFields = current.map((field, fieldIndex) => (
+        fieldIndex === index ? { ...field, value: next.text } : field
+      ));
+      // live 模式：保留空行与空格，避免「删光字段 → 整行消失」和清洗导致的 DOM 重绘。
+      const composed = composeShotDescriptionFields(nextFields, { mode: "live" });
+      const mergedById = new Map<string, SceneMention>();
+      for (const mention of [...mentions, ...next.mentions]) {
+        mergedById.set(mention.asset_id, mention);
+      }
+      emittedTextRef.current = composed;
+      onChange({
+        text: composed,
+        mentions: mentionsStillInText([...mergedById.values()], composed).slice(0, MAX_REFERENCE_IMAGE_COUNT),
+      });
+      return nextFields;
+    });
+  };
+
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-white">
-      <table className="w-full border-collapse text-left text-[13px]">
-        <tbody>
-          {fields.map((field) => (
-            <tr key={`${field.label}-${field.value}`} className="border-b border-line last:border-b-0">
-              <th className="w-20 shrink-0 bg-canvas/70 px-3 py-2 align-top text-[12px] font-semibold text-ink-soft">
-                {field.label}
-              </th>
-              <td className="px-3 py-2 leading-relaxed text-ink">
-                {renderShotValueWithMentions(field.value)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="grid gap-2">
+      <div className="overflow-hidden rounded-xl border border-line bg-white">
+        <table className="w-full border-collapse text-left text-[13px]">
+          <tbody>
+            {fields.map((field, index) => (
+              <tr key={`${field.label}-${index}`} className="border-b border-line last:border-b-0">
+                <th className="w-24 shrink-0 bg-canvas/70 px-3 py-2 align-top text-[12px] font-semibold text-ink-soft">
+                  {field.label}
+                </th>
+                <td className="px-3 py-1.5 leading-relaxed text-ink">
+                  <SceneMentionEditor
+                    text={field.value}
+                    shotDescription={{ ...shotDescription, text: field.value, mentions }}
+                    candidates={candidates}
+                    onChange={(next) => updateField(index, next)}
+                    compact
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-[12px] text-ink-soft">
+        已关联 {mentions.length}/{MAX_REFERENCE_IMAGE_COUNT}
+        {mentions.length >= MAX_REFERENCE_IMAGE_COUNT
+          ? <span className="ml-2 text-amber">最多 9 张不同图片，已关联素材可重复引用</span>
+          : <span className="ml-2">在任意字段输入 @ 关联参考图</span>}
+      </div>
     </div>
   );
 }
@@ -180,8 +233,25 @@ function sceneVideoForScene(
   );
 }
 
+function SceneVideoGeneratingOverlay({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      className="absolute inset-0 z-10 flex items-center justify-center bg-black/45"
+      aria-label="分镜视频生成中"
+    >
+      <LoaderCircle
+        size={compact ? 18 : 28}
+        className="animate-spin text-white"
+        aria-hidden
+      />
+    </div>
+  );
+}
+
 export function StoryboardPanel({
   msg,
+  generatingSceneIds,
+  mergedVideoUrl: mergedVideoUrlProp,
   onUpdateVideoScenePackage,
   deferSceneUpdates = false,
   onReferenceGlobalAsset,
@@ -198,15 +268,38 @@ export function StoryboardPanel({
   const generatedSceneVideos = msg.artifact?.generatedSceneVideos;
   const scenes = (videoScenePackages?.scene_packages || []) as ScenePackageRecord[];
   const assets = globalAssets(videoScenePackages?.global_assets);
+  const generatingIdSet = useMemo(
+    () => new Set((generatingSceneIds || []).map((id) => String(id || "").trim()).filter(Boolean)),
+    [generatingSceneIds],
+  );
+  const mergedVideoUrl = useMemo(() => {
+    const fromProp = typeof mergedVideoUrlProp === "string" ? mergedVideoUrlProp.trim() : "";
+    if (fromProp.toLowerCase().startsWith("https://")) return fromProp;
+    const fromArtifact = msg.artifact?.mergedVideo?.ok
+      ? String(msg.artifact.mergedVideo.merged_video_url || "").trim()
+      : "";
+    return fromArtifact.toLowerCase().startsWith("https://") ? fromArtifact : "";
+  }, [mergedVideoUrlProp, msg.artifact?.mergedVideo]);
   const [selectedSceneId, setSelectedSceneId] = useState(scenes[0]?.scene_id || "");
   const [sceneDraftPatches, setSceneDraftPatches] = useState<Record<string, ScenePackagePatch>>({});
   const [previewAsset, setPreviewAsset] = useState<SceneGlobalAssetReference | null>(null);
   const [replacementTarget, setReplacementTarget] = useState<SceneGlobalAssetReference | null>(null);
   const [additionTarget, setAdditionTarget] = useState<AssetGroup | null>(null);
-  const [shotDescriptionEditorOpen, setShotDescriptionEditorOpen] = useState(false);
+  // 镜头预览放大：覆盖左侧对话与中栏素材编辑，返回后回到双栏分镜面。
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [mergedPreviewOpen, setMergedPreviewOpen] = useState(false);
+
   useEffect(() => {
-    setShotDescriptionEditorOpen(false);
-  }, [selectedSceneId]);
+    if (!previewExpanded && !mergedPreviewOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewExpanded(false);
+        setMergedPreviewOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [previewExpanded, mergedPreviewOpen]);
   const authoritativeSelectedScene = scenes.find((scene) => scene.scene_id === selectedSceneId) || scenes[0];
   const selectedScenePatch = authoritativeSelectedScene
     ? sceneDraftPatches[authoritativeSelectedScene.scene_id]
@@ -240,6 +333,9 @@ export function StoryboardPanel({
   const selectedSceneVideo = sceneVideoForScene(selectedScene, generatedSceneVideos);
   const previewVideoUrl = selectedSceneVideo?.video_url || "";
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
+  const selectedSceneGenerating = Boolean(
+    selectedScene?.scene_id && generatingIdSet.has(selectedScene.scene_id),
+  );
 
   const updateScene = (patch: ScenePackagePatch) => {
     if (!selectedScene) return;
@@ -263,7 +359,11 @@ export function StoryboardPanel({
     await onSaveRequested?.();
   };
   const onSave = deferSceneUpdates ? saveStoryboardDraft : onSaveRequested;
-  const onGenerateVideo = hasSceneDraft ? undefined : onGenerateVideoRequested;
+  const onGenerateVideo = hasSceneDraft
+    ? undefined
+    : (onGenerateVideoRequested
+      ? () => onGenerateVideoRequested(selectedScene?.scene_id)
+      : undefined);
   const onRetrySceneAssets = hasSceneDraft ? undefined : onRetrySceneAssetsRequested;
 
   const updateShotDescription = (next: { text: string; mentions: SceneMention[] }) => {
@@ -428,66 +528,52 @@ export function StoryboardPanel({
                 <div className="grid gap-3 rounded-2xl border border-line bg-canvas p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[12px] font-semibold text-ink">
-                      镜头描述 <span className="font-normal text-ink-soft">可通过 @ 添加参考</span>
+                      镜头描述 <span className="font-normal text-ink-soft">点击字段直接编辑，输入 @ 添加参考图</span>
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setShotDescriptionEditorOpen((open) => !open)}
-                      className="rounded-lg border border-line bg-white px-2.5 py-1 text-[11px] font-medium text-ink-soft hover:bg-canvas hover:text-ink"
-                    >
-                      {shotDescriptionEditorOpen ? "收起编辑" : "编辑原文"}
-                    </button>
                   </div>
-                  {(() => {
-                    const structured = shotDescriptionHasStructuredFields(shotText);
-                    return (
-                      <>
-                        {structured ? (
-                          <ShotDescriptionStructuredView text={shotText} />
-                        ) : shotText ? (
-                          <p className="rounded-xl border border-line bg-white px-3 py-2 text-[13px] leading-relaxed text-ink">
-                            {renderShotValueWithMentions(shotText)}
-                          </p>
-                        ) : (
-                          <p className="rounded-xl border border-dashed border-line bg-white px-3 py-2 text-[12px] text-ink-soft">
-                            暂无镜头描述
-                          </p>
-                        )}
-                        {shotDescriptionEditorOpen || !structured ? (
-                          <label className="grid gap-1.5 text-[12px] text-ink-soft">
-                            <span className="font-medium text-ink">原文编辑</span>
-                            <SceneMentionEditor
-                              text={shotText}
-                              shotDescription={{ ...shot, mentions: shotMentions }}
-                              candidates={mentionCandidates}
-                              onChange={updateShotDescription}
-                            />
-                          </label>
-                        ) : null}
-                      </>
-                    );
-                  })()}
+                  {shotDescriptionHasStructuredFields(shotText) ? (
+                    <ShotDescriptionStructuredEditor
+                      text={shotText}
+                      mentions={shotMentions}
+                      candidates={mentionCandidates}
+                      shotDescription={{ ...shot, mentions: shotMentions }}
+                      onChange={updateShotDescription}
+                    />
+                  ) : (
+                    <SceneMentionEditor
+                      text={shotText}
+                      shotDescription={{ ...shot, mentions: shotMentions }}
+                      candidates={mentionCandidates}
+                      onChange={updateShotDescription}
+                      placeholder="点击编辑镜头描述，输入 @ 关联参考图"
+                    />
+                  )}
                 </div>
-                <label className="grid gap-1.5 text-[12px] font-medium text-ink-soft">
-                  旁白
-                  <textarea value={selectedScene.narration || ""} onChange={(event) => updateScene({ narration: event.currentTarget.value })} className={textareaClass()} />
-                </label>
               </div>
             ) : null}
           </section>
         </div>
 
         <div className="flex min-h-0 flex-col border-l border-line bg-white">
-          <div className="flex h-12 shrink-0 items-center justify-between px-4 text-[13px] text-ink-soft">
-            <span>镜头预览</span>
+          <div className="flex h-12 shrink-0 items-center justify-between gap-2 px-4 text-[13px] text-ink-soft">
+            <button
+              type="button"
+              onClick={() => setPreviewExpanded(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-1 font-medium text-ink hover:bg-canvas"
+              title="放大镜头预览"
+              aria-label="放大镜头预览"
+            >
+              <span>镜头预览</span>
+              <Maximize2 size={14} className="text-ink-soft" aria-hidden />
+            </button>
             <span>共 {scenes.length} 个镜头</span>
           </div>
           <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
-            <div className="flex min-h-[360px] flex-1 items-center justify-center rounded-2xl border border-line bg-canvas">
+            <div className="relative flex min-h-[200px] flex-1 items-center justify-center overflow-hidden rounded-2xl border border-line bg-canvas xl:min-h-[360px]">
               {previewVideoUrl ? (
                 <video
                   src={previewVideoUrl}
-                  controls
+                  controls={!selectedSceneGenerating}
                   playsInline
                   preload="metadata"
                   className="max-h-full max-w-full rounded-xl object-contain"
@@ -497,11 +583,13 @@ export function StoryboardPanel({
               ) : (
                 <div className="text-[13px] text-ink-soft">暂无预览</div>
               )}
+              {selectedSceneGenerating ? <SceneVideoGeneratingOverlay /> : null}
             </div>
             <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
               {scenes.map((scene) => {
                 const thumb = collectSceneImageUrls(scene, assets)[0] || "";
                 const sceneVideo = sceneVideoForScene(scene, generatedSceneVideos);
+                const sceneGenerating = generatingIdSet.has(scene.scene_id);
                 return (
                   <button
                     key={scene.scene_id}
@@ -510,54 +598,204 @@ export function StoryboardPanel({
                     disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
                     title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
                       ? "请先保存当前分镜"
-                      : undefined}
+                      : (sceneGenerating ? "分镜视频生成中" : undefined)}
                     className={cn(
                       "w-32 shrink-0 overflow-hidden rounded-xl border bg-canvas text-left disabled:cursor-not-allowed disabled:opacity-50",
                       scene.scene_id === selectedScene?.scene_id ? "border-accent" : "border-line",
                     )}
                   >
-                    {sceneVideo?.video_url ? (
-                      <video src={sceneVideo.video_url} muted playsInline preload="metadata" className="h-20 w-full object-cover" />
-                    ) : thumb ? (
-                      <img src={thumb} alt="" className="h-20 w-full object-cover" />
-                    ) : (
-                      <div className="flex h-20 items-center justify-center text-[11px] text-ink-soft">分镜 {scene.scene_index}</div>
-                    )}
+                    <div className="relative h-20 w-full overflow-hidden bg-canvas">
+                      {sceneVideo?.video_url ? (
+                        <video src={sceneVideo.video_url} muted playsInline preload="metadata" className="h-20 w-full object-cover" />
+                      ) : thumb ? (
+                        <img src={thumb} alt="" className="h-20 w-full object-cover" />
+                      ) : (
+                        <div className="flex h-20 items-center justify-center text-[11px] text-ink-soft">分镜 {scene.scene_index}</div>
+                      )}
+                      {sceneGenerating ? <SceneVideoGeneratingOverlay compact /> : null}
+                    </div>
                     <div className="truncate px-2 py-1.5 text-[12px] font-medium text-ink">
-                      分镜 {scene.scene_index}{dirtySceneIds.has(scene.scene_id) ? " · 已修改" : ""}
+                      分镜 {scene.scene_index}
+                      {sceneGenerating ? " · 生成中" : (dirtySceneIds.has(scene.scene_id) ? " · 已修改" : "")}
                     </div>
                   </button>
                 );
               })}
             </div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={onSave}
-                disabled={!onSave}
-                title={onSave ? undefined : "当前运行模式不允许保存"}
-                className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                保存
-              </button>
-              <button
-                type="button"
-                onClick={sceneAssetQuotaPaused ? onRetrySceneAssets : onGenerateVideo}
-                disabled={sceneAssetQuotaPaused ? !onRetrySceneAssets : !onGenerateVideo}
-                title={
-                  sceneAssetQuotaPaused
-                    ? (onRetrySceneAssets ? undefined : "当前运行模式不允许继续生成参考图")
-                    : (onGenerateVideo ? undefined : "当前运行模式不允许生成视频")
-                }
-                className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Sparkles size={15} />
-                {sceneAssetQuotaPaused ? "继续生成参考图" : "确认并生成视频"}
-              </button>
-            </div>
           </div>
         </div>
       </div>
+
+      <div className="shrink-0 border-t border-line bg-white px-4 py-3">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={!onSave}
+            title={onSave ? undefined : "当前运行模式不允许保存"}
+            className="rounded-xl border border-line py-2.5 text-[13px] font-medium text-ink hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            保存
+          </button>
+          <button
+            type="button"
+            onClick={sceneAssetQuotaPaused ? onRetrySceneAssets : onGenerateVideo}
+            disabled={
+              sceneAssetQuotaPaused
+                ? !onRetrySceneAssets
+                : (
+                  !onGenerateVideo
+                  || Boolean(selectedScene && generatingIdSet.has(selectedScene.scene_id))
+                )
+            }
+            title={
+              sceneAssetQuotaPaused
+                ? (onRetrySceneAssets ? undefined : "当前运行模式不允许继续生成参考图")
+                : (
+                  selectedScene && generatingIdSet.has(selectedScene.scene_id)
+                    ? "当前分镜正在生成中"
+                    : (onGenerateVideo ? undefined : "当前运行模式不允许生成视频")
+                )
+            }
+            className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Sparkles size={15} />
+            {sceneAssetQuotaPaused
+              ? "继续生成参考图"
+              : (selectedScene && generatingIdSet.has(selectedScene.scene_id)
+                ? `分镜 ${selectedScene.scene_index} 生成中…`
+                : (selectedScene
+                  ? `确认并生成分镜 ${selectedScene.scene_index}`
+                  : "确认并生成视频"))}
+          </button>
+        </div>
+        {mergedVideoUrl ? (
+          <button
+            type="button"
+            onClick={() => setMergedPreviewOpen(true)}
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-xl border border-brand/30 bg-brand/5 py-2.5 text-[13px] font-medium text-brand hover:bg-brand/10"
+          >
+            查看合并后的视频
+          </button>
+        ) : null}
+      </div>
+      {mergedPreviewOpen && mergedVideoUrl ? (
+        <div
+          className="fixed inset-0 z-[70] flex flex-col bg-[#0b1220]"
+          role="dialog"
+          aria-modal="true"
+          aria-label="合并成片预览"
+        >
+          <div className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black/40 px-4 text-white">
+            <button
+              type="button"
+              onClick={() => setMergedPreviewOpen(false)}
+              className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium hover:bg-white/10"
+              aria-label="返回分镜编辑"
+            >
+              <ArrowLeft size={18} aria-hidden />
+              返回
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[15px] font-semibold">合并成片预览</div>
+              <div className="text-[12px] text-white/65">Esc 也可返回</div>
+            </div>
+          </div>
+          <div className="flex min-h-0 flex-1 items-center justify-center px-4 pb-4 pt-3 sm:px-8">
+            <div className="relative flex max-h-full w-full max-w-5xl items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-black/35">
+              <video
+                src={mergedVideoUrl}
+                controls
+                playsInline
+                preload="metadata"
+                className="max-h-[min(80vh,720px)] max-w-full object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {previewExpanded ? (
+        <div
+          className="fixed inset-0 z-[70] flex flex-col bg-[#0b1220]"
+          role="dialog"
+          aria-modal="true"
+          aria-label="放大镜头预览"
+        >
+          <div className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black/40 px-4 text-white">
+            <button
+              type="button"
+              onClick={() => setPreviewExpanded(false)}
+              className="flex h-9 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium hover:bg-white/10"
+              aria-label="返回分镜编辑"
+            >
+              <ArrowLeft size={18} aria-hidden />
+              返回
+            </button>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[15px] font-semibold">
+                镜头预览
+                {selectedScene ? ` · 分镜 ${selectedScene.scene_index}` : ""}
+              </div>
+              <div className="text-[12px] text-white/65">共 {scenes.length} 个镜头 · Esc 也可返回</div>
+            </div>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col px-4 pb-4 pt-3 sm:px-8">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-black/35">
+              {previewVideoUrl ? (
+                <video
+                  src={previewVideoUrl}
+                  controls={!selectedSceneGenerating}
+                  playsInline
+                  preload="metadata"
+                  className="max-h-full max-w-full object-contain"
+                />
+              ) : previewUrl ? (
+                <img src={previewUrl} alt="" className="max-h-full max-w-full object-contain" />
+              ) : (
+                <div className="text-[14px] text-white/60">暂无预览</div>
+              )}
+              {selectedSceneGenerating ? <SceneVideoGeneratingOverlay /> : null}
+            </div>
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {scenes.map((scene) => {
+                const thumb = collectSceneImageUrls(scene, assets)[0] || "";
+                const sceneVideo = sceneVideoForScene(scene, generatedSceneVideos);
+                const sceneGenerating = generatingIdSet.has(scene.scene_id);
+                return (
+                  <button
+                    key={`expanded-${scene.scene_id}`}
+                    type="button"
+                    onClick={() => setSelectedSceneId(scene.scene_id)}
+                    disabled={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id}
+                    title={deferSceneUpdates && hasSceneDraft && scene.scene_id !== selectedScene?.scene_id
+                      ? "请先保存当前分镜"
+                      : (sceneGenerating ? "分镜视频生成中" : undefined)}
+                    className={cn(
+                      "w-36 shrink-0 overflow-hidden rounded-xl border bg-white/5 text-left text-white disabled:cursor-not-allowed disabled:opacity-50",
+                      scene.scene_id === selectedScene?.scene_id ? "border-accent" : "border-white/15",
+                    )}
+                  >
+                    <div className="relative h-24 w-full overflow-hidden bg-black/40">
+                      {sceneVideo?.video_url ? (
+                        <video src={sceneVideo.video_url} muted playsInline preload="metadata" className="h-24 w-full object-cover" />
+                      ) : thumb ? (
+                        <img src={thumb} alt="" className="h-24 w-full object-cover" />
+                      ) : (
+                        <div className="flex h-24 items-center justify-center text-[11px] text-white/55">分镜 {scene.scene_index}</div>
+                      )}
+                      {sceneGenerating ? <SceneVideoGeneratingOverlay compact /> : null}
+                    </div>
+                    <div className="truncate px-2 py-1.5 text-[12px] font-medium">
+                      分镜 {scene.scene_index}
+                      {sceneGenerating ? " · 生成中" : (dirtySceneIds.has(scene.scene_id) ? " · 已修改" : "")}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {previewAsset ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4" role="dialog" aria-modal="true">
           <div className="relative w-full max-w-[672px] rounded-[8px] bg-white p-8 shadow-[0_24px_80px_rgba(15,23,42,0.28)]">

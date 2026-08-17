@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -26,8 +26,10 @@ AUTHORIZATION = "Bearer delivery-operation-test"
 
 
 class SynchronousMergeService:
-    def __init__(self) -> None:
+    def __init__(self, *, clock: list[datetime] | None = None, advance: timedelta | None = None) -> None:
         self.calls: list[dict[str, object]] = []
+        self._clock = clock
+        self._advance = advance
 
     async def start(
         self,
@@ -43,6 +45,9 @@ class SynchronousMergeService:
                 "idempotency_key": idempotency_key,
             }
         )
+        # 模拟 content-app 同步合并耗时超过默认 30s start 租约
+        if self._clock is not None and self._advance is not None:
+            self._clock[0] = self._clock[0] + self._advance
         return {
             "job_id": "provider-merge-1",
             "status": "succeeded",
@@ -188,3 +193,103 @@ async def test_delivery_operation_without_request_credential_fails_before_provid
         )
 
     assert merge_service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_merges_using_creation_contract_when_video_params_missing() -> None:
+    repository = MemoryAgentRuntimeRepository()
+    merge_service = SynchronousMergeService()
+    port = M06DeliveryOperationPort(
+        repository=repository,
+        merge_adapter=ProviderJobAdapter(merge_service),
+        jianying_adapter=ProviderJobAdapter(UnusedJianyingService()),
+        lease_owner="delivery-start-worker",
+        clock=lambda: NOW,
+        job_id_factory=lambda: "operation-delivery-contract-1",
+    )
+    context = _context(
+        credential=TransientVideoAgentCredential(authorization=AUTHORIZATION)
+    )
+    payload = dict(context.workspace.payload)
+    payload.pop("video_params", None)
+    payload["creation_contract"] = {
+        "video_model": "seedance-2.0",
+        "video_size": "1080x1920",
+        "video_duration_sec": 20,
+    }
+    context = VideoToolContext(
+        user_id=context.user_id,
+        plan_id=context.plan_id,
+        step_id=context.step_id,
+        credential=context.credential,
+        workspace=VideoWorkspace(
+            workspace_id=context.workspace.workspace_id,
+            conversation_id=context.workspace.conversation_id,
+            payload=payload,
+        ),
+    )
+    result = await ComposeOrExportVideoTool(operation_port=port).execute(
+        context,
+        {"output_type": "mp4"},
+    )
+    assert result.pending_operation_job_ids or result.artifact_refs
+    assert merge_service.calls
+    request = merge_service.calls[0]["request"]
+    assert request["model"] == "seedance-2.0"
+    assert request["size"] == "1080x1920"
+    assert request["duration"] == 20
+
+
+@pytest.mark.asyncio
+async def test_delivery_sync_merge_survives_beyond_default_thirty_second_lease() -> None:
+    """14 镜同步合并常 >30s；默认 1h start 租约必须能落 SUCCEEDED。"""
+
+    clock = [NOW]
+    merge_service = SynchronousMergeService(
+        clock=clock,
+        advance=timedelta(seconds=65),
+    )
+    port = M06DeliveryOperationPort(
+        repository=MemoryAgentRuntimeRepository(),
+        merge_adapter=ProviderJobAdapter(merge_service),
+        jianying_adapter=ProviderJobAdapter(UnusedJianyingService()),
+        lease_owner="delivery-start-worker",
+        clock=lambda: clock[0],
+        job_id_factory=lambda: "operation-delivery-long-merge",
+    )
+
+    result = await ComposeOrExportVideoTool(operation_port=port).execute(
+        _context(credential=TransientVideoAgentCredential(AUTHORIZATION)),
+        {"output_type": "mp4"},
+    )
+
+    assert result.artifact_refs
+    assert merge_service.calls
+
+
+@pytest.mark.asyncio
+async def test_delivery_short_start_lease_surfaces_conflict_detail() -> None:
+    """租约过短时 finalize 失败，公开错误须带上「租约无效」细节。"""
+
+    clock = [NOW]
+    merge_service = SynchronousMergeService(
+        clock=clock,
+        advance=timedelta(seconds=65),
+    )
+    port = M06DeliveryOperationPort(
+        repository=MemoryAgentRuntimeRepository(),
+        merge_adapter=ProviderJobAdapter(merge_service),
+        jianying_adapter=ProviderJobAdapter(UnusedJianyingService()),
+        lease_owner="delivery-start-worker",
+        clock=lambda: clock[0],
+        job_id_factory=lambda: "operation-delivery-lease-expired",
+        start_lease_duration=timedelta(seconds=30),
+    )
+
+    with pytest.raises(VideoToolExecutionError, match="租约无效"):
+        await ComposeOrExportVideoTool(operation_port=port).execute(
+            _context(credential=TransientVideoAgentCredential(AUTHORIZATION)),
+            {"output_type": "mp4"},
+        )
+
+    assert merge_service.calls

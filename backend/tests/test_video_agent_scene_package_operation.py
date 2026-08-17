@@ -129,3 +129,53 @@ async def test_prepare_start_fails_when_lease_too_short_for_llm() -> None:
             target_duration_ms=30_000,
             attempt=1,
         )
+
+
+class _FailingAssetsService:
+    async def start(self, request, *, authorization: str, idempotency_key: str):  # noqa: ANN001, ARG002
+        return {
+            "job_id": f"generate-scene-assets-{idempotency_key[-16:]}",
+            "status": "failed",
+            "ok": False,
+            "message": "资产「光线」不是可生成实体",
+        }
+
+    async def status(self, provider_job_id: str) -> dict:
+        return {
+            "job_id": provider_job_id,
+            "status": "failed",
+            "ok": False,
+            "message": "资产「光线」不是可生成实体",
+        }
+
+
+@pytest.mark.asyncio
+async def test_generate_assets_failure_surfaces_domain_message() -> None:
+    """回归：失败时不得只抛泛化「Operation 执行失败」，应带回领域原因。"""
+
+    clock = _Clock(datetime(2026, 8, 12, tzinfo=UTC))
+    repository = MemoryAgentRuntimeRepository()
+    prepare_adapter = ProviderJobAdapter(_SlowPrepareService(clock, delay_sec=1))
+    assets_adapter = ProviderJobAdapter(_FailingAssetsService())
+    port = M06ScenePackageOperationPort(
+        repository=repository,
+        prepare_adapter=prepare_adapter,
+        assets_adapter=assets_adapter,
+        lease_owner="worker-1",
+        clock=clock,
+        job_id_factory=lambda: "operation-assets-fail",
+    )
+
+    with pytest.raises(VideoToolExecutionError, match="光线"):
+        await port.start_generate_scene_assets(
+            _context(),
+            global_assets={"characters": []},
+            scene_packages=[],
+            materials=[],
+            image_model="gpt-image-2",
+            image_ratio="9:16",
+            image_size="4K",
+            reference_brief="",
+            target_assets=[],
+            attempt=1,
+        )

@@ -261,7 +261,67 @@ test("非成功响应保留 HTTP 状态但不信任服务端响应正文", async
     }),
     error => error instanceof SupervisorApiError
       && error.status === 409
-      && error.message === "Supervisor API 请求失败（HTTP 409）",
+      && error.message === "Supervisor API 请求失败（HTTP 409）"
+      && error.currentRevision === null,
+  );
+});
+
+test("脚本保存 409 结构化 detail 暴露 current_revision 供重试", async () => {
+  const transport = createSupervisorApiTransport({
+    fetchImpl: async () => jsonResponse(
+      {
+        detail: {
+          code: "video_agent_script_conflict",
+          message: "脚本工作区版本已变化，请刷新后重试",
+          current_revision: 7,
+          workspace_id: "workspace-7",
+        },
+      },
+      { status: 409, statusText: "Conflict" },
+    ),
+    getAuthorization: () => "safe-token",
+  });
+
+  await assert.rejects(
+    transport.saveVideoAgentScript("conv-001", {
+      markdown: "镜头一",
+      expected_revision: 4,
+      confirm_for_generation: true,
+    }),
+    error => error instanceof SupervisorApiError
+      && error.status === 409
+      && error.code === "video_agent_script_conflict"
+      && error.currentRevision === 7
+      && error.workspaceId === "workspace-7"
+      && error.message === "脚本工作区版本已变化，请刷新后重试",
+  );
+});
+
+test("确认脚本命令 422 暴露 missing_fields", async () => {
+  const transport = createSupervisorApiTransport({
+    fetchImpl: async () => jsonResponse(
+      {
+        detail: {
+          code: "video_agent_script_not_ready",
+          message: "脚本方案仍缺少：结尾行动引导",
+          missing_fields: ["结尾行动引导"],
+        },
+      },
+      { status: 422, statusText: "Unprocessable Entity" },
+    ),
+    getAuthorization: () => "safe-token",
+  });
+
+  await assert.rejects(
+    transport.confirmVideoAgentScriptPlan("conv-001", {
+      expected_revision: 4,
+      markdown: "镜头一",
+    }),
+    error => error instanceof SupervisorApiError
+      && error.status === 422
+      && error.code === "video_agent_script_not_ready"
+      && error.missingFields.includes("结尾行动引导")
+      && error.message.includes("结尾行动引导"),
   );
 });
 

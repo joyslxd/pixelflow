@@ -49,6 +49,20 @@ test("appendVisibleConversationMessage upserts duplicate client ids instead of d
   assert.deepEqual(next, [{ id: "m1", content: "新内容" }]);
 });
 
+test("appendVisibleConversationMessage can insert before an anchor instead of appending", () => {
+  const currentMessages = [
+    { id: "m1", content: "脚本" },
+    { id: "model", content: "选模" },
+  ];
+  const next = appendVisibleConversationMessage(currentMessages, {
+    activeConversationId: "conversation-a",
+    targetConversationId: "conversation-a",
+    message: { id: "scene", content: "场景包" },
+    insertBeforeId: "model",
+  });
+  assert.deepEqual(next.map((item) => item.id), ["m1", "scene", "model"]);
+});
+
 test("messageConversationId prefers the message owner over current visible conversation", () => {
   assert.equal(messageConversationId({ conversationId: "conversation-a" }, "conversation-b"), "conversation-a");
   assert.equal(messageConversationId({}, "conversation-b"), "conversation-b");

@@ -138,6 +138,34 @@ class AgentRuntimeVideoScriptUnavailableError(RuntimeError):
 class AgentRuntimeVideoScriptConflictError(RuntimeError):
     """VideoAgent脚本保存与当前工作区版本冲突。"""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        current_revision: int | None = None,
+        workspace_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.current_revision = current_revision
+        self.workspace_id = workspace_id
+
+
+class AgentRuntimeVideoScriptNotReadyError(RuntimeError):
+    """脚本方案确认命令因缺字段或未就绪而拒绝。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_fields: list[str] | None = None,
+        workspace_id: str | None = None,
+        revision: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.missing_fields = list(missing_fields or [])
+        self.workspace_id = workspace_id
+        self.revision = revision
+
 
 @dataclass(frozen=True)
 class AgentRuntimeConversationAssignment:
@@ -231,6 +259,23 @@ class VideoAgentScriptSaveResponse(_RuntimeResponseModel):
     revision: int = Field(ge=1)
     script_version: int = Field(ge=1)
     artifact_ref: str
+
+
+class VideoAgentConfirmScriptPlanRequest(_RuntimeResponseModel):
+    """确认脚本方案并启动视频资产包准备（按钮路径，不伪造自然语言 Turn）。"""
+
+    expected_revision: int = Field(ge=1)
+    markdown: str | None = Field(default=None, max_length=200_000)
+
+
+class VideoAgentConfirmScriptPlanResponse(_RuntimeResponseModel):
+    """确认脚本方案命令的公开结果。"""
+
+    workspace_id: str
+    revision: int = Field(ge=1)
+    job_id: str | None = None
+    public_summary: str
+    missing_fields: list[str] = Field(default_factory=list)
 
 
 class RetiredVideoWorkflowResponse(_RuntimeResponseModel):
@@ -337,6 +382,9 @@ class RuntimeVideoAgentThinkingProjection(_RuntimeResponseModel):
     answer: str = ""
     started_at: datetime | str | None = Field(default=None, serialization_alias="startedAt")
     status: Literal["streaming", "completed"] = "completed"
+    # 触发该 Turn 的用户消息锚点：前端消息 id = client_message_id = client_input_id。
+    client_input_id: str | None = Field(default=None, serialization_alias="clientInputId")
+    after_message_id: str | None = Field(default=None, serialization_alias="afterMessageId")
 
 
 class RuntimeVideoAgentPlanBundle(_RuntimeResponseModel):
@@ -739,6 +787,74 @@ class AgentRuntimeService:
                         ),
                         primary_execution_ready=primary_ready,
                     )
+                # P0-4.2：frontend_v2 历史会话首次视频 Turn 同事务升级为原生模式。
+                wants_video_agent = (
+                    (
+                        route_assignment is not None
+                        and route_assignment.primary_execution_ready
+                    )
+                    or (
+                        route_assignment is None
+                        and isinstance(stored_decision, dict)
+                        and RouteDecision.model_validate(stored_decision).intent
+                        is RouteIntent.VIDEO
+                        and self.config.mode == "primary"
+                        and "video" in self.config.enabled_intents
+                        and "video" in self.primary_execution_intents
+                        and self._video_agent_entrypoint is not None
+                    )
+                )
+                if (
+                    wants_video_agent
+                    and getattr(conversation, "orchestration_mode", None)
+                    == OrchestrationMode.FRONTEND_V2.value
+                    and self._video_agent_repository is not None
+                ):
+                    from pixelflow.video_agent.legacy_upgrade import (
+                        FrontendV2LegacyUpgrader,
+                    )
+
+                    upgrader = FrontendV2LegacyUpgrader(
+                        task_store=self.task_store,
+                        video_repository=self._video_agent_repository,
+                    )
+                    # 新建会话常见：前端 PUT 标题/context 与 turns/start 并发，
+                    # revision CAS 冲突时重读后再升一次；已升到原生则跳过。
+                    for attempt in range(2):
+                        try:
+                            await upgrader.upgrade_if_needed(
+                                user_id=owner,
+                                conversation=conversation,
+                                now=occurred_at,
+                            )
+                            break
+                        except AgentRuntimeRecordConflictError:
+                            conversation = await self.require_conversation(
+                                user_id=owner,
+                                conversation_id=conversation_id,
+                            )
+                            if conversation is None:
+                                raise LookupError("Conversation not found") from None
+                            if (
+                                getattr(conversation, "orchestration_mode", None)
+                                == OrchestrationMode.VIDEO_AGENT_V2.value
+                            ):
+                                break
+                            if attempt >= 1:
+                                raise
+                    conversation = await self.require_conversation(
+                        user_id=owner,
+                        conversation_id=conversation_id,
+                    )
+                    if conversation is None:
+                        raise LookupError("Conversation not found")
+                    if route_assignment is None:
+                        # 已有视频路由但模式仍为 frontend_v2：强制切到原生。
+                        route_assignment = TurnRouteAssignment(
+                            decision=RouteDecision.model_validate(stored_decision),
+                            orchestration_mode=OrchestrationMode.VIDEO_AGENT_V2,
+                            primary_execution_ready=True,
+                        )
                 video_agent_execution_ready = (
                     _video_agent_execution_ready(conversation)
                     if route_assignment is None
@@ -1265,6 +1381,7 @@ class AgentRuntimeService:
         """校验当前会话确认单归属，并在同一持久化 Plan 上继续或取消。"""
 
         owner = user_id.strip()
+        credential_handed_off = False
         try:
             conversation = await self.require_conversation(
                 user_id=owner,
@@ -1285,109 +1402,171 @@ class AgentRuntimeService:
             )
             if state is None or state[1] is None:
                 raise LookupError("VideoAgent plan not found")
-            _, plan = state
-            step = next(
-                (item for item in plan.steps if item.step_id == request.step_id),
-                None,
+            workspace, plan = state
+            pending = (
+                workspace.payload.get("native_pending_confirmation")
+                if workspace is not None
+                else None
             )
-            if step is None or not hmac.compare_digest(
-                _video_confirmation_id(plan.plan_id, request.step_id),
-                confirmation_id,
+            if (
+                isinstance(pending, dict)
+                and hmac.compare_digest(
+                    str(pending.get("confirmation_id") or ""),
+                    confirmation_id,
+                )
             ):
-                raise AgentRuntimeVideoConfirmationConflictError(
-                    "VideoAgent confirmation 身份不匹配"
+                response, credential_handed_off = (
+                    await self._respond_to_native_confirmation(
+                        owner=owner,
+                        conversation_id=conversation_id,
+                        confirmation_id=confirmation_id,
+                        request=request,
+                        workspace=workspace,
+                        plan=plan,
+                        pending=pending,
+                        credential=credential,
+                    )
                 )
-
-            try:
-                if request.decision == "confirm":
-                    if (
-                        plan.status is AgentPlanStatus.AWAITING_CONFIRMATION
-                        and step.status is PlanStepStatus.AWAITING_CONFIRMATION
-                    ):
-                        result = await self._video_agent_executor.confirm_step(
-                            owner,
-                            plan.plan_id,
-                            step.step_id,
-                            credential=credential,
-                        )
-                        # 确认步已完成且仍有后续：后台续跑，避免 HTTP 被 /plan|/characters 拖死。
-                        confirmed = next(
-                            (
-                                item
-                                for item in result.steps
-                                if item.step_id == step.step_id
-                            ),
-                            None,
-                        )
-                        if (
-                            result.status is AgentPlanStatus.RUNNING
-                            and confirmed is not None
-                            and confirmed.status is PlanStepStatus.COMPLETED
-                            and any(
-                                item.status is PlanStepStatus.PENDING
-                                for item in result.steps
-                            )
-                        ):
-                            self._schedule_executor_notification(
-                                self._video_agent_executor.resume_plan(
-                                    owner,
-                                    result.plan_id,
-                                    credential=None,
-                                ),
-                                credential=None,
-                                kind="VideoAgent Post-Confirm Continue",
-                            )
-                    elif (
-                        plan.status
-                        in {AgentPlanStatus.RUNNING, AgentPlanStatus.COMPLETED}
-                        and step.status
-                        in {PlanStepStatus.RUNNING, PlanStepStatus.COMPLETED}
-                    ):
-                        result = plan
-                    else:
-                        raise AgentRuntimeVideoConfirmationConflictError(
-                            "VideoAgent confirmation 已不能确认"
-                        )
-                else:
-                    if plan.status is AgentPlanStatus.CANCELLED:
-                        result = plan
-                    elif (
-                        plan.status is AgentPlanStatus.AWAITING_CONFIRMATION
-                        and step.status is PlanStepStatus.AWAITING_CONFIRMATION
-                    ):
-                        result = await self._video_agent_executor.cancel_step(
-                            owner,
-                            plan.plan_id,
-                            step.step_id,
-                        )
-                    else:
-                        raise AgentRuntimeVideoConfirmationConflictError(
-                            "VideoAgent confirmation 已不能取消"
-                        )
-            except AgentRuntimeRecordConflictError as exc:
-                raise AgentRuntimeVideoConfirmationConflictError(
-                    "VideoAgent confirmation 与权威状态冲突"
-                ) from exc
-
-            result_step = next(
-                (item for item in result.steps if item.step_id == step.step_id),
-                None,
-            )
-            if result_step is None:
-                raise AgentRuntimeVideoConfirmationConflictError(
-                    "VideoAgent confirmation 结果缺少原步骤"
-                )
-            return VideoAgentConfirmationResponse(
-                confirmation_id=confirmation_id,
-                plan_id=result.plan_id,
-                step_id=result_step.step_id,
-                decision=request.decision,
-                plan_status=result.status,
-                step_status=result_step.status,
+                return response
+            raise AgentRuntimeVideoConfirmationConflictError(
+                "旧 Plan 步骤确认已删除；请使用原生 confirmation"
             )
         finally:
-            if credential is not None:
+            if credential is not None and not credential_handed_off:
                 credential.discard()
+
+    async def _respond_to_native_confirmation(
+        self,
+        *,
+        owner: str,
+        conversation_id: str,
+        confirmation_id: str,
+        request: VideoAgentConfirmationResponseRequest,
+        workspace,
+        plan,
+        pending: dict,
+        credential: TransientVideoAgentCredential | None,
+    ) -> tuple[VideoAgentConfirmationResponse, bool]:
+        """原生确认单：确认后写入 approved 并内部 resume Turn；取消则清空 pending。
+
+        返回 (响应, 是否已把 credential 交给后台 resume)。
+        """
+
+        now = datetime.now(UTC)
+        step_id = str(pending.get("tool_call_id") or request.step_id or "native")[:64]
+        if request.decision == "cancel":
+            await self._video_agent_repository.apply_workspace_patch(
+                owner,
+                workspace.workspace_id,
+                {
+                    "native_pending_confirmation": None,
+                    "native_approved_confirmation": None,
+                },
+                expected_revision=workspace.revision,
+                now=now,
+            )
+            if plan is not None and plan.status is AgentPlanStatus.AWAITING_CONFIRMATION:
+                plan = await self._video_agent_repository.update_plan_status(
+                    owner,
+                    plan.plan_id,
+                    AgentPlanStatus.CANCELLED,
+                    now=now,
+                )
+            return (
+                VideoAgentConfirmationResponse(
+                    confirmation_id=confirmation_id,
+                    plan_id=plan.plan_id if plan is not None else "plan-native",
+                    step_id=step_id,
+                    decision="cancel",
+                    plan_status=(
+                        plan.status if plan is not None else AgentPlanStatus.CANCELLED
+                    ),
+                    step_status=PlanStepStatus.SKIPPED,
+                ),
+                False,
+            )
+
+        expected = pending.get("expected_revision")
+        if isinstance(expected, int) and expected != workspace.revision:
+            # 兼容旧 pending：写入 native_pending 自身会 +1，闸门仍记写入前 revision。
+            if expected != workspace.revision - 1:
+                raise AgentRuntimeVideoConfirmationConflictError(
+                    "VideoAgent confirmation revision 已变化，请重新确认"
+                )
+
+        will_resume = self._video_agent_runner is not None and plan is not None
+        if will_resume and credential is None:
+            raise AgentRuntimeVideoConfirmationUnavailableError(
+                "VideoAgent 确认恢复缺少执行凭据"
+            )
+
+        approved = {
+            "tool_name": str(pending.get("tool_name") or ""),
+            "tool_call_id": str(pending.get("tool_call_id") or ""),
+            # 与 pending 一样预置写入后 revision，避免确认 patch 自身导致闸门二次拦截
+            "expected_revision": workspace.revision + 1,
+            "confirmation_id": confirmation_id,
+            "arguments": (
+                dict(pending["arguments"])
+                if isinstance(pending.get("arguments"), dict)
+                else {}
+            ),
+        }
+        updated = await self._video_agent_repository.apply_workspace_patch(
+            owner,
+            workspace.workspace_id,
+            {
+                "native_pending_confirmation": None,
+                "native_approved_confirmation": approved,
+            },
+            expected_revision=workspace.revision,
+            now=now,
+        )
+        if approved.get("expected_revision") != updated.revision:
+            approved = {**approved, "expected_revision": updated.revision + 1}
+            await self._video_agent_repository.apply_workspace_patch(
+                owner,
+                workspace.workspace_id,
+                {"native_approved_confirmation": approved},
+                expected_revision=updated.revision,
+                now=now,
+            )
+        if plan is not None and plan.status is AgentPlanStatus.AWAITING_CONFIRMATION:
+            plan = await self._video_agent_repository.update_plan_status(
+                owner,
+                plan.plan_id,
+                AgentPlanStatus.RUNNING,
+                now=now,
+            )
+        credential_handed_off = False
+        if will_resume:
+            from pixelflow.video_agent.runner import VideoAgentRunScope
+
+            self._schedule_executor_notification(
+                self._video_agent_runner.notify_turn(
+                    VideoAgentRunScope(
+                        user_id=owner,
+                        conversation_id=conversation_id,
+                        turn_id=f"confirm-{confirmation_id[:24]}",
+                        plan_id=plan.plan_id,
+                    ),
+                    credential,
+                ),
+                credential=credential,
+                kind="VideoAgent Native Confirm Resume",
+            )
+            credential_handed_off = True
+        return (
+            VideoAgentConfirmationResponse(
+                confirmation_id=confirmation_id,
+                plan_id=plan.plan_id if plan is not None else "plan-native",
+                step_id=step_id,
+                decision="confirm",
+                plan_status=plan.status if plan is not None else AgentPlanStatus.RUNNING,
+                step_status=PlanStepStatus.RUNNING,
+            ),
+            credential_handed_off,
+        )
 
     async def respond_to_video_agent_quota(
         self,
@@ -1512,14 +1691,31 @@ class AgentRuntimeService:
                         expected_revision=revision,
                     )
                 else:
-                    if self._video_agent_executor is None or credential is None:
+                    if self._video_agent_runner is None or credential is None:
                         raise AgentRuntimeVideoQuotaUnavailableError(
-                            "VideoAgent start额度恢复缺少执行凭据"
+                            "VideoAgent start额度恢复缺少原生 Runner 或执行凭据"
                         )
-                    await self._video_agent_executor.resume_plan(
+                    from pixelflow.video_agent.runner import VideoAgentRunScope
+
+                    turn_id = ""
+                    workspace = await self._video_agent_repository.get_workspace(
                         owner,
-                        plan.plan_id,
-                        credential=credential,
+                        plan.workspace_id,
+                    )
+                    if workspace is not None:
+                        raw_turn = workspace.payload.get("active_turn_id")
+                        if isinstance(raw_turn, str):
+                            turn_id = raw_turn.strip()
+                    if not turn_id:
+                        turn_id = f"quota-resume:{plan.plan_id}"
+                    await self._video_agent_runner.notify_turn(
+                        VideoAgentRunScope(
+                            user_id=owner,
+                            conversation_id=conversation_id,
+                            turn_id=turn_id,
+                            plan_id=plan.plan_id,
+                        ),
+                        credential,
                     )
             else:
                 await self._video_agent_repository.cancel_quota_interrupted_plan(
@@ -1577,6 +1773,30 @@ class AgentRuntimeService:
         )
         if conversation is None:
             raise LookupError("Conversation not found")
+        if (
+            getattr(conversation, "orchestration_mode", None)
+            == OrchestrationMode.FRONTEND_V2.value
+            and self._video_agent_entrypoint is not None
+            and self.config.mode == "primary"
+            and "video" in self.primary_execution_intents
+        ):
+            from pixelflow.video_agent.legacy_upgrade import FrontendV2LegacyUpgrader
+
+            upgrader = FrontendV2LegacyUpgrader(
+                task_store=self.task_store,
+                video_repository=self._video_agent_repository,
+            )
+            await upgrader.upgrade_if_needed(
+                user_id=owner,
+                conversation=conversation,
+                now=self._clock(),
+            )
+            conversation = await self.require_conversation(
+                user_id=owner,
+                conversation_id=conversation_id,
+            )
+            if conversation is None:
+                raise LookupError("Conversation not found")
         state = await self._video_agent_repository.load_conversation_state(
             owner,
             conversation_id,
@@ -1588,7 +1808,9 @@ class AgentRuntimeService:
         workspace, _plan = state
         if workspace.revision != request.expected_revision:
             raise AgentRuntimeVideoScriptConflictError(
-                "脚本工作区版本已变化，请刷新后重试"
+                "脚本工作区版本已变化，请刷新后重试",
+                current_revision=workspace.revision,
+                workspace_id=workspace.workspace_id,
             )
         markdown = request.markdown.replace("\r\n", "\n").replace("\r", "\n").strip()
         if not markdown:
@@ -1646,8 +1868,16 @@ class AgentRuntimeService:
                 now=self._clock(),
             )
         except AgentRuntimeRecordConflictError as exc:
+            # CAS 竞态：回读权威 revision，供前端按新版本重试，避免 Snapshot 投影滞后时死磕旧值。
+            latest = await self._video_agent_repository.load_conversation_state(
+                owner,
+                conversation_id,
+            )
+            latest_workspace = latest[0] if latest is not None else workspace
             raise AgentRuntimeVideoScriptConflictError(
-                "脚本工作区版本冲突，请刷新后重试"
+                "脚本工作区版本冲突，请刷新后重试",
+                current_revision=latest_workspace.revision,
+                workspace_id=latest_workspace.workspace_id,
             ) from exc
         if request.confirm_for_generation:
             # 成片确认后收口仍在跑的脚本润色/创作计划，避免执行卡假忙碌。
@@ -1662,6 +1892,297 @@ class AgentRuntimeService:
             script_version=next_version,
             artifact_ref=artifact_ref,
         )
+
+    async def confirm_video_agent_script_plan(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        request: VideoAgentConfirmScriptPlanRequest,
+        credential: TransientVideoAgentCredential | None = None,
+    ) -> VideoAgentConfirmScriptPlanResponse:
+        """按钮确认脚本方案：写确认位并启动 prepare_scene_packages（不进模型）。"""
+
+        from pixelflow.creative.script_shots import (
+            compute_scene_packages_source_digest,
+            extract_script_shot_entries,
+            prefer_structured_shot_markdown,
+            resolve_shot_source_markdown,
+            sync_shot_source_into_pipeline,
+        )
+        from pixelflow.video_agent.production_fields import (
+            reconcile_missing_with_workspace,
+            workspace_missing_requirements,
+        )
+        from pixelflow.video_agent.tools.registry import (
+            VideoToolContext,
+            VideoToolExecutionError,
+            VideoToolValidationError,
+        )
+
+        owner = user_id.strip()
+        if (
+            self._video_agent_repository is None
+            or self._video_agent_executor is None
+        ):
+            raise AgentRuntimeVideoScriptUnavailableError(
+                "VideoAgent脚本确认入口尚未安装"
+            )
+        conversation = await self.require_conversation(
+            user_id=owner,
+            conversation_id=conversation_id,
+        )
+        if conversation is None:
+            raise LookupError("Conversation not found")
+        if (
+            getattr(conversation, "orchestration_mode", None)
+            == OrchestrationMode.FRONTEND_V2.value
+            and self._video_agent_entrypoint is not None
+            and self.config.mode == "primary"
+            and "video" in self.primary_execution_intents
+        ):
+            from pixelflow.video_agent.legacy_upgrade import FrontendV2LegacyUpgrader
+
+            upgrader = FrontendV2LegacyUpgrader(
+                task_store=self.task_store,
+                video_repository=self._video_agent_repository,
+            )
+            await upgrader.upgrade_if_needed(
+                user_id=owner,
+                conversation=conversation,
+                now=self._clock(),
+            )
+
+        state = await self._video_agent_repository.load_conversation_state(
+            owner,
+            conversation_id,
+        )
+        if state is None:
+            raise AgentRuntimeVideoScriptNotReadyError(
+                "当前会话没有可确认的视频工作区",
+                missing_fields=["脚本正文"],
+            )
+        workspace, _plan = state
+        if workspace.revision != request.expected_revision:
+            raise AgentRuntimeVideoScriptConflictError(
+                "脚本工作区版本已变化，请刷新后重试",
+                current_revision=workspace.revision,
+                workspace_id=workspace.workspace_id,
+            )
+
+        markdown = (request.markdown or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        # 预览确认常带上 script.content（导入原文）；优先保留已拆解的 episode/export。
+        markdown = prefer_structured_shot_markdown(markdown, workspace.payload)
+        if markdown:
+            save_response = await self.save_video_agent_script(
+                user_id=owner,
+                conversation_id=conversation_id,
+                request=VideoAgentScriptSaveRequest(
+                    markdown=markdown,
+                    expected_revision=workspace.revision,
+                    confirm_for_generation=True,
+                ),
+            )
+            loaded = await self._video_agent_repository.get_workspace(
+                owner,
+                save_response.workspace_id,
+            )
+            if loaded is None:
+                raise AgentRuntimeVideoScriptUnavailableError(
+                    "确认脚本后无法读取工作区"
+                )
+            workspace = loaded
+        else:
+            script = workspace.payload.get("script")
+            content = (
+                script.get("content")
+                if isinstance(script, dict)
+                else None
+            )
+            if not isinstance(content, str) or not content.strip():
+                raise AgentRuntimeVideoScriptNotReadyError(
+                    "当前没有可确认的脚本正文",
+                    missing_fields=["脚本正文"],
+                    workspace_id=workspace.workspace_id,
+                    revision=workspace.revision,
+                )
+            if workspace.payload.get("script_plan_confirmed") is not True:
+                try:
+                    workspace = await self._video_agent_repository.apply_workspace_patch(
+                        owner,
+                        workspace.workspace_id,
+                        {"script_plan_confirmed": True},
+                        expected_revision=workspace.revision,
+                        now=self._clock(),
+                    )
+                except AgentRuntimeRecordConflictError as exc:
+                    latest = await self._video_agent_repository.load_conversation_state(
+                        owner,
+                        conversation_id,
+                    )
+                    latest_workspace = latest[0] if latest is not None else workspace
+                    raise AgentRuntimeVideoScriptConflictError(
+                        "脚本工作区版本冲突，请刷新后重试",
+                        current_revision=latest_workspace.revision,
+                        workspace_id=latest_workspace.workspace_id,
+                    ) from exc
+            await self._video_agent_repository.cancel_active_script_skill_plans(
+                owner,
+                conversation_id,
+                now=self._clock(),
+            )
+
+        # 确认正文若像可抽镜成稿，回写 episode，避免只改 script.content 时重拆仍吃旧 pipeline。
+        episode_synced = False
+        if markdown:
+            pipeline_patch = sync_shot_source_into_pipeline(
+                workspace.payload,
+                markdown,
+                source="user_confirm",
+            )
+            if pipeline_patch:
+                try:
+                    workspace = await self._video_agent_repository.apply_workspace_patch(
+                        owner,
+                        workspace.workspace_id,
+                        pipeline_patch,
+                        expected_revision=workspace.revision,
+                        now=self._clock(),
+                    )
+                    episode_synced = True
+                except AgentRuntimeRecordConflictError as exc:
+                    latest = await self._video_agent_repository.load_conversation_state(
+                        owner,
+                        conversation_id,
+                    )
+                    latest_workspace = latest[0] if latest is not None else workspace
+                    raise AgentRuntimeVideoScriptConflictError(
+                        "脚本工作区版本冲突，请刷新后重试",
+                        current_revision=latest_workspace.revision,
+                        workspace_id=latest_workspace.workspace_id,
+                    ) from exc
+
+        gaps = reconcile_missing_with_workspace(
+            workspace_missing_requirements(workspace.payload),
+            workspace.payload,
+        )
+        if gaps:
+            raise AgentRuntimeVideoScriptNotReadyError(
+                f"脚本方案仍缺少：{'、'.join(gaps)}",
+                missing_fields=gaps,
+                workspace_id=workspace.workspace_id,
+                revision=workspace.revision,
+            )
+
+        def _has_scene_packages(payload: Mapping[str, object]) -> bool:
+            for key in ("scene_packages", "scenes"):
+                value = payload.get(key)
+                if isinstance(value, list) and any(
+                    isinstance(item, Mapping) for item in value
+                ):
+                    return True
+            return False
+
+        def _need_count_refresh(payload: Mapping[str, object]) -> bool:
+            packages = payload.get("scene_packages") or payload.get("scenes")
+            package_count = 0
+            if isinstance(packages, list):
+                package_count = sum(
+                    1 for item in packages if isinstance(item, Mapping)
+                )
+            if package_count <= 0:
+                return False
+            body = resolve_shot_source_markdown(payload)
+            entries = extract_script_shot_entries(body)
+            if len(entries) < 4:
+                return False
+            return package_count * 2 <= len(entries)
+
+        def _script_changed_since_prepare(payload: Mapping[str, object]) -> bool:
+            """相对上次 prepare 的脚本指纹是否变化。
+
+            - 有指纹：与当前抽镜正文+设定不一致 → 重拆
+            - 无指纹的旧包：仅在本次确认已回写 episode（说明用户改了可抽镜正文）时重拆
+            """
+
+            if episode_synced:
+                return True
+            current = compute_scene_packages_source_digest(payload)
+            if not current:
+                return False
+            stored = payload.get("scene_packages_source_digest")
+            if not isinstance(stored, str) or not stored.strip():
+                return False
+            return stored.strip() != current
+
+        if (
+            _has_scene_packages(workspace.payload)
+            and not _need_count_refresh(workspace.payload)
+            and not _script_changed_since_prepare(workspace.payload)
+        ):
+            return VideoAgentConfirmScriptPlanResponse(
+                workspace_id=workspace.workspace_id,
+                revision=workspace.revision,
+                job_id=None,
+                public_summary="脚本方案已确认，当前视频场景包可继续使用",
+                missing_fields=[],
+            )
+
+        plan_id = f"plan-confirm-script-{conversation_id[:12]}"
+        step_id = f"{plan_id}-prepare"
+        context = VideoToolContext(
+            user_id=owner,
+            workspace=workspace,
+            plan_id=plan_id,
+            step_id=step_id,
+            credential=credential,
+        )
+        try:
+            try:
+                result = await self._video_agent_executor.execute_tool_call(
+                    context=context,
+                    tool_name="prepare_scene_packages",
+                    arguments={},
+                )
+            except VideoToolValidationError as exc:
+                raise AgentRuntimeVideoScriptNotReadyError(
+                    str(exc) or "脚本方案未就绪，无法生成资产包",
+                    missing_fields=gaps,
+                    workspace_id=workspace.workspace_id,
+                    revision=workspace.revision,
+                ) from exc
+            except VideoToolExecutionError as exc:
+                raise AgentRuntimeVideoScriptUnavailableError(
+                    str(exc) or "资产包准备未能启动"
+                ) from exc
+
+            refreshed = await self._video_agent_repository.get_workspace(
+                owner,
+                workspace.workspace_id,
+            )
+            if refreshed is None:
+                refreshed = workspace
+            pending = tuple(getattr(result, "pending_operation_job_ids", ()) or ())
+            job_id = pending[0] if pending else None
+            if job_id is None:
+                raw_job = refreshed.payload.get("scene_package_job")
+                if isinstance(raw_job, Mapping):
+                    raw_id = raw_job.get("job_id")
+                    if isinstance(raw_id, str) and raw_id.strip():
+                        job_id = raw_id.strip()
+            summary = str(
+                getattr(result, "public_summary", "") or "已启动视频资产包准备"
+            ).strip()
+            return VideoAgentConfirmScriptPlanResponse(
+                workspace_id=refreshed.workspace_id,
+                revision=refreshed.revision,
+                job_id=job_id,
+                public_summary=summary[:500],
+                missing_fields=[],
+            )
+        finally:
+            if credential is not None:
+                credential.discard()
 
     async def resume_workflow(
         self,
@@ -1810,10 +2331,24 @@ class AgentRuntimeService:
                 last_outcome = "completed"
 
         latest_event = events[-1] if events else None
-        folded_thinking = [
-            RuntimeVideoAgentThinkingProjection.model_validate(item)
-            for item in fold_thinking_history_from_events(events)
-        ]
+        turn_anchor_by_id = {
+            turn.turn_id: str(turn.client_input_id)
+            for turn in turns
+            if getattr(turn, "client_input_id", None) is not None
+        }
+        folded_thinking = []
+        for item in fold_thinking_history_from_events(events):
+            if not isinstance(item, dict):
+                continue
+            enriched = dict(item)
+            turn_key = str(enriched.get("turn_id") or "").strip()
+            client_input = turn_anchor_by_id.get(turn_key)
+            if client_input:
+                enriched["client_input_id"] = client_input
+                enriched["after_message_id"] = client_input
+            folded_thinking.append(
+                RuntimeVideoAgentThinkingProjection.model_validate(enriched)
+            )
         video_agent: RuntimeVideoAgentProjection | None = None
         if self._video_agent_repository is not None:
             try:
@@ -1889,6 +2424,47 @@ class AgentRuntimeService:
                     )
                 confirmation: RuntimeVideoAgentConfirmationProjection | None = None
                 quota: RuntimeVideoAgentQuotaProjection | None = None
+                native_pending = workspace.payload.get("native_pending_confirmation")
+                if (
+                    isinstance(native_pending, dict)
+                    and str(native_pending.get("confirmation_id") or "").strip()
+                ):
+                    native_tool = str(native_pending.get("tool_name") or "").strip()
+                    native_call = (
+                        str(native_pending.get("tool_call_id") or "native").strip()
+                        or "native"
+                    )
+                    native_plan = (
+                        str(
+                            native_pending.get("plan_id")
+                            or (plan.plan_id if plan is not None else "plan-native")
+                        ).strip()
+                        or "plan-native"
+                    )
+                    title_by_tool = {
+                        "compose_or_export_video": "合并分镜视频为成片",
+                        "generate_scenes": "生成分镜视频",
+                        "generate_scene_assets": "生成场景参考图",
+                        "prepare_scene_packages": "准备场景包",
+                    }
+                    confirmation = RuntimeVideoAgentConfirmationProjection(
+                        confirmation_id=str(native_pending["confirmation_id"]).strip(),
+                        plan_id=native_plan,
+                        step_id=native_call,
+                        title=title_by_tool.get(native_tool, native_tool or "待确认步骤"),
+                        cost_summary=_confirmation_cost_summary(
+                            native_tool,
+                            0,
+                            workspace_payload=workspace.payload,
+                        ),
+                        affected_scene_ids=[],
+                        submittable=self._video_agent_executor is not None,
+                        unavailable_reason=(
+                            None
+                            if self._video_agent_executor is not None
+                            else "确认执行入口将在统一VideoAgent入口装配后开放。"
+                        ),
+                    )
                 if plan is not None:
                     waiting_steps = [
                         step
@@ -1914,7 +2490,7 @@ class AgentRuntimeService:
                             owner,
                             plan.plan_id,
                         )
-                    if waiting_steps:
+                    if confirmation is None and waiting_steps:
                         waiting_step = waiting_steps[0]
                         affected_scene_ids = _safe_affected_scene_ids(
                             waiting_step.arguments,

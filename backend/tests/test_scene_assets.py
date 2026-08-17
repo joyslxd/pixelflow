@@ -551,6 +551,63 @@ def test_generate_scene_assets_only_retries_target_assets_and_preserves_complete
     assert result["global_assets"]["props"][0]["images"] == ["https://x/prop-completed.png"]
 
 
+def test_generate_scene_assets_empty_target_assets_means_generate_all():
+    """Tool 默认 target_assets=() → Operation 传入 []，不得当成「重试目标为空」滤掉全部作业。"""
+
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            return ImageGenerationResult(ok=True, images=[{"url": f"https://x/{len(calls)}.png"}], raw={})
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [
+                    {
+                        "asset_id": "character-anran",
+                        "name": "安然",
+                        "description": "女主",
+                        "three_view_prompt": "安然人物三视图",
+                    }
+                ],
+                "scenes": [
+                    {
+                        "asset_id": "scene-desk",
+                        "name": "剪辑工作站",
+                        "description": "室内",
+                        "image_prompt": "剪辑工作站场景图",
+                    }
+                ],
+                "props": [
+                    {
+                        "asset_id": "prop-sunscreen",
+                        "name": "氧气防晒",
+                        "description": "产品",
+                        "image_prompt": "氧气防晒产品图",
+                    }
+                ],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[],
+            image_ratio="9:16",
+            image_size="2K",
+            model="seeddream-5.0",
+            quota_checker=lambda _value: False,
+            target_assets=[],
+        )
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 3
+    assert result["failed_assets"] == []
+
+
 def test_generate_scene_assets_keeps_unattempted_retry_targets_after_quota_pause():
     calls: list[str] = []
 

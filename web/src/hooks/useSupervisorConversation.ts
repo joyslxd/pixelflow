@@ -6,6 +6,14 @@ import {
 } from "react";
 
 import {
+  type NativeVideoAgentUiState,
+} from "../features/native-video-agent/state/contracts.js";
+import {
+  hydrateNativeVideoAgentUiState,
+  reduceNativeVideoAgentEvent,
+  resetNativeVideoAgentUiState,
+} from "../features/native-video-agent/state/reducer.js";
+import {
   supervisorApi,
   type SupervisorApiTransport,
 } from "../lib/supervisor/api.js";
@@ -45,6 +53,7 @@ export interface SupervisorConversationControllerOptions {
 
 export interface SupervisorConversationController {
   getState(): SupervisorRuntimeState;
+  getNativeUiState(): NativeVideoAgentUiState;
   getContextVersion(): number | null;
   subscribe(listener: () => void): () => void;
   start(): Promise<void>;
@@ -75,6 +84,7 @@ export interface UseSupervisorConversationOptions {
 
 export interface UseSupervisorConversationResult {
   state: SupervisorRuntimeState;
+  nativeUiState: NativeVideoAgentUiState;
   contextVersion: number | null;
   getContextVersion(): number | null;
   refreshSnapshot(): Promise<SupervisorEventResumePoint>;
@@ -134,6 +144,7 @@ export function createSupervisorConversationController(
   const projectSnapshot = options.projectSnapshot ?? defaultProjectSnapshot;
   const listeners = new Set<() => void>();
   let state = createSupervisorRuntimeState(conversationId);
+  let nativeUiState = resetNativeVideoAgentUiState(conversationId);
   let lifecycleController: AbortController | null = null;
   let eventSubscription: SupervisorEventSubscription | null = null;
   let generation = 0;
@@ -141,14 +152,32 @@ export function createSupervisorConversationController(
   let disposed = false;
   let contextVersion: number | null = null;
 
-  const publish = (nextState: SupervisorRuntimeState) => {
-    if (nextState === state) return;
-    state = nextState;
+  const notify = () => {
     for (const listener of [...listeners]) listener();
   };
 
   const dispatch = (action: SupervisorRuntimeAction) => {
-    publish(supervisorRuntimeReducer(state, action));
+    const nextState = supervisorRuntimeReducer(state, action);
+    let nextNative = nativeUiState;
+    if (action.type === "event.received") {
+      nextNative = reduceNativeVideoAgentEvent(nativeUiState, action.event);
+    } else if (action.type === "snapshot.hydrated") {
+      // startTurn 前会 refreshSnapshot：必须保留已投影 Turn（含 tool 卡片），
+      // 再用 Snapshot 思考历史补齐缺失正文，禁止整表清空。
+      nextNative = hydrateNativeVideoAgentUiState(
+        nativeUiState,
+        conversationId,
+        action.snapshot.agentThinkingHistory || [],
+      );
+    } else if (action.type === "conversation.reset") {
+      nextNative = resetNativeVideoAgentUiState(action.conversationId);
+    }
+    const stateChanged = nextState !== state;
+    const nativeChanged = nextNative !== nativeUiState;
+    if (!stateChanged && !nativeChanged) return;
+    state = nextState;
+    nativeUiState = nextNative;
+    notify();
   };
 
   const isCurrent = (session: number) => !disposed && generation === session;
@@ -346,6 +375,7 @@ export function createSupervisorConversationController(
 
   return {
     getState: () => state,
+    getNativeUiState: () => nativeUiState,
     getContextVersion: () => contextVersion,
     subscribe(listener) {
       listeners.add(listener);
@@ -383,6 +413,11 @@ export function useSupervisorConversation(
     controller.subscribe,
     controller.getState,
     controller.getState,
+  );
+  const nativeUiState = useSyncExternalStore(
+    controller.subscribe,
+    controller.getNativeUiState,
+    controller.getNativeUiState,
   );
   const contextVersion = controller.getContextVersion();
   const getContextVersion = useCallback(
@@ -431,6 +466,7 @@ export function useSupervisorConversation(
 
   return useMemo(() => ({
     state,
+    nativeUiState,
     contextVersion,
     getContextVersion,
     refreshSnapshot,
@@ -439,5 +475,16 @@ export function useSupervisorConversation(
     respondToVideoAgentConfirmation,
     respondToVideoAgentQuota,
     getRunStatus,
-  }), [contextVersion, getContextVersion, getRunStatus, refreshSnapshot, respondToInterrupt, respondToVideoAgentConfirmation, respondToVideoAgentQuota, startTurn, state]);
+  }), [
+    contextVersion,
+    getContextVersion,
+    getRunStatus,
+    nativeUiState,
+    refreshSnapshot,
+    respondToInterrupt,
+    respondToVideoAgentConfirmation,
+    respondToVideoAgentQuota,
+    startTurn,
+    state,
+  ]);
 }

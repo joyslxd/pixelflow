@@ -50,6 +50,35 @@ def test_fold_thinking_history_from_events_rebuilds_transcript() -> None:
     assert history[0]["status"] == "completed"
 
 
+def test_fold_thinking_history_includes_native_reasoning_and_response() -> None:
+    from pixelflow.agent_runtime.contracts import AgentEventType
+    from pixelflow.video_agent.thinking_stream import fold_thinking_history_from_events
+
+    events = [
+        SimpleNamespace(
+            type=AgentEventType.AGENT_REASONING_SUMMARY_DELTA,
+            occurred_at="2026-08-13T00:42:00Z",
+            payload={"turn_id": "turn-native", "delta": "先导入"},
+        ),
+        SimpleNamespace(
+            type=AgentEventType.AGENT_REASONING_SUMMARY_COMPLETED,
+            occurred_at="2026-08-13T00:42:10Z",
+            payload={"turn_id": "turn-native", "summary": "先导入再补字段"},
+        ),
+        SimpleNamespace(
+            type=AgentEventType.AGENT_RESPONSE_COMPLETED,
+            occurred_at="2026-08-13T00:43:00Z",
+            payload={"turn_id": "turn-native", "text": "请确认画幅与 CTA"},
+        ),
+    ]
+    history = fold_thinking_history_from_events(events)
+    assert len(history) == 1
+    assert history[0]["turn_id"] == "turn-native"
+    assert history[0]["text"] == "先导入再补字段"
+    assert history[0]["answer"] == "请确认画幅与 CTA"
+    assert history[0]["status"] == "completed"
+
+
 def test_parse_intake_allows_script_plan_confirm_missing() -> None:
     from pixelflow.video_agent.thinking_stream import _parse_intake_answer_and_verdict
 
@@ -323,264 +352,6 @@ def test_parse_duration_sec_payload() -> None:
     assert _parse_duration_sec_payload('废话\n{"duration_sec": 180}\n') == 180
     assert _parse_duration_sec_payload('{"duration_sec": null}') is None
     assert _parse_duration_sec_payload("not-json") is None
-
-
-@pytest.mark.asyncio
-async def test_intake_thinking_always_uses_llm_not_local_script_copy() -> None:
-    """成熟长脚本也必须走真 LLM 思考，禁止本地拼「从时间码粗看」类文案。"""
-
-    from datetime import UTC, datetime
-
-    from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
-    from pixelflow.video_agent.thinking_stream import (
-        ThinkingStreamPublisher,
-        stream_intake_thinking,
-    )
-
-    script = (
-        "0—10秒｜开场\n【剧情/动作】安然盯着手机。\n【新增对白】安然：如果失败呢？\n"
-        "10—20秒｜转折\n【剧情/动作】Yann退到镜头外。\n【新增对白】Yann：选择你来做。\n"
-        "170—180秒｜收束\n【剧情/动作】字幕结束。\n【新增对白】安然：准备好了。\n"
-    ) * 8
-    merged = f"{script}\n\n【本轮指令】180s 9:16 结尾不变"
-
-    class _ThinkingModel:
-        async def astream(self, messages):  # noqa: ANN001
-            joined = str(messages)
-            assert "【本轮指令】" in joined
-            assert "180s" in joined
-            assert "【workspace_digest】" in joined
-            assert "【blocking_confirmation】" in joined
-            yield SimpleNamespace(
-                content=(
-                    "这是补字段跟进，总时长按本轮180秒，画幅9:16，结尾沿用脚本。\n"
-                    "<<<INTAKE_PLAN>>>\n"
-                    '{"answer":"这是补字段跟进，总时长按本轮180秒，画幅9:16，结尾沿用脚本。",'
-                    '"needs_user_reply":false,"missing":[],'
-                    '"facts":{"duration_sec":180,"aspect_ratio":"9:16","ending_cta":"keep","intent":"polish"},'
-                    '"public_goal":"这是补字段跟进，总时长按本轮180秒，画幅9:16，结尾沿用脚本。",'
-                    '"steps":[{"tool_name":"import_script","title":"导入脚本","arguments":{}}]}\n'
-                    "<<<END>>>"
-                ),
-                additional_kwargs={"reasoning_content": "先核对本轮补丁与脚本时间码。"},
-            )
-
-    def factory(**_kwargs):  # noqa: ANN003
-        return _ThinkingModel()
-
-    repo = MemoryAgentRuntimeRepository()
-    publisher = ThinkingStreamPublisher(
-        repository=repo,
-        user_id="u1",
-        conversation_id="c1",
-        turn_id="t1",
-        clock=lambda: datetime(2026, 8, 11, tzinfo=UTC),
-    )
-    result = await stream_intake_thinking(
-        publisher=publisher,
-        content=merged,
-        workspace_digest={"has_script": True, "missing_requirements": []},
-        blocking_confirmation=None,
-        model_factory=factory,
-    )
-    events = await repo.list_events("u1", "c1")
-    reasoning = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "reasoning"
-    )
-    answer = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "answer"
-    )
-    assert "正在核对工作区状态" in reasoning
-    assert "正在检查生成前置条件" in reasoning
-    assert "先核对本轮补丁" not in reasoning
-    assert "补字段跟进" in answer
-    assert "INTAKE_PLAN" not in answer
-    assert "INTAKE_VERDICT" not in answer
-    assert "补字段跟进" not in reasoning
-    assert "从时间码粗看" not in reasoning
-    assert "已识别为较完整的分镜" not in reasoning
-    assert "已识别时长：10秒" not in reasoning
-    assert result.entry_path == "polish"
-    assert result.duration_sec == 180
-    assert result.aspect_ratio == "9:16"
-    assert result.needs_user_reply is False
-    assert not hasattr(result, "steps")
-
-
-@pytest.mark.asyncio
-async def test_intake_streams_safe_ndjson_progress_and_parses_terminal_result() -> None:
-    from datetime import UTC, datetime
-
-    from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
-    from pixelflow.video_agent.thinking_stream import (
-        ThinkingStreamPublisher,
-        stream_intake_thinking,
-    )
-
-    class _NdjsonModel:
-        async def astream(self, _messages):  # noqa: ANN001
-            yield SimpleNamespace(
-                content='{"type":"progress","message":"已识别现有脚本，正在核对生产字段。"}\n'
-                '{"type":"progress","message":"正在检查分镜资产包是否完整。"',
-                additional_kwargs={"reasoning_content": "系统要求我先复述提示词和规则。"},
-            )
-            yield SimpleNamespace(
-                content='}\n'
-                '{"type":"progress","message":"正在检查分镜资产包是否完整。"}\n'
-                '{"type":"progress","message":"系统提示词规定必须调用 import_script。"}\n',
-                additional_kwargs={},
-            )
-            yield SimpleNamespace(
-                content='{"type":"result","data":{"answer":"可以进入分镜检查。",'
-                '"intent":"continue_assets","target_capability":"inspect_storyboard",'
-                '"readiness":"inspect_required","current_state":'
-                '{"script_available":true,"script_confirmed":true,'
-                '"storyboard_available":true},"missing":[],"facts":'
-                '{"scene_ids":["scene-2"]},"constraints":'
-                '{"requires_visual_inspection":true}}}',
-                additional_kwargs={},
-            )
-
-    repo = MemoryAgentRuntimeRepository()
-    result = await stream_intake_thinking(
-        publisher=ThinkingStreamPublisher(
-            repository=repo,
-            user_id="u1",
-            conversation_id="c-ndjson",
-            turn_id="t-ndjson",
-            clock=lambda: datetime(2026, 8, 12, tzinfo=UTC),
-        ),
-        content="检查一下现有分镜",
-        model_factory=lambda **_kwargs: _NdjsonModel(),
-    )
-
-    events = await repo.list_events("u1", "c-ndjson")
-    visible_reasoning = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "reasoning"
-    )
-    assert "已识别现有脚本，正在核对生产字段。" in visible_reasoning
-    assert visible_reasoning.count("正在检查分镜资产包是否完整。") == 1
-    assert "系统要求我" not in visible_reasoning
-    assert "系统提示词" not in visible_reasoning
-    assert result.user_message == "可以进入分镜检查。"
-    assert result.target_capability == "inspect_storyboard"
-    assert result.readiness == "inspect_required"
-    assert result.scene_ids == ("scene-2",)
-    assert result.constraints == {"requires_visual_inspection": True}
-
-
-@pytest.mark.asyncio
-async def test_intake_thinking_skips_answer_channel_when_needs_user_reply() -> None:
-    """缺字段追问只落 Plan 卡，不写 answer 气泡。"""
-
-    from datetime import UTC, datetime
-
-    from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
-    from pixelflow.video_agent.thinking_stream import (
-        ThinkingStreamPublisher,
-        stream_intake_thinking,
-    )
-
-    class _AskModel:
-        async def astream(self, _messages):  # noqa: ANN001
-            yield SimpleNamespace(
-                content=(
-                    "缺少画幅与结尾行动引导，请补充。\n"
-                    "<<<INTAKE_VERDICT>>>\n"
-                    '{"entry_path":"polish","missing":["视频画幅","结尾行动引导"],'
-                    '"duration_sec":180,"needs_user_reply":true}\n'
-                    "<<<END>>>"
-                ),
-                additional_kwargs={"reasoning_content": "先核缺字段。"},
-            )
-
-    def factory(**_kwargs):  # noqa: ANN003
-        return _AskModel()
-
-    repo = MemoryAgentRuntimeRepository()
-    publisher = ThinkingStreamPublisher(
-        repository=repo,
-        user_id="u1",
-        conversation_id="c-waiting",
-        turn_id="t-waiting",
-        clock=lambda: datetime(2026, 8, 11, tzinfo=UTC),
-    )
-    result = await stream_intake_thinking(
-        publisher=publisher,
-        content="# 剧本\n### 镜头 01\n- **时间**：0-10秒\n",
-        workspace_digest=None,
-        blocking_confirmation=None,
-        model_factory=factory,
-    )
-    events = await repo.list_events("u1", "c-waiting")
-    answer = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "answer"
-    )
-    assert result.needs_user_reply is True
-    assert answer == ""
-    assert "缺少画幅" in result.user_message
-
-
-@pytest.mark.asyncio
-async def test_intake_thinking_content_only_goes_to_answer_channel() -> None:
-    """模型未返回 reasoning 时，公开区仍只展示服务端安全进度。"""
-
-    from datetime import UTC, datetime
-
-    from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
-    from pixelflow.video_agent.thinking_stream import (
-        ThinkingStreamPublisher,
-        stream_intake_thinking,
-    )
-
-    class _ContentOnlyModel:
-        async def astream(self, messages):  # noqa: ANN001, ARG002
-            yield SimpleNamespace(
-                content="已识别为短补丁，继续规划。",
-                additional_kwargs={},
-            )
-
-    repo = MemoryAgentRuntimeRepository()
-    publisher = ThinkingStreamPublisher(
-        repository=repo,
-        user_id="u1",
-        conversation_id="c1",
-        turn_id="t2",
-        clock=lambda: datetime(2026, 8, 11, tzinfo=UTC),
-    )
-    await stream_intake_thinking(
-        publisher=publisher,
-        content="9:16",
-        model_factory=lambda **_kwargs: _ContentOnlyModel(),
-    )
-    events = await repo.list_events("u1", "c1")
-    reasoning = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "reasoning"
-    )
-    answer = "".join(
-        str(event.payload.get("delta") or "")
-        for event in events
-        if event.type.value.endswith("delta")
-        and event.payload.get("channel") == "answer"
-    )
-    assert reasoning == "正在核对工作区状态。正在检查生成前置条件。"
-    assert answer == "已识别为短补丁，继续规划。"
-    assert answer.count("已识别为短补丁") == 1
 
 
 def test_truncate_for_thinking_keeps_round_instruction() -> None:

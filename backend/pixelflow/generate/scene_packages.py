@@ -13,7 +13,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pixelflow.creative.asset_manifest import extract_script_setting_assets, normalize_asset_manifest
@@ -24,7 +24,10 @@ from pixelflow.creative.duration import (
     split_video_duration,
 )
 from pixelflow.creative.scene_blueprint import normalize_scene_blueprints, validate_asset_requirement_quality
-from pixelflow.creative.script_shots import extract_script_scene_blueprints
+from pixelflow.creative.script_shots import (
+    ensure_narration_in_shot_description,
+    extract_script_scene_blueprints,
+)
 from pixelflow.generate.seedance_prompt import build_seedance_shot_prompt, load_seedance_guidance
 
 logger = logging.getLogger(__name__)
@@ -46,14 +49,19 @@ def prepare_video_scene_packages(
     asset_manifest: dict[str, Any] | None = None,
     *,
     authority_mode: bool = False,
+    shot_source_markdown: str = "",
+    settings_source_markdown: str = "",
 ) -> dict[str, Any]:
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
+    # 角色/场景/道具优先读 script_pipeline.characters，不用整份拼接稿或结构 LLM。
+    settings_markdown = str(settings_source_markdown or "").strip() or plan_markdown
     duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
         target_duration_ms,
         scene_blueprints,
         plan_markdown=plan_markdown,
+        shot_source_markdown=shot_source_markdown,
     )
     if authoritative_blueprints:
         validate_asset_requirement_quality(authoritative_blueprints)
@@ -86,7 +94,7 @@ def prepare_video_scene_packages(
             form_values=form_values,
             selected_direction=selected_direction,
             stage_templates=stage_templates,
-            plan_markdown=plan_markdown,
+            plan_markdown=settings_markdown,
         )
     if authoritative_blueprints and asset_manifest is None:
         global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
@@ -123,6 +131,15 @@ def prepare_video_scene_packages(
                 global_assets=global_assets,
             )
         )
+        # 底部旁白框已删：把 narration 补进镜头描述六字段，避免 UI 丢失对白。
+        if blueprint:
+            shot_description = {
+                **shot_description,
+                "text": ensure_narration_in_shot_description(
+                    str(shot_description.get("text") or ""),
+                    narration,
+                ),
+            }
         prompt = (
             (
                 build_authoritative_scene_prompt(
@@ -177,7 +194,7 @@ def prepare_video_scene_packages(
 
     return {
         "ok": True,
-        "message": "视频场景包已生成，请前端展示给用户逐场景编辑确认。",
+        "message": "已生成视频场景包，请打开卡片查看分镜与全局资产。",
         "requires_confirmation": True,
         "review_timeout_sec": None,
         "target_duration_ms": duration_ms,
@@ -198,8 +215,13 @@ async def prepare_video_scene_packages_with_llm(
     model_name: str = SCENE_PACKAGE_LLM_MODEL_NAME,
     model_factory: ModelFactory | None = None,
     on_progress: Any | None = None,
+    shot_source_markdown: str = "",
+    settings_source_markdown: str = "",
 ) -> dict[str, Any]:
-    """用 LLM 生成视频场景包，失败时降级到规则版场景包。"""
+    """用 LLM 生成视频场景包，失败时降级到规则版场景包。
+
+    VideoAgent 确认脚本后：镜头来自 episode、资产来自 characters，不再调用结构 LLM。
+    """
 
     async def emit(phase: str, message: str) -> None:
         if on_progress is None:
@@ -215,22 +237,36 @@ async def prepare_video_scene_packages_with_llm(
         target_duration_ms,
         scene_blueprints,
         plan_markdown=plan_markdown,
+        shot_source_markdown=shot_source_markdown,
     )
     if authoritative_blueprints:
         validate_asset_requirement_quality(authoritative_blueprints)
     scene_count = len(durations)
-    if authoritative_blueprints and asset_manifest is not None:
-        await emit("fast_path_manifest", "已有 Plan 蓝图与资产清单，跳过结构模型…")
+    settings_text = str(settings_source_markdown or "").strip()
+    # 已有成稿镜头蓝图，或已有 characters 设定：确定性投影，禁止再跑 _scene_package_prompt。
+    if authoritative_blueprints or settings_text or asset_manifest is not None:
+        await emit(
+            "fast_path_pipeline",
+            "已有脚本镜头与角色/场景/道具设定，跳过结构模型…",
+        )
         result = prepare_video_scene_packages(
             form_values=form_values,
             plan_markdown=plan_markdown,
             selected_direction=selected_direction,
             materials=materials,
             target_duration_ms=duration_ms,
-            scene_blueprints=authoritative_blueprints,
+            scene_blueprints=authoritative_blueprints or None,
             asset_manifest=asset_manifest,
+            shot_source_markdown=shot_source_markdown,
+            settings_source_markdown=settings_text,
         )
-        result["message"] = "已严格按最终 Plan 生成视频场景包和全局资产，不再进行二次资产分析。"
+        if authoritative_blueprints or settings_text:
+            result["message"] = (
+                "已根据脚本预览中的角色/场景/道具设定与成稿镜头生成视频场景包，"
+                "不再二次调用结构模型。"
+            )
+        else:
+            result["message"] = "已严格按最终 Plan 生成视频场景包和全局资产，不再进行二次资产分析。"
         result["llm_used"] = False
         result["model_name"] = model_name
         await emit("completed", result["message"])
@@ -263,14 +299,14 @@ async def prepare_video_scene_packages_with_llm(
             form_values,
             selected_direction,
             stage_templates,
-            plan_markdown=plan_markdown,
+            plan_markdown=settings_text or plan_markdown,
         )
         if authoritative_blueprints:
             global_assets = _align_global_assets_to_blueprints(global_assets, authoritative_blueprints, form_values)
         else:
             global_assets = _ensure_script_setting_assets(
                 global_assets,
-                plan_markdown=plan_markdown,
+                plan_markdown=settings_text or plan_markdown,
                 form_values=form_values,
                 selected_direction=selected_direction,
             )
@@ -287,7 +323,7 @@ async def prepare_video_scene_packages_with_llm(
             raise ValueError(f"LLM scene package count mismatch: expected {scene_count}, got {len(scenes)}")
         result = {
             "ok": True,
-            "message": "LLM 已生成视频场景包，请前端展示给用户逐场景编辑确认。",
+            "message": "已生成视频场景包，请打开卡片查看分镜与全局资产。",
             "requires_confirmation": True,
             "review_timeout_sec": None,
             "target_duration_ms": duration_ms,
@@ -309,6 +345,8 @@ async def prepare_video_scene_packages_with_llm(
             target_duration_ms=duration_ms,
             scene_blueprints=authoritative_blueprints,
             asset_manifest=asset_manifest,
+            shot_source_markdown=shot_source_markdown,
+            settings_source_markdown=settings_text,
         )
         fallback["message"] = f"{fallback['message']} 结构模型未完成，已使用规则兜底。"
         fallback["llm_used"] = False
@@ -657,6 +695,14 @@ def _normalize_llm_scene_packages(
             reference_asset_ids=reference_asset_ids,
             global_assets=global_assets,
         )
+        if narration:
+            shot_description = {
+                **shot_description,
+                "text": ensure_narration_in_shot_description(
+                    str(shot_description.get("text") or ""),
+                    narration,
+                ),
+            }
         prompt = (
             _build_prompt_from_scene_fields(storyline, shot_description, narration, global_assets.get("visual_style"))
             if blueprint
@@ -791,22 +837,60 @@ def _align_global_assets_to_blueprints(
     """权威蓝图存在时，只保留并补齐蓝图声明的固定资产。"""
 
     requirements = _collect_blueprint_asset_requirements(scene_blueprints, form_values)
+    # 时间线拆镜常无 asset_requirements；此时保留已有 global_assets，避免角色/场景/道具被清空。
+    # 仍要用最终合同 visual_style 覆盖 LLM 风格。
+    if not any(requirements[collection] for collection in ("characters", "scenes", "props")):
+        aligned = {**global_assets}
+        aligned["visual_style"] = _authoritative_visual_style(
+            form_values.get("visual_style"),
+            global_assets.get("visual_style"),
+        )
+        return aligned
     aligned = {**global_assets}
     aligned["visual_style"] = _authoritative_visual_style(
         form_values.get("visual_style"),
         global_assets.get("visual_style"),
     )
+    # 成稿常写「@安然盯着…」：先把 requirement 名落到设定集已有资产（最长前缀/跨类），避免造出假角色。
+    resolved_names: dict[str, list[str]] = {"characters": [], "scenes": [], "props": []}
+    resolved_existing: dict[str, dict[str, dict[str, Any]]] = {
+        "characters": {},
+        "scenes": {},
+        "props": {},
+    }
+    seen: dict[str, set[str]] = {key: set() for key in resolved_names}
+    product_name = _first_text(form_values.get("product_info"), form_values.get("product_name"))
+    for declared_collection in ("characters", "scenes", "props"):
+        for name in requirements[declared_collection]:
+            hit = _resolve_requirement_against_global_assets(name, global_assets)
+            if hit is not None:
+                target_collection, canon_name, existing = hit
+            else:
+                target_collection = declared_collection
+                canon_name = _first_text(name).lstrip("@")
+                existing = None
+                if (
+                    target_collection == "characters"
+                    and _looks_like_non_person_asset({"name": canon_name}, product_name)
+                ):
+                    target_collection = "props"
+            key = _asset_name_key(canon_name)
+            if not key or key in seen[target_collection]:
+                continue
+            seen[target_collection].add(key)
+            resolved_names[target_collection].append(canon_name)
+            if isinstance(existing, dict):
+                resolved_existing[target_collection][key] = existing
+
     used_asset_ids: set[str] = set()
     for collection, asset_type in (("characters", "character"), ("scenes", "scene"), ("props", "prop")):
-        existing = global_assets.get(collection)
-        existing_items = existing if isinstance(existing, list) else []
-        existing_by_name = {_asset_name_key(item.get("name")): item for item in existing_items if isinstance(item, dict) and _asset_name_key(item.get("name"))}
         aligned_assets: list[dict[str, Any]] = []
-        for name in requirements[collection]:
+        for name in resolved_names[collection]:
+            existing = resolved_existing[collection].get(_asset_name_key(name))
             asset = _blueprint_asset(
                 name=name,
                 asset_type=asset_type,
-                existing=existing_by_name.get(_asset_name_key(name)),
+                existing=existing,
                 form_values=form_values,
             )
             asset["asset_id"] = _unique_blueprint_asset_id(
@@ -826,6 +910,48 @@ def _align_global_assets_to_blueprints(
         used_asset_ids=used_asset_ids,
     )
     return aligned
+
+
+def _resolve_requirement_against_global_assets(
+    name: Any,
+    global_assets: Mapping[str, Any] | dict[str, Any],
+) -> tuple[str, str, dict[str, Any]] | None:
+    """把蓝图 requirement 名落到设定集已有资产。
+
+    精确匹配优先；否则用展示名最长前缀（``@安然盯着手机`` → ``安然``，
+    ``@后期剪辑室`` 可跨 characters→scenes）。
+    """
+
+    raw = _first_text(name).lstrip("@")
+    key = _asset_name_key(raw)
+    if not key:
+        return None
+    exact: list[tuple[str, str, dict[str, Any]]] = []
+    prefixes: list[tuple[int, str, str, dict[str, Any]]] = []
+    for collection in ("characters", "scenes", "props"):
+        assets = global_assets.get(collection) if isinstance(global_assets, Mapping) else None
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_name = _first_text(asset.get("name"))
+            asset_key = _asset_name_key(asset_name)
+            if not asset_key:
+                continue
+            asset_id_key = _asset_name_key(asset.get("asset_id"))
+            if key == asset_key or (asset_id_key and key == asset_id_key):
+                exact.append((collection, asset_name, asset))
+                continue
+            if len(asset_key) >= 2 and key.startswith(asset_key):
+                prefixes.append((len(asset_key), collection, asset_name, asset))
+    if exact:
+        return exact[0]
+    if not prefixes:
+        return None
+    prefixes.sort(key=lambda item: item[0], reverse=True)
+    _, collection, asset_name, asset = prefixes[0]
+    return collection, asset_name, asset
 
 
 def _authoritative_visual_style(value: Any, fallback: Any) -> dict[str, Any]:
@@ -944,8 +1070,11 @@ def _asset_name_key(value: Any) -> str:
 def _blueprint_reference_asset_ids(blueprint: dict[str, Any], global_assets: dict[str, Any]) -> list[str]:
     requirements = blueprint.get("asset_requirements")
     if not isinstance(requirements, dict):
-        return []
+        requirements = {}
     lookup: dict[tuple[str, str], str] = {}
+    id_lookup: dict[str, str] = {}
+    name_lookup: dict[str, str] = {}
+    asset_name_by_id: dict[str, str] = {}
     for collection in ("characters", "scenes", "props"):
         assets = global_assets.get(collection)
         if not isinstance(assets, list):
@@ -957,27 +1086,167 @@ def _blueprint_reference_asset_ids(blueprint: dict[str, Any], global_assets: dic
             asset_id = _first_text(asset.get("asset_id"), asset.get("id"))
             if name_key and asset_id:
                 lookup[(collection, name_key)] = asset_id
+                # 后写入覆盖：清单/manifest 里的正式 ID 优先于 align 生成的 character-*。
+                name_lookup[name_key] = asset_id
+                asset_name_by_id[asset_id] = name_key
+            if asset_id:
+                id_lookup[asset_id.casefold()] = asset_id
 
     reference_ids: list[str] = []
+    covered_names: set[str] = set()
+
+    def _append_id(asset_id: str | None) -> None:
+        if not asset_id or asset_id in reference_ids:
+            return
+        reference_ids.append(asset_id)
+        name_key = asset_name_by_id.get(asset_id) or _asset_name_key(asset_id)
+        if name_key:
+            covered_names.add(name_key)
+
+    # 正文里的显式 @asset_id / @展示名优先，避免再附加同名的 character-* 占位。
+    shot_text = blueprint.get("shot_description")
+    if isinstance(shot_text, Mapping):
+        shot_text = shot_text.get("text")
+    shot_text = str(shot_text or "")
+    for asset_id in _reference_ids_from_shot_text(shot_text, global_assets):
+        _append_id(asset_id)
+
     for collection in ("characters", "scenes", "props"):
         values = requirements.get(collection)
         if not isinstance(values, list):
             continue
         for value in values:
             name_key = _asset_name_key(value)
-            asset_id = lookup.get((collection, name_key))
+            if name_key and name_key in covered_names:
+                continue
+            raw = _first_text(value).lstrip("@")
+            asset_id = (
+                id_lookup.get(raw.casefold())
+                or lookup.get((collection, name_key))
+                or name_lookup.get(name_key)
+            )
             if not asset_id:
                 asset_id = next(
-                    (lookup[(candidate_collection, name_key)] for candidate_collection in ("characters", "scenes", "props") if (candidate_collection, name_key) in lookup),
+                    (
+                        lookup[(candidate_collection, name_key)]
+                        for candidate_collection in ("characters", "scenes", "props")
+                        if (candidate_collection, name_key) in lookup
+                    ),
                     None,
                 )
-            if asset_id and asset_id not in reference_ids:
-                reference_ids.append(asset_id)
+            _append_id(asset_id)
+
+    # 成稿常写裸名「安然盯着…」而无 @：按 global_assets 展示名补绑，供后续原地换成 @asset_id。
+    for asset_id in _reference_ids_from_bare_asset_names(
+        shot_text,
+        global_assets,
+        covered_ids=set(reference_ids),
+    ):
+        _append_id(asset_id)
+
     if len(reference_ids) > 9:
         scene_id = _first_text(blueprint.get("scene_id"), "unknown-scene")
         scene_index = blueprint.get("scene_index")
-        raise ValueError(f"分镜 {scene_id} scene_index={scene_index} 引用资产共 {len(reference_ids)} 个，最多允许 9 个")
+        raise ValueError(
+            f"分镜 {scene_id} scene_index={scene_index} 引用资产共 {len(reference_ids)} 个，最多允许 9 个"
+        )
     return reference_ids
+
+
+_AT_TOKEN_PATTERN = re.compile(
+    r"@([^\s@，,。．；;：:！!？?\n\]）)】>\"'“”‘’]+)"
+)
+
+
+def _bare_asset_name_pattern(name: str) -> re.Pattern[str]:
+    """匹配镜头正文里的资产展示名。
+
+    纯 ASCII 名保留尾边界，避免 ``Lin`` 误伤 ``Lindberg``，同时允许 ``Yann把``；
+    中文名允许后面紧跟汉字（``安然盯着`` / ``把手机放进``）。
+    """
+
+    escaped = re.escape(name)
+    if re.fullmatch(r"[A-Za-z0-9_\-]+", name):
+        return re.compile(rf"(?<!@){escaped}(?![A-Za-z0-9_\-])", re.IGNORECASE)
+    return re.compile(rf"(?<!@){escaped}")
+
+
+def _reference_ids_from_shot_text(text: str, global_assets: dict[str, Any]) -> list[str]:
+    """把正文里的 @名字 / @asset_id 解析成已存在的全局资产 ID。"""
+
+    lookup = _global_image_asset_lookup(global_assets)
+    by_name: dict[str, str] = {}
+    by_id: dict[str, str] = {}
+    name_keys: list[str] = []
+    for asset_id, asset in lookup.items():
+        by_id[asset_id.casefold()] = asset_id
+        name_key = _asset_name_key(asset.get("name"))
+        if name_key:
+            by_name.setdefault(name_key, asset_id)
+            name_keys.append(name_key)
+    # 长名优先，便于 @安然盯着… 命中「安然」而不是造新资产。
+    name_keys.sort(key=len, reverse=True)
+
+    reference_ids: list[str] = []
+    for match in _AT_TOKEN_PATTERN.finditer(str(text or "")):
+        token = str(match.group(1) or "").strip().strip("*").strip()
+        token = re.sub(r"[的地得]$", "", token).strip()
+        if not token:
+            continue
+        token_key = _asset_name_key(token)
+        asset_id = by_id.get(token.casefold()) or by_name.get(token_key)
+        if not asset_id and token_key:
+            for name_key in name_keys:
+                if len(name_key) >= 2 and token_key.startswith(name_key):
+                    asset_id = by_name.get(name_key)
+                    break
+        if asset_id and asset_id not in reference_ids:
+            reference_ids.append(asset_id)
+        if len(reference_ids) >= 9:
+            break
+    return reference_ids
+
+
+def _reference_ids_from_bare_asset_names(
+    text: str,
+    global_assets: dict[str, Any],
+    *,
+    covered_ids: set[str] | None = None,
+) -> list[str]:
+    """在无 @ 成稿里，用设定集展示名扫镜头正文，补出可绑定的资产 ID。
+
+    长名优先，避免短名误伤；已有 ``@token`` 区域先遮蔽。名称短于 2 个字符跳过。
+    """
+
+    body = str(text or "")
+    if not body.strip():
+        return []
+    covered = set(covered_ids or ())
+    lookup = _global_image_asset_lookup(global_assets)
+    candidates: list[tuple[str, str]] = []
+    for asset_id, asset in lookup.items():
+        if asset_id in covered:
+            continue
+        name = _first_text(asset.get("name"))
+        if len(name) < 2:
+            continue
+        candidates.append((name, asset_id))
+    candidates.sort(key=lambda item: len(item[0]), reverse=True)
+
+    # 先抹掉已有 @引用，避免在 @character-1 / @安然 内部再匹配裸名。
+    masked = _AT_TOKEN_PATTERN.sub(lambda match: " " * len(match.group(0)), body)
+    found: list[str] = []
+    for name, asset_id in candidates:
+        if asset_id in covered or asset_id in found:
+            continue
+        pattern = _bare_asset_name_pattern(name)
+        if not pattern.search(masked):
+            continue
+        found.append(asset_id)
+        masked = pattern.sub(" " * len(name), masked, count=1)
+        if len(covered) + len(found) >= 9:
+            break
+    return found
 
 
 def _normalize_character_asset_list(
@@ -1333,13 +1602,20 @@ def _ensure_reference_asset_tokens(
     reference_asset_ids: list[str],
     global_assets: dict[str, Any],
 ) -> str:
-    """确保引用图片既有结构化 mentions，也在可编辑镜头文本中可见。"""
+    """确保引用图片既有结构化 mentions，也在可编辑镜头文本中可见。
+
+    优先把正文里的 @展示名（如 @yann / @安然）原地替换为 @asset_id，
+    保留「人物形象@…」「形象参考@…」等上下文位置。
+    """
 
     lookup = _global_image_asset_lookup(global_assets)
     missing: list[str] = []
     result = text
     named_assets = sorted(
-        ((asset_id, _first_text(lookup.get(asset_id, {}).get("name"))) for asset_id in reference_asset_ids[:9]),
+        (
+            (asset_id, _first_text(lookup.get(asset_id, {}).get("name")))
+            for asset_id in reference_asset_ids[:9]
+        ),
         key=lambda item: len(item[1]),
         reverse=True,
     )
@@ -1352,13 +1628,21 @@ def _ensure_reference_asset_tokens(
         result = result.replace(token, placeholder)
         protected_tokens[placeholder] = token
     for index, (asset_id, asset_name) in enumerate(named_assets):
-        if asset_name:
-            result = result.replace(f"@{asset_name}", f"@{asset_id}")
-            token = f"@{asset_id}"
-            if token in result:
-                placeholder = f"\x00pixelflow-normalized-token-{index}\x00"
-                result = result.replace(token, placeholder)
-                protected_tokens[placeholder] = token
+        if not asset_name:
+            continue
+        # @Lin / @Lin-v1 → 当前正式 @asset_id；禁止误伤 @Lindberg。
+        # 中文名允许后面紧跟汉字（@安然盯着 → 只替换 @安然）。
+        pattern = re.compile(
+            rf"@{re.escape(asset_name)}(?:-[A-Za-z0-9_]+)*(?![A-Za-z0-9_\-])",
+            re.IGNORECASE,
+        )
+        if pattern.search(result):
+            result = pattern.sub(f"@{asset_id}", result)
+        token = f"@{asset_id}"
+        if token in result:
+            placeholder = f"\x00pixelflow-normalized-token-{index}\x00"
+            result = result.replace(token, placeholder)
+            protected_tokens[placeholder] = token
     for placeholder, token in protected_tokens.items():
         result = result.replace(placeholder, token)
     for asset_id in reference_asset_ids[:9]:
@@ -1366,9 +1650,12 @@ def _ensure_reference_asset_tokens(
         asset_name = _first_text(lookup.get(asset_id, {}).get("name"))
         if token in result:
             continue
-        if asset_name and asset_name in result:
-            result = result.replace(asset_name, token, 1)
-            continue
+        if asset_name:
+            # 裸名替换不得吃掉已有 @asset_id 里的片段（如 Lin ⊂ @Lin-v1）。
+            bare = _bare_asset_name_pattern(asset_name)
+            if bare.search(result):
+                result = bare.sub(token, result, count=1)
+                continue
         missing.append(token)
     if missing:
         suffix = f"参考素材：{'、'.join(missing)}。"
@@ -1573,15 +1860,67 @@ _GENERIC_ASSET_NAMES = {
         "角色关系图",
         "主要角色档案",
         "角色档案",
+        "视觉特征",
+        "动作习惯",
+        "人物弧光",
+        "关键关系",
+        "视觉形象",
+        "身份",
+        "性格",
+        "金句",
+        "核心标签",
+        "定位",
     },
-    "scenes": {"真实使用场景", "使用场景", "真实场景", "场景", "环境"},
-    "props": {"产品", "商品", "核心产品", "主商品", "关键道具", "产品道具", "道具"},
+    "scenes": {
+        "真实使用场景",
+        "使用场景",
+        "真实场景",
+        "场景",
+        "环境",
+        "时段",
+        "光线",
+        "光影",
+        "色调",
+        "视觉要点",
+        "功能",
+        "时空背景",
+        "陈设细节",
+        "光线氛围",
+        "可拍要点",
+        # 叙事分镜职能名，不是物理场景
+        "开场钩子",
+        "卖点证明",
+        "转化收口",
+        "补充证明",
+        "追剧钩子",
+        "投流记忆点",
+    },
+    "props": {
+        "产品",
+        "商品",
+        "核心产品",
+        "主商品",
+        "关键道具",
+        "产品道具",
+        "道具",
+        "分镜提示词",
+        "镜头列表",
+        "分镜大纲",
+        "外观材质",
+        "品牌露出",
+        "使用动作",
+    },
 }
 
 
 def _is_generic_asset_name(collection: str, name: str) -> bool:
     normalized = re.sub(r"\s+", "", _first_text(name)).casefold()
-    return normalized in {item.casefold() for item in _GENERIC_ASSET_NAMES.get(collection, set())}
+    if normalized in {item.casefold() for item in _GENERIC_ASSET_NAMES.get(collection, set())}:
+        return True
+    # 「补充证明 1」等带序号的叙事段名
+    if collection == "scenes" and re.fullmatch(r"补充证明\d*", normalized):
+        return True
+    return False
 
 
 def _strip_generic_product_prefix(value: str) -> str:
@@ -1638,20 +1977,48 @@ def _default_global_assets(
     display_product = product_name or "商品主体"
     product_category = _first_text(form_values.get("product_category"), selected_direction.get("product_category"), "商品")
     target_audience = _first_text(form_values.get("target_audience"), selected_direction.get("target_audience"), "目标受众")
+    # 场景资产必须是可拍摄物理空间；禁止把「开场钩子/补充证明」等叙事段名当场景图。
+    # 分镜标题仍由 stage_templates 驱动 scene_packages.title，不进入 global_assets.scenes。
+    script_seed = extract_script_setting_assets(plan_markdown)
     scene_assets: list[dict[str, Any]] = []
     seen_scene_ids: set[str] = set()
-    for stage in stage_templates:
-        asset_id = stage["asset_id"]
+    _ = stage_templates  # 分镜叙事模板只驱动 scene_packages.title，不进入 global_assets.scenes
+    for index, item in enumerate(script_seed.get("scenes") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        name = _first_text(item.get("name"))
+        if not name or _is_generic_asset_name("scenes", name):
+            continue
+        asset_id = _first_text(item.get("asset_id"), f"scene-setting-{index}")
         if asset_id in seen_scene_ids:
             continue
         seen_scene_ids.add(asset_id)
-        description = stage["scene_description"].format(product_name=display_product)
+        description = _first_text(
+            item.get("description"),
+            f"场景“{name}”的固定空间、光线与氛围设定",
+        )
         scene_assets.append(
             {
                 "asset_id": asset_id,
-                "name": stage["name"],
+                "name": name,
                 "description": description,
-                "image_prompt": f"{description}，9:16，真实摄影，电商广告质感，主体一致，画面干净",
+                "image_prompt": _first_text(
+                    item.get("image_prompt"),
+                    f"{description}，9:16，真实摄影，电商广告质感，主体一致，画面干净",
+                ),
+                "images": [],
+            }
+        )
+    if not scene_assets:
+        scene_assets.append(
+            {
+                "asset_id": "scene-main",
+                "name": "主拍摄场景",
+                "description": f"{display_product}相关的主要拍摄空间，光线与陈设在全片保持一致",
+                "image_prompt": (
+                    f"{display_product}主要拍摄场景环境参考图，清晰展示空间结构与光线氛围，"
+                    "无人、无文字水印，真实摄影，电商广告质感"
+                ),
                 "images": [],
             }
         )
@@ -1735,6 +2102,7 @@ def _resolve_scene_schedule(
     scene_blueprints: list[dict[str, Any]] | None,
     *,
     plan_markdown: str = "",
+    shot_source_markdown: str = "",
 ) -> tuple[int, list[int], list[dict[str, Any]]]:
     duration_ms, fallback_durations = _exact_scene_durations_ms(target_duration_ms)
     if scene_blueprints:
@@ -1746,9 +2114,10 @@ def _resolve_scene_schedule(
         durations = [int(item["duration_sec"]) * 1000 for item in normalized]
         return duration_ms, durations, normalized
 
-    # 脚本直出：优先按成稿「镜头N-时间码」拆镜，避免 30s/15s 机械切成 2 镜而丢掉正文分镜。
+    # 脚本直出：优先按确认后 episode（或显式 shot_source）拆镜，避免拼接设定稿干扰。
+    shot_text = str(shot_source_markdown or "").strip() or plan_markdown
     extracted_duration_ms, extracted = extract_script_scene_blueprints(
-        plan_markdown,
+        shot_text,
         target_duration_ms=duration_ms,
     )
     if extracted:
@@ -1812,7 +2181,10 @@ def _default_shot_description(
     reference_asset_ids: list[str],
     global_assets: dict[str, Any],
 ) -> dict[str, Any]:
-    location_id = next((asset_id for asset_id in reference_asset_ids if asset_id.startswith("scene-")), stage["asset_id"])
+    location_id = next(
+        (asset_id for asset_id in reference_asset_ids if asset_id.startswith("scene-")),
+        _first_asset_id(global_assets, "scenes", "scene-main"),
+    )
     character_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("character-")] or ["character-presenter"]
     prop_ids = [asset_id for asset_id in reference_asset_ids if asset_id.startswith("prop-")] or ["prop-product"]
     time_range = _format_time_range(start_ms, start_ms + duration_ms)
@@ -1845,7 +2217,9 @@ def _default_reference_asset_ids(global_assets: dict[str, Any], stage_asset_id: 
                 character_ids.append(asset_id)
     if character_ids:
         push(character_ids[0])
+    # 物理场景 asset_id；stage_asset_id 可能是旧叙事模板 id，仅在已知时保留
     push(stage_asset_id)
+    push(_first_asset_id(global_assets, "scenes", "scene-main"))
     for asset_id in character_ids[1:4]:
         push(asset_id)
     props = global_assets.get("props")
@@ -1856,7 +2230,7 @@ def _default_reference_asset_ids(global_assets: dict[str, Any], stage_asset_id: 
             push(_first_text(item.get("asset_id"), item.get("id")))
     if not reference_ids:
         push(_first_asset_id(global_assets, "characters", "character-presenter"))
-        push(stage_asset_id)
+        push(_first_asset_id(global_assets, "scenes", "scene-main"))
         push(_first_asset_id(global_assets, "props", "prop-product"))
     return reference_ids[:9]
 

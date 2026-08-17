@@ -136,8 +136,7 @@ export function isSceneAssetGenerationMaterialized(
 
 /**
  * 刷新后若没有活跃 pending，清掉过期的 sceneAssetsGenerating，避免“参考图生成中”假忙碌。
- * 无图时回到 awaiting model，便于用户重新确认模型继续。
- * 不改写历史模型选择卡的 confirmed 状态——需要再选模型时应新推一张卡，而不是原地翻旧卡。
+ * 无图时回到 awaiting model，并解锁模型卡，便于用户重新确认（热重载/僵尸 Operation 后常见）。
  */
 export function reconcileStaleSceneAssetUiFlags<T extends ScenePackageMessage>(
   messages: T[],
@@ -146,21 +145,46 @@ export function reconcileStaleSceneAssetUiFlags<T extends ScenePackageMessage>(
   },
 ): T[] {
   if (options.hasActiveAssetJob) return messages;
+  const hasAnyImages = messages.some((message) => (
+    message.artifact?.type === "video_scene_packages"
+    && scenePackageHasGeneratedImages(message.artifact.videoScenePackages)
+  ));
   let changed = false;
   const next = messages.map((message) => {
     const artifact = message.artifact;
     if (!artifact) return message;
-    if (artifact.type !== "video_scene_packages" || !artifact.sceneAssetsGenerating) return message;
-    const hasImages = scenePackageHasGeneratedImages(artifact.videoScenePackages);
-    changed = true;
-    return {
-      ...message,
-      artifact: {
-        ...artifact,
-        sceneAssetsGenerating: false,
-        sceneAssetsAwaitingModel: !hasImages,
-      },
-    };
+    if (artifact.type === "video_scene_packages") {
+      const hasImages = scenePackageHasGeneratedImages(artifact.videoScenePackages);
+      if (hasImages) return message;
+      // 无图且无活跃任务：清假转，回到待选模（含「已确认但仍无图」僵局）。
+      if (!artifact.sceneAssetsGenerating && artifact.sceneAssetsAwaitingModel) {
+        return message;
+      }
+      changed = true;
+      return {
+        ...message,
+        artifact: {
+          ...artifact,
+          sceneAssetsGenerating: false,
+          sceneAssetsAwaitingModel: true,
+        },
+      };
+    }
+    if (
+      artifact.type === "scene_asset_model_options"
+      && artifact.sceneAssetModelConfirmed
+      && !hasAnyImages
+    ) {
+      changed = true;
+      return {
+        ...message,
+        artifact: {
+          ...artifact,
+          sceneAssetModelConfirmed: false,
+        },
+      };
+    }
+    return message;
   });
   return changed ? next : messages;
 }

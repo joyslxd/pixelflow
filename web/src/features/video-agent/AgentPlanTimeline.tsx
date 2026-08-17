@@ -317,6 +317,13 @@ export function AgentPlanTimeline({
         })}
       </ol>
       )}
+      {/* 确认卡挂在方案底部：即使步骤状态未同步为 awaiting，也要能点确认/取消 */}
+      {confirmationSlot
+        && !Object.values(plan?.steps || {}).some((step) => step.status === "awaiting_confirmation")
+        ? (
+          <div className="mt-3 border-t border-slate-100 pt-3">{confirmationSlot}</div>
+        )
+        : null}
     </section>
   );
 }

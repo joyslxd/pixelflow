@@ -132,6 +132,63 @@ def workspace_has_script_content(payload: Mapping[str, object] | None) -> bool:
     return len(latest) >= 80
 
 
+def looks_like_scene_asset_continue(content: str) -> bool:
+    """场景包就绪后，用户表示无参考图、继续生图（非成片）。"""
+
+    text = normalize_user_text(content)
+    if not text or len(text) > 80:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if re.search(r"确认并生成视频|生成视频|生成成片", compact):
+        return False
+    if re.search(r"没有参考图|无参考图|不需要参考图|无需参考图|没有引用参考", compact):
+        return True
+    return bool(re.search(r"直接生成", compact) and re.search(r"参考图", compact))
+
+
+def _looks_like_script_confirm_command(content: str) -> bool:
+    """成片确认短令：必须让确认 bootstrap 先走，不能被补字段门闩截胡。"""
+
+    lowered = normalize_user_text(content).casefold()
+    if not lowered:
+        return False
+    # 「确认并生成分镜视频」是 generate_scenes，不是确认脚本；禁止被「确认并生成视频」子串误伤。
+    if "确认并生成分镜视频" in lowered or "确认并生成分镜" in lowered:
+        return False
+    if "重新生成已修改的分镜视频" in lowered or "继续生成失败的分镜视频" in lowered:
+        return False
+    markers = (
+        "确认脚本",
+        "确认方案",
+        "确认plan",
+        "确认执行方案",
+        "确认脚本方案",
+        "确认脚本plan",
+        "确认并生成视频",
+        "确认并生成资产包",
+        "同意脚本",
+        "同意方案",
+        "用户已确认当前脚本方案",
+    )
+    return any(marker.casefold() in lowered for marker in markers)
+
+
+def _looks_like_generate_scenes_command(content: str) -> bool:
+    """工作台「确认并生成分镜视频」短令：不得进补字段门闩。"""
+
+    text = normalize_user_text(content)
+    if not text or len(text) > 120:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if "确认并生成分镜视频" in compact or "确认并生成分镜" in compact:
+        return True
+    if "重新生成已修改的分镜视频" in compact or "继续生成失败的分镜视频" in compact:
+        return True
+    if compact in {"生成视频", "生成视频吧", "生成分镜视频", "生成分镜视频吧", "开始生成视频"}:
+        return True
+    return False
+
+
 def looks_like_production_field_reply(
     content: str,
     *,
@@ -149,6 +206,15 @@ def looks_like_production_field_reply(
 
     text = normalize_user_text(content)
     if not text or len(text) > 240:
+        return False
+    # 「没有参考图」是生图续步，不得当成画幅/CTA 补丁。
+    if looks_like_scene_asset_continue(text):
+        return False
+    # 单镜/全量生成分镜视频：走 generate_scenes bootstrap，禁止补字段截胡。
+    if _looks_like_generate_scenes_command(text):
+        return False
+    # 「确认脚本」等成片确认优先走 prepare bootstrap。
+    if _looks_like_script_confirm_command(text):
         return False
     if workspace_payload is None:
         return len(text) <= 48
@@ -226,6 +292,93 @@ def _parse_analysis_payload(raw: str) -> ProductionFieldsAnalysis | None:
     missing = [item for item in missing if item in ALLOWED_MISSING]
     return ProductionFieldsAnalysis(
         duration_sec=duration,
+        missing=tuple(missing),
+        has_aspect_ratio=has_aspect,
+        has_ending_cta=has_cta,
+        aspect_ratio=aspect_ratio,
+        ending_cta=ending_cta,
+    )
+
+
+def enrich_analysis_with_choice_replies(
+    text: str,
+    analysis: ProductionFieldsAnalysis,
+) -> ProductionFieldsAnalysis:
+    """当 LLM 仍缺项时，解析标准多选序号（A/B、①②③④ / 第一个…第四个）。
+
+    这不是开放话术关键词路由，只承接产品固定追问菜单的点选回执；
+    例如「1. 9:16 2. 第三个」中的「第三个」= 留白收束 = ending_cta=none。
+    """
+
+    compact = re.sub(r"\s+", "", normalize_user_text(text))
+    if not compact:
+        return analysis
+
+    aspect_ratio = analysis.aspect_ratio
+    has_aspect = analysis.has_aspect_ratio
+    if not has_aspect or aspect_ratio is None:
+        if re.search(r"9\s*:\s*16|竖屏", compact, flags=re.IGNORECASE):
+            aspect_ratio = "9:16"
+            has_aspect = True
+        elif re.search(r"16\s*:\s*9|横屏", compact, flags=re.IGNORECASE):
+            aspect_ratio = "16:9"
+            has_aspect = True
+        elif re.fullmatch(r"[Bb]|选项[Bb]|选[Bb]", compact):
+            aspect_ratio = "9:16"
+            has_aspect = True
+        elif re.fullmatch(r"[Aa]|选项[Aa]|选[Aa]", compact):
+            aspect_ratio = "16:9"
+            has_aspect = True
+
+    ending_cta = analysis.ending_cta
+    has_cta = analysis.has_ending_cta
+    # 避免把「改第三个分镜」误当成 CTA 点选。
+    mentions_shot_edit = bool(
+        re.search(r"(?:第三个|第3个|③).{0,8}(?:分镜|镜头|场景)", compact)
+    )
+    if (not has_cta or ending_cta is None) and not mentions_shot_edit:
+        if re.search(
+            r"第三个|第3个|选项三|选项3|③|３|"
+            r"留白收束|不设行动|金句字幕|金句收尾|不用引导|不要cta|无需行动引导",
+            compact,
+            flags=re.IGNORECASE,
+        ):
+            ending_cta = "none"
+            has_cta = True
+        elif re.search(
+            r"第一个|第1个|选项一|选项1|①|１|"
+            r"电商转化|购买页|促转化|"
+            r"第二个|第2个|选项二|选项2|②|２|"
+            r"品牌认知|产品名收尾",
+            compact,
+            flags=re.IGNORECASE,
+        ):
+            ending_cta = "present"
+            has_cta = True
+        elif re.search(r"第四个|第4个|选项四|选项4|④|４", compact):
+            # 自定义必须附文案；纯点「④」仍视为未确认。
+            parts = re.split(r"第四个|第4个|选项四|选项4|④|４", compact, maxsplit=1)
+            tail = parts[-1] if parts else ""
+            if len(re.sub(r"[\d.:：、.\-]", "", tail)) >= 4:
+                ending_cta = "present"
+                has_cta = True
+
+    missing: list[str] = []
+    if not has_aspect:
+        missing.append("视频画幅")
+    if not has_cta:
+        missing.append("结尾行动引导")
+
+    if (
+        aspect_ratio == analysis.aspect_ratio
+        and ending_cta == analysis.ending_cta
+        and has_aspect == analysis.has_aspect_ratio
+        and has_cta == analysis.has_ending_cta
+        and tuple(missing) == analysis.missing
+    ):
+        return analysis
+    return ProductionFieldsAnalysis(
+        duration_sec=analysis.duration_sec,
         missing=tuple(missing),
         has_aspect_ratio=has_aspect,
         has_ending_cta=has_cta,
@@ -333,7 +486,10 @@ def format_production_fields_update_notice(
             f"{prefix}；仍缺少：{items}\n"
             f"请直接在对话框回复上述缺失项（{items}），我再继续。"
         )
-    return f"{prefix}。生产字段已齐，可在右侧脚本预览底部确认后继续，或告诉我下一步。"
+    return (
+        f"{prefix}。生产字段已齐，请点击对话中的「在右侧查看脚本」预览并在底部确认后继续，"
+        f"或告诉我下一步。"
+    )
 
 
 async def analyze_production_fields_with_llm(
@@ -377,6 +533,12 @@ async def analyze_production_fields_with_llm(
             "4) has_ending_cta：已有结尾行动引导，或用户说「结尾不变/CTA保持/沿用」；"
             "若用户明确说「结尾不需要引导/不要CTA/无需行动引导/不用引导/不需要」，"
             "也视为已确认（has_ending_cta=true，ending_cta=none）。\n"
+            "若上一轮用序号追问结尾 CTA，用户点选时必须落库：\n"
+            "①/第一个/电商转化/购买页 → ending_cta=present；\n"
+            "②/第二个/品牌认知/产品名收尾 → ending_cta=present；\n"
+            "③/第三个/留白收束/不设行动/金句收尾 → ending_cta=none；\n"
+            "④/第四个/自定义：附了具体文案 → present，只点序号无文案 → 仍缺。\n"
+            "「1. 9:16 2. 第三个」这类分条回复要同时解析画幅与 CTA。\n"
             "5) ending_cta：keep（沿用）/ none（不需要）/ present（有具体引导）；未知则 null。\n"
             "6) missing：只能从 [\"视频画幅\",\"结尾行动引导\"] 中选仍缺的项；"
             "不要把「视频时长」放入 missing。\n"
@@ -417,23 +579,29 @@ async def analyze_production_fields_with_llm(
             "LLM 生产字段分析失败 error_type=%s",
             type(exc).__name__,
         )
-        return ProductionFieldsAnalysis(
-            duration_sec=None,
-            missing=ALLOWED_MISSING,
-            has_aspect_ratio=False,
-            has_ending_cta=False,
+        return enrich_analysis_with_choice_replies(
+            excerpt,
+            ProductionFieldsAnalysis(
+                duration_sec=None,
+                missing=ALLOWED_MISSING,
+                has_aspect_ratio=False,
+                has_ending_cta=False,
+            ),
         )
 
     parsed = _parse_analysis_payload(answer)
     if parsed is None:
         logger.warning("LLM 生产字段分析返回无法解析")
-        return ProductionFieldsAnalysis(
-            duration_sec=None,
-            missing=ALLOWED_MISSING,
-            has_aspect_ratio=False,
-            has_ending_cta=False,
+        return enrich_analysis_with_choice_replies(
+            excerpt,
+            ProductionFieldsAnalysis(
+                duration_sec=None,
+                missing=ALLOWED_MISSING,
+                has_aspect_ratio=False,
+                has_ending_cta=False,
+            ),
         )
-    return parsed
+    return enrich_analysis_with_choice_replies(excerpt, parsed)
 
 
 async def missing_creative_production_fields_async(
@@ -475,8 +643,11 @@ def format_creative_confirm_clarification(
         lines.append(f"已识别时长：{int(duration_sec)}秒。")
     lines.append(f"{CLARIFY_MARKER}：")
     examples = {
-        "视频画幅": "例如 9:16 竖屏、16:9 横屏或 1:1",
-        "结尾行动引导": "例如 进直播间、下方小黄车下单、私信咨询",
+        "视频画幅": "例如 9:16 竖屏、16:9 横屏，或回复 A/B",
+        "结尾行动引导": (
+            "可回复①电商转化 / ②品牌认知 / ③留白收束 / ④自定义文案；"
+            "或直接写「第三个」「不用引导」"
+        ),
     }
     for index, label in enumerate(gaps, start=1):
         hint = examples.get(label, "")
@@ -522,9 +693,11 @@ __all__ = [
     "apply_production_fields_to_script",
     "build_production_fields_excerpt",
     "creative_confirm_cost_summary",
+    "enrich_analysis_with_choice_replies",
     "format_creative_confirm_clarification",
     "format_production_fields_update_notice",
     "looks_like_production_field_reply",
+    "looks_like_scene_asset_continue",
     "missing_creative_production_fields_async",
     "normalize_user_text",
     "production_fields_form_patch",
