@@ -315,6 +315,42 @@ async def test_generate_scenes_requires_confirmation_and_scopes_operation_ids() 
 
 
 @pytest.mark.asyncio
+async def test_generate_scenes_rejects_partial_scene_asset_package() -> None:
+    operation_port = FakeSceneGenerationOperationPort()
+    base = _context()
+    context = VideoToolContext(
+        user_id=base.user_id,
+        plan_id=base.plan_id,
+        step_id=base.step_id,
+        workspace=base.workspace.model_copy(
+            update={
+                "payload": {
+                    **dict(base.workspace.payload),
+                    "global_assets": {
+                        "characters": [
+                            {
+                                "asset_id": "character-host",
+                                "three_view_images": ["https://cdn.example/host.png"],
+                            }
+                        ],
+                        "scenes": [{"asset_id": "scene-room", "images": []}],
+                        "props": [],
+                    },
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(VideoToolValidationError, match="参考图仅完成 1/2"):
+        await GenerateScenesTool(operation_port=operation_port).execute(
+            context,
+            {"scene_ids": ["scene-3"], "variant_count": 1},
+        )
+
+    assert operation_port.calls == []
+
+
+@pytest.mark.asyncio
 async def test_generate_scenes_progress_omits_scene_id_for_multi_scene_batch() -> None:
     """多镜一批启动时不写单一 scene_id，避免误蒙某一镜。"""
 

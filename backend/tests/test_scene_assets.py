@@ -649,6 +649,61 @@ def test_generate_scene_assets_keeps_unattempted_retry_targets_after_quota_pause
     ]
 
 
+def test_generate_scene_assets_preserves_partial_results_after_provider_connection_error():
+    calls: list[str] = []
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            calls.append(kwargs["prompt"])
+            if len(calls) == 4:
+                raise ConnectionError("seedream connection reset")
+            return ImageGenerationResult(
+                ok=True,
+                images=[{"url": f"https://x/generated-{len(calls)}.png"}],
+                raw={},
+            )
+
+        async def reference_image(self, **_kwargs):
+            raise AssertionError("reference_image should not be called")
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "scenes": [
+                    {
+                        "asset_id": f"scene-{index}",
+                        "name": f"场景{index}",
+                        "image_prompt": f"场景{index}参考图",
+                        "images": [],
+                    }
+                    for index in range(1, 7)
+                ]
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[],
+            model="seeddream-5.0",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert len(calls) == 4
+    assert all(f"场景{index}参考图" in prompt for index, prompt in enumerate(calls, 1))
+    assert result["ok"] is False
+    assert [item["images"] for item in result["global_assets"]["scenes"][:3]] == [
+        ["https://x/generated-1.png"],
+        ["https://x/generated-2.png"],
+        ["https://x/generated-3.png"],
+    ]
+    assert [item["asset_id"] for item in result["failed_assets"]] == [
+        "scene-4",
+        "scene-5",
+        "scene-6",
+    ]
+    assert result["failed_assets"][0]["error_code"] == "scene_asset_provider_unavailable"
+    assert all(item.get("retry_pending") is True for item in result["failed_assets"])
+
+
 def test_generate_scene_assets_records_unattempted_initial_assets_after_quota_pause():
     class FakeImageSkill:
         async def text_to_image(self, **_kwargs):

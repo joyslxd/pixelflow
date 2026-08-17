@@ -97,7 +97,7 @@ function stepChangeHints(
   return [];
 }
 
-function viewResultLabel(step: VideoAgentStepState, stage: VideoAgentScriptStageEvidence | null): string {
+function viewResultLabel(step: VideoAgentStepState): string {
   const label = shortStageLabel(stageIdFromStep(step), step.title);
   return `查看本步新增：${label}`;
 }
@@ -299,7 +299,7 @@ export function AgentPlanTimeline({
                         className="text-[12px] font-medium text-sky-700 hover:underline"
                         onClick={() => onSelectStep?.(step.stepId)}
                       >
-                        {viewResultLabel(step, stage)} →
+                        {viewResultLabel(step)} →
                       </button>
                     ) : null}
                   </div>

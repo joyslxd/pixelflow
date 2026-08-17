@@ -262,21 +262,27 @@ class GenerateSceneAssetsJobService:
             self._jobs[job_id] = payload
             return copy.deepcopy(payload)
 
+        quota_insufficient = bool(result.get("quota_insufficient"))
+        business_ok = bool(result.get("ok", True))
         payload = {
             "job_id": job_id,
-            "status": "succeeded" if result.get("ok") is not False else "failed",
-            "ok": bool(result.get("ok", True)),
+            # Provider Job 的成功表示领域 runner 已返回可持久化结果；
+            # 单个素材失败由 result.ok/failed_assets 表达，不得丢掉部分产物。
+            "status": "failed" if quota_insufficient else "succeeded",
+            "ok": False if quota_insufficient else True,
             "result": _sanitize_json(
                 {
-                    "ok": bool(result.get("ok", True)),
+                    "ok": business_ok,
                     "global_assets": result.get("global_assets") or {},
                     "scene_packages": result.get("scene_packages") or [],
                     "failed_assets": result.get("failed_assets") or [],
+                    "quota_insufficient": quota_insufficient,
+                    "retryable": bool(result.get("retryable")),
                     "message": str(
                         result.get("message")
                         or (
                             "参考图生成完成"
-                            if result.get("ok") is not False
+                            if business_ok
                             else "参考图生成失败"
                         )
                     ),

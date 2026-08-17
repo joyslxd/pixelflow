@@ -267,7 +267,7 @@ export function AgentScriptPreviewPanel({
     node.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [focusStageId, editing, stages, script?.content, revision]);
 
-  const dirty = Boolean(script) && draft !== script.content;
+  const dirty = script !== null && draft !== script.content;
   const canSave = Boolean(onSave && script) && dirty && draft.trim().length > 0 && !saving && !confirming;
   const canConfirm = Boolean(onConfirmScript && script)
     && exportReady

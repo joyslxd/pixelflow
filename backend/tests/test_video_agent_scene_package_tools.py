@@ -309,6 +309,94 @@ async def test_generate_scene_assets_registry_accepts_success_patch_roots() -> N
 
 
 @pytest.mark.asyncio
+async def test_generate_scene_assets_tool_projects_partial_result_for_retry() -> None:
+    port = FakePackagePort(
+        ScenePackageOperationJob(
+            job_id="job-assets-partial-1",
+            status="succeeded",
+            result={
+                "ok": False,
+                "message": "部分参考图已生成，剩余素材可继续重试",
+                "global_assets": {
+                    "scenes": [
+                        {"asset_id": "scene-1", "images": ["https://cdn.example/1.png"]},
+                        {"asset_id": "scene-2", "images": []},
+                    ]
+                },
+                "scene_packages": [{"scene_id": "scene-1"}],
+                "failed_assets": [
+                    {
+                        "asset_id": "scene-2",
+                        "asset_type": "scene_image",
+                        "retry_pending": True,
+                    }
+                ],
+            },
+        )
+    )
+
+    result = await GenerateSceneAssetsTool(operation_port=port).execute(
+        _context(
+            global_assets={
+                "scenes": [
+                    {"asset_id": "scene-1", "name": "场景1", "image_prompt": "场景1"},
+                    {"asset_id": "scene-2", "name": "场景2", "image_prompt": "场景2"},
+                ]
+            },
+            scene_packages=[{"scene_id": "scene-1"}],
+        ),
+        {"image_model": "seeddream-5.0"},
+    )
+
+    assert result.workspace_patch["scene_asset_job"]["status"] == "partial"
+    assert result.workspace_patch["scene_asset_failures"] == [
+        {
+            "asset_id": "scene-2",
+            "asset_type": "scene_image",
+            "retry_pending": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_scene_assets_job_preserves_partial_business_result() -> None:
+    from pixelflow.agent_runtime.jobs import ProviderJobAdapter
+    from pixelflow.video_agent.adapters.domain_jobs import GenerateSceneAssetsJobService
+
+    async def runner(_request):
+        return {
+            "ok": False,
+            "message": "部分参考图已生成",
+            "global_assets": {
+                "scenes": [
+                    {"asset_id": "scene-1", "images": ["https://cdn.example/1.png"]},
+                    {"asset_id": "scene-2", "images": []},
+                ]
+            },
+            "scene_packages": [{"scene_id": "scene-1"}],
+            "failed_assets": [
+                {
+                    "asset_id": "scene-2",
+                    "asset_type": "scene_image",
+                    "retry_pending": True,
+                }
+            ],
+        }
+
+    snapshot = await ProviderJobAdapter(
+        GenerateSceneAssetsJobService(runner=runner)
+    ).start(
+        {"global_assets": {}, "scene_packages": []},
+        authorization="local",
+        idempotency_key="idem-assets-partial-1",
+    )
+
+    assert snapshot.outcome.value == "succeeded"
+    assert snapshot.result["ok"] is False
+    assert snapshot.result["failed_assets"][0]["asset_id"] == "scene-2"
+
+
+@pytest.mark.asyncio
 async def test_prepare_domain_job_service_rule_path() -> None:
     from pixelflow.agent_runtime.jobs import ProviderJobAdapter
     from pixelflow.video_agent.adapters.domain_jobs import PrepareScenePackageJobService

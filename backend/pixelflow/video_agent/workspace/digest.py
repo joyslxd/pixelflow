@@ -98,6 +98,82 @@ def _count_named_items(value: Any) -> int:
     return count
 
 
+def summarize_scene_asset_status(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    """参考图完整度摘要：区分任意图已生成与全部生成完成。"""
+
+    if not isinstance(payload, Mapping):
+        payload = {}
+    global_assets = _as_mapping(payload.get("global_assets")) or {}
+    asset_types = {
+        "characters": "character",
+        "scenes": "scene_image",
+        "props": "prop_image",
+    }
+    targets: list[tuple[dict[str, str], bool]] = []
+    for bucket, asset_type in asset_types.items():
+        for item in _as_list(global_assets.get(bucket)):
+            if not isinstance(item, Mapping):
+                continue
+            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+            target = {"asset_id": asset_id, "asset_type": asset_type}
+            targets.append((target, _asset_has_image_url(item)))
+
+    missing_targets = [target for target, ready in targets if not ready]
+    missing_keys = {
+        (target["asset_type"], target["asset_id"])
+        for target in missing_targets
+        if target["asset_id"]
+    }
+    failed_keys: set[tuple[str, str]] = set()
+    for failure in _as_list(payload.get("scene_asset_failures")):
+        if not isinstance(failure, Mapping):
+            continue
+        key = (
+            str(failure.get("asset_type") or "").strip(),
+            str(failure.get("asset_id") or "").strip(),
+        )
+        if key in missing_keys:
+            failed_keys.add(key)
+
+    required_count = len(targets)
+    ready_count = sum(1 for _target, ready in targets if ready)
+    missing_count = required_count - ready_count
+    scene_asset_job = _as_mapping(payload.get("scene_asset_job")) or {}
+    job_status = str(scene_asset_job.get("status") or "").strip().casefold()
+    is_running = job_status in {
+        "created",
+        "pending",
+        "polling",
+        "queued",
+        "running",
+        "start_paused_quota",
+    }
+    if required_count == 0:
+        status = "empty"
+    elif missing_count == 0:
+        status = "ready"
+    elif is_running:
+        status = "running"
+    elif ready_count > 0:
+        status = "partial"
+    elif failed_keys:
+        status = "failed"
+    else:
+        status = "empty"
+
+    return {
+        "scene_asset_status": status,
+        "scene_asset_required_count": required_count,
+        "scene_asset_ready_count": ready_count,
+        "scene_asset_missing_count": missing_count,
+        "scene_asset_failed_count": len(failed_keys),
+        "scene_assets_ready": status == "ready",
+        "scene_asset_missing_targets": [
+            target for target in missing_targets if target["asset_id"]
+        ][:64],
+    }
+
+
 def _scene_has_video_url(scene: Mapping[str, Any]) -> bool:
     if str(scene.get("video_url") or "").strip().lower().startswith(("http://", "https://")):
         return True
@@ -219,6 +295,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
         and key in {"name", "category", "brand"}
     }
     resolved_ratio = workspace_resolved_aspect_ratio(payload)
+    asset_status = summarize_scene_asset_status(payload)
     video_status = summarize_scene_video_status(payload)
     return {
         key: value
@@ -254,6 +331,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "failed_scene_asset_count": _safe_len(payload.get("scene_asset_failures")),
             "has_scene_packages": bool(scenes),
             "has_scene_asset_images": workspace_has_scene_asset_images(payload),
+            **asset_status,
             "registered_scene_asset_image_models": [
                 dict(item) for item in REGISTERED_SCENE_ASSET_IMAGE_MODELS
             ],

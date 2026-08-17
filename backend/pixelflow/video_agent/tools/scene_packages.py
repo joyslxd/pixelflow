@@ -701,6 +701,7 @@ class GenerateSceneAssetsTool:
         next_global = result.get("global_assets") if isinstance(result.get("global_assets"), Mapping) else global_assets
         next_scenes = result.get("scene_packages") if isinstance(result.get("scene_packages"), list) else scene_packages
         failed = result.get("failed_assets") if isinstance(result.get("failed_assets"), list) else []
+        business_ok = result.get("ok") is not False
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=str(result.get("message") or "参考图生成完成"),
@@ -714,7 +715,7 @@ class GenerateSceneAssetsTool:
                 "scene_asset_job": {
                     "job_id": job.job_id,
                     "plan_step_id": context.step_id,
-                    "status": "succeeded",
+                    "status": "succeeded" if business_ok else "partial",
                     "image_model": request.image_model,
                     "attempt": attempt,
                 },

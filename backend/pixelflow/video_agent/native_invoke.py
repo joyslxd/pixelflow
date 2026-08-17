@@ -1085,7 +1085,7 @@ class NativeVideoAgentInvoker:
         """
 
         from pixelflow.video_agent.production_fields import looks_like_scene_asset_continue
-        from pixelflow.video_agent.workspace.digest import workspace_has_scene_asset_images
+        from pixelflow.video_agent.workspace.digest import summarize_scene_asset_status
 
         instruction = _followup_instruction(content)
         if not looks_like_scene_asset_continue(instruction):
@@ -1097,7 +1097,7 @@ class NativeVideoAgentInvoker:
             if isinstance(request.workspace.payload, Mapping)
             else {}
         )
-        if workspace_has_scene_asset_images(payload_map):
+        if summarize_scene_asset_status(payload_map)["scene_assets_ready"] is True:
             return request, (), payload, None
 
         refreshed = request.workspace
@@ -1237,8 +1237,39 @@ class NativeVideoAgentInvoker:
 
         instruction = _followup_instruction(content)
         parsed = _parse_scene_asset_model_confirm(instruction)
+        workspace_payload = (
+            request.workspace.payload
+            if isinstance(request.workspace.payload, Mapping)
+            else {}
+        )
+        from pixelflow.video_agent.workspace.digest import summarize_scene_asset_status
+
+        asset_status = summarize_scene_asset_status(workspace_payload)
+        target_assets = list(asset_status["scene_asset_missing_targets"])
         if parsed is None:
-            return request, (), payload, None
+            compact = re.sub(r"\s+", "", instruction)
+            is_retry = (
+                asset_status["scene_asset_status"] in {"partial", "failed"}
+                and (
+                    compact in {"继续", "继续生成", "继续生图", "重试"}
+                    or bool(re.search(r"(?:继续|重试).{0,12}(?:参考图|生图)", compact))
+                )
+            )
+            contract = workspace_payload.get("creation_contract")
+            contract_map = contract if isinstance(contract, Mapping) else {}
+            prior_job = workspace_payload.get("scene_asset_job")
+            job_map = prior_job if isinstance(prior_job, Mapping) else {}
+            stored_model = str(
+                contract_map.get("image_model") or job_map.get("image_model") or ""
+            ).strip()
+            if not is_retry or stored_model not in {"gpt-image-2", "seeddream-5.0"}:
+                return request, (), payload, None
+            parsed = (
+                stored_model,
+                str(contract_map.get("scene_image_ratio") or "9:16"),
+                str(contract_map.get("scene_image_size") or "2K"),
+                str(contract_map.get("reference_brief") or ""),
+            )
         if not _workspace_has_scene_packages(request.workspace):
             return request, (), payload, None
         if self._registry.resolve("generate_scene_assets") is None:
@@ -1364,6 +1395,7 @@ class NativeVideoAgentInvoker:
             "image_ratio": image_ratio,
             "image_size": image_size,
             "reference_brief": reference_brief,
+            "target_assets": target_assets,
         }
         execute = getattr(self._executor, "execute_tool_call", None)
         try:
@@ -2338,7 +2370,7 @@ def _generate_scene_assets_result_failed(result: object) -> bool:
         job_status = str(job.get("status") or "").strip().casefold()
     if pending:
         return False
-    if job_status in {"polling", "succeeded", "start_paused_quota"}:
+    if job_status in {"polling", "succeeded", "partial", "start_paused_quota"}:
         return False
     if "失败" in summary or "未能" in summary or "无效" in summary:
         return True
@@ -2652,35 +2684,10 @@ def _workspace_dirty_scene_ids(workspace: VideoWorkspace) -> list[str]:
 
 
 def _workspace_has_scene_asset_images(workspace: VideoWorkspace) -> bool:
+    from pixelflow.video_agent.workspace.digest import summarize_scene_asset_status
+
     payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
-    global_assets = payload.get("global_assets")
-    if not isinstance(global_assets, Mapping):
-        return False
-
-    def _has_https(value: object) -> bool:
-        if isinstance(value, str):
-            return value.startswith(("http://", "https://"))
-        if isinstance(value, Mapping):
-            return any(
-                _has_https(value.get(key))
-                for key in ("url", "image_url", "thumbnail_url")
-            )
-        if isinstance(value, list):
-            return any(_has_https(item) for item in value)
-        return False
-
-    for collection in ("characters", "scenes", "props"):
-        items = global_assets.get(collection)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            if any(_has_https(item.get(key)) for key in ("url", "image_url", "thumbnail_url")):
-                return True
-            if _has_https(item.get("images")) or _has_https(item.get("three_view_images")):
-                return True
-    return False
+    return summarize_scene_asset_status(payload)["scene_assets_ready"] is True
 
 
 def _public_prepare_scene_summary(raw: str, package_count: int = 0) -> str:

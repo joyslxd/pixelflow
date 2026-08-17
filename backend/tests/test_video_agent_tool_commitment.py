@@ -13,6 +13,7 @@ from pixelflow.video_agent.middleware.tool_commitment import (
 )
 from pixelflow.video_agent.workspace.digest import (
     build_workspace_digest,
+    summarize_scene_asset_status,
     summarize_scene_video_status,
 )
 
@@ -82,6 +83,76 @@ def test_build_workspace_digest_includes_scene_video_fields() -> None:
     assert digest["scene_count"] == 1
     assert digest["scene_videos_ready_count"] == 1
     assert digest["scene_videos_polling_count"] == 0
+
+
+def test_summarize_scene_asset_status_distinguishes_partial_from_ready() -> None:
+    summary = summarize_scene_asset_status(
+        {
+            "global_assets": {
+                "characters": [
+                    {
+                        "asset_id": "character-host",
+                        "three_view_images": ["https://cdn.example/host.png"],
+                    }
+                ],
+                "scenes": [
+                    {"asset_id": "scene-room", "images": []},
+                    {
+                        "asset_id": "scene-desk",
+                        "images": ["https://cdn.example/desk.png"],
+                    },
+                ],
+                "props": [{"asset_id": "prop-product", "images": []}],
+            },
+            "scene_asset_failures": [
+                {
+                    "asset_id": "scene-room",
+                    "asset_type": "scene_image",
+                    "retry_pending": True,
+                }
+            ],
+        }
+    )
+
+    assert summary["scene_asset_status"] == "partial"
+    assert summary["scene_asset_required_count"] == 4
+    assert summary["scene_asset_ready_count"] == 2
+    assert summary["scene_asset_missing_count"] == 2
+    assert summary["scene_asset_failed_count"] == 1
+    assert summary["scene_assets_ready"] is False
+    assert summary["scene_asset_missing_targets"] == [
+        {"asset_id": "scene-room", "asset_type": "scene_image"},
+        {"asset_id": "prop-product", "asset_type": "prop_image"},
+    ]
+
+
+def test_build_workspace_digest_marks_assets_ready_only_when_every_asset_has_an_image() -> None:
+    digest = build_workspace_digest(
+        _workspace(
+            {
+                "global_assets": {
+                    "characters": [
+                        {
+                            "asset_id": "character-host",
+                            "three_view_images": ["https://cdn.example/host.png"],
+                        }
+                    ],
+                    "scenes": [
+                        {
+                            "asset_id": "scene-room",
+                            "images": ["https://cdn.example/room.png"],
+                        }
+                    ],
+                    "props": [],
+                }
+            }
+        )
+    )
+
+    assert digest["has_scene_asset_images"] is True
+    assert digest["scene_assets_ready"] is True
+    assert digest["scene_asset_status"] == "ready"
+    assert digest["scene_asset_missing_count"] == 0
 
 
 def test_narrated_forceable_tool_detects_inspect_intent() -> None:

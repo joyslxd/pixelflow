@@ -1,4 +1,4 @@
-/** PixelFlow 后端 API Client，对齐 /agent/flows 契约。开发环境下 /agent 由 Vite 代理到后端。 */
+/** PixelFlow 后端 API Client，对齐 /agent2/flows 契约。开发环境下 /agent2 由 Vite 代理到后端。 */
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
 import type { SceneAssetRetryTarget } from "@/lib/scenePackages";
@@ -17,7 +17,7 @@ export type {
   JianyingDraftStatus,
 } from "./jianyingDraft";
 
-const AGENT_API_PREFIX = "/agent";
+const AGENT_API_PREFIX = "/agent2";
 const FLOW_BASE = "/flows";
 
 /** P0-5.3：旧 /flows/video Job HTTP 已从网关移除。 */

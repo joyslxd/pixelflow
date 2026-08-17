@@ -1217,6 +1217,96 @@ async def test_native_invoker_bootstraps_generate_scene_assets_and_short_circuit
 
 
 @pytest.mark.asyncio
+async def test_native_invoker_continues_only_missing_scene_assets_before_video() -> None:
+    from pixelflow.video_agent.tools.scene_packages import GenerateSceneAssetsInput
+
+    class _AssetsTool(GenerateSceneAssetsStubTool):
+        spec = VideoToolSpec(
+            name="generate_scene_assets",
+            description="生成场景参考图",
+            input_model=GenerateSceneAssetsInput,
+            cost_level=VideoToolCostLevel.BILLABLE,
+            confirmation_required=True,
+            idempotency_mode=VideoToolIdempotencyMode.OPERATION,
+            recovery_mode=VideoToolRecoveryMode.OPERATION,
+            workspace_mutations=("scene_asset_job",),
+        )
+
+    assets = _AssetsTool()
+    registry = VideoToolRegistry([InspectStubTool(), assets])
+    event_repository = MemoryAgentRuntimeRepository()
+    repository = MemoryVideoAgentRepository(event_repository=event_repository)
+    workspace = await repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="workspace-assets-partial-1",
+            conversation_id="conversation-assets-partial-1",
+            payload={
+                "script_plan_confirmed": True,
+                "creation_contract": {
+                    "image_model": "seeddream-5.0",
+                    "scene_image_ratio": "9:16",
+                    "scene_image_size": "2K",
+                },
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+                "global_assets": {
+                    "characters": [
+                        {
+                            "asset_id": "character-host",
+                            "three_view_images": ["https://cdn.example/host.png"],
+                        }
+                    ],
+                    "scenes": [{"asset_id": "scene-room", "images": []}],
+                    "props": [],
+                },
+                "scene_asset_failures": [
+                    {
+                        "asset_id": "scene-room",
+                        "asset_type": "scene_image",
+                        "retry_pending": True,
+                    }
+                ],
+            },
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    executor = VideoAgentExecutor(
+        repository=repository,
+        registry=registry,
+        clock=lambda: T0,
+    )
+    invoker = NativeVideoAgentInvoker(
+        model=BoomIfCalledModel(),
+        registry=registry,
+        executor=executor,
+        video_repository=repository,
+        runtime_repository=event_repository,
+        skill_catalog=SimpleNamespace(),
+        memory_config=MemoryConfig(enabled=False),
+    )
+
+    result = await invoker.invoke(
+        NativeVideoAgentInvokeRequest(
+            user_id="user-1",
+            conversation_id="conversation-assets-partial-1",
+            turn_id="turn-assets-partial-1",
+            plan_id="plan-assets-partial-1",
+            content="继续生成",
+            workspace=workspace,
+        )
+    )
+
+    assert assets.calls == 1
+    assert result.tool_names == ("generate_scene_assets",)
+    assert assets.last_arguments is not None
+    assert assets.last_arguments["image_model"] == "seeddream-5.0"
+    assert assets.last_arguments["target_assets"] == [
+        {"asset_id": "scene-room", "asset_type": "scene_image"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_invoker_bootstraps_single_scene_generate_and_short_circuits() -> None:
     """「确认并生成分镜视频（scene-1）」只生成该镜，禁止进模型改走合并。"""
 

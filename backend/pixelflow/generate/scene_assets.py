@@ -834,7 +834,49 @@ async def generate_scene_assets(
             await maybe_awaitable
 
     for job_index, (target, field_name, prompt, ratio, context) in enumerate(asset_jobs):
-        urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)
+        try:
+            urls, quota_insufficient, _endpoint = await generate_asset(prompt, ratio, context)
+        except Exception:  # noqa: BLE001
+            failed_assets.append(
+                {
+                    **context,
+                    "generation_mode": "provider_unavailable",
+                    "endpoint": "",
+                    "model": model,
+                    "ratio": ratio,
+                    "size": image_size,
+                    "reference_urls": [],
+                    "error": "图片服务连接失败，本素材待重试",
+                    "error_code": "scene_asset_provider_unavailable",
+                    "quota_insufficient": False,
+                    "retry_pending": True,
+                }
+            )
+            for *_pending_job, pending_context in asset_jobs[job_index + 1 :]:
+                failed_assets.append(
+                    {
+                        **pending_context,
+                        "error": "本轮因图片服务连接失败尚未生成",
+                        "error_code": "scene_asset_retry_pending",
+                        "quota_insufficient": False,
+                        "retry_pending": True,
+                    }
+                )
+            await emit_progress(
+                completed=job_index + 1,
+                context=context,
+                ok=False,
+            )
+            return {
+                "ok": False,
+                "endpoint": resolve_scene_asset_endpoint(generation_modes),
+                "global_assets": assets,
+                "scene_packages": enriched,
+                "failed_assets": failed_assets,
+                "quota_insufficient": False,
+                "retryable": True,
+                "message": "部分参考图已生成，剩余素材可继续重试",
+            }
         if urls:
             target[field_name] = urls
         await emit_progress(

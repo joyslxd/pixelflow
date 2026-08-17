@@ -494,6 +494,16 @@ class GenerateScenesTool:
     ) -> VideoToolResult:
         request = _validate(GenerateScenesInput, arguments, "镜头生成参数无效")
         payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        from pixelflow.video_agent.workspace.digest import summarize_scene_asset_status
+
+        asset_status = summarize_scene_asset_status(payload)
+        required_assets = int(asset_status["scene_asset_required_count"])
+        if required_assets > 0 and asset_status["scene_assets_ready"] is not True:
+            raise VideoToolValidationError(
+                "参考图仅完成 "
+                f"{asset_status['scene_asset_ready_count']}/{required_assets}，"
+                "请先继续生成剩余角色/场景/道具参考图"
+            )
         scenes = _workspace_scenes(payload)
         scene_ids = list(request.scene_ids) or _text_list(payload.get("dirty_scene_ids"))
         if not scene_ids:
