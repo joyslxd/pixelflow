@@ -23,10 +23,106 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
+function hasImageReference(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.startsWith("http://") || value.startsWith("https://") || value.startsWith("asset://");
+  }
+  if (Array.isArray(value)) return value.some(hasImageReference);
+  const record = asRecord(value);
+  if (!record) return false;
+  return hasImageReference(record.url) || hasImageReference(record.image_url);
+}
+
+export type ScenePackageAssetSummary = {
+  status: "empty" | "partial" | "ready";
+  requiredCount: number;
+  readyCount: number;
+  missingCount: number;
+  complete: boolean;
+  missingTargets: Array<{ asset_id: string; asset_type: string }>;
+};
+
+/** 场景包参考图完整度；生成视频必须使用 complete，不能使用“任意一张图”。 */
+export function scenePackageAssetSummary(
+  packages: ScenePackageLike | null | undefined,
+): ScenePackageAssetSummary {
+  if (!packages) {
+    return {
+      status: "empty",
+      requiredCount: 0,
+      readyCount: 0,
+      missingCount: 0,
+      complete: false,
+      missingTargets: [],
+    };
+  }
+  const globalAssets = asRecord(packages.global_assets) || {};
+  const assetTypes: Record<string, string> = {
+    characters: "character",
+    scenes: "scene_image",
+    props: "prop_image",
+  };
+  let requiredCount = 0;
+  let readyCount = 0;
+  const missingTargets: Array<{ asset_id: string; asset_type: string }> = [];
+  for (const [key, assetType] of Object.entries(assetTypes)) {
+    const list = globalAssets[key];
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const record = asRecord(item);
+      if (!record) continue;
+      requiredCount += 1;
+      const ready = hasImageReference(record.images)
+        || hasImageReference(record.three_view_images)
+        || hasImageReference(record.image_url)
+        || hasImageReference(record.url);
+      if (ready) {
+        readyCount += 1;
+        continue;
+      }
+      const assetId = String(record.asset_id || record.id || "").trim();
+      if (assetId) missingTargets.push({ asset_id: assetId, asset_type: assetType });
+    }
+  }
+  // 兼容只有 scene_packages.image_urls 的旧场景包。
+  if (requiredCount === 0 && packages.scene_packages?.length) {
+    requiredCount = packages.scene_packages.length;
+    readyCount = packages.scene_packages.filter((scene) => hasImageReference(scene.image_urls)).length;
+  }
+  const missingCount = Math.max(0, requiredCount - readyCount);
+  const complete = requiredCount > 0 && missingCount === 0;
+  return {
+    status: complete ? "ready" : (readyCount > 0 ? "partial" : "empty"),
+    requiredCount,
+    readyCount,
+    missingCount,
+    complete,
+    missingTargets,
+  };
+}
+
+export function scenePackageAssetPrimaryAction(
+  packages: ScenePackageLike | null | undefined,
+):
+  | { kind: "retry_assets"; label: string; missingCount: number }
+  | { kind: "generate_video"; label: string; missingCount: 0 }
+  | { kind: "generate_assets"; label: string; missingCount: number } {
+  const summary = scenePackageAssetSummary(packages);
+  if (summary.complete) {
+    return { kind: "generate_video", label: "确认并生成视频", missingCount: 0 };
+  }
+  if (summary.readyCount > 0 && summary.missingCount > 0) {
+    return {
+      kind: "retry_assets",
+      label: `继续生成剩余 ${summary.missingCount} 项参考图`,
+      missingCount: summary.missingCount,
+    };
+  }
+  return {
+    kind: "generate_assets",
+    label: "生成参考图",
+    missingCount: summary.missingCount,
+  };
 }
 
 /** 服务端幂等结果卡 client_message_id：media-result:{kind}:{job_id} */
@@ -95,20 +191,7 @@ export function hasMediaResultMessage(
 export function scenePackageHasGeneratedImages(
   packages: ScenePackageLike | null | undefined,
 ): boolean {
-  if (!packages) return false;
-  const globalAssets = asRecord(packages.global_assets) || {};
-  for (const key of ["characters", "scenes", "props"] as const) {
-    const list = globalAssets[key];
-    if (!Array.isArray(list)) continue;
-    for (const item of list) {
-      const record = asRecord(item);
-      if (!record) continue;
-      if (stringArray(record.images).length > 0 || stringArray(record.three_view_images).length > 0) {
-        return true;
-      }
-    }
-  }
-  return (packages.scene_packages || []).some((scene) => stringArray(scene.image_urls).length > 0);
+  return scenePackageAssetSummary(packages).readyCount > 0;
 }
 
 export type ScenePackagePendingKind =
@@ -130,7 +213,7 @@ export function isSceneAssetGenerationMaterialized(
     const artifact = message.artifact;
     if (artifact?.type !== "video_scene_packages" || !artifact.videoScenePackages) return false;
     if (artifact.sceneAssetsGenerating) return false;
-    return scenePackageHasGeneratedImages(artifact.videoScenePackages);
+    return scenePackageAssetSummary(artifact.videoScenePackages).complete;
   });
 }
 
@@ -154,10 +237,13 @@ export function reconcileStaleSceneAssetUiFlags<T extends ScenePackageMessage>(
     const artifact = message.artifact;
     if (!artifact) return message;
     if (artifact.type === "video_scene_packages") {
-      const hasImages = scenePackageHasGeneratedImages(artifact.videoScenePackages);
-      if (hasImages) return message;
-      // 无图且无活跃任务：清假转，回到待选模（含「已确认但仍无图」僵局）。
-      if (!artifact.sceneAssetsGenerating && artifact.sceneAssetsAwaitingModel) {
+      const summary = scenePackageAssetSummary(artifact.videoScenePackages);
+      if (summary.complete) return message;
+      const awaitingModel = summary.readyCount === 0;
+      if (
+        !artifact.sceneAssetsGenerating
+        && artifact.sceneAssetsAwaitingModel === awaitingModel
+      ) {
         return message;
       }
       changed = true;
@@ -166,7 +252,7 @@ export function reconcileStaleSceneAssetUiFlags<T extends ScenePackageMessage>(
         artifact: {
           ...artifact,
           sceneAssetsGenerating: false,
-          sceneAssetsAwaitingModel: true,
+          sceneAssetsAwaitingModel: awaitingModel,
         },
       };
     }

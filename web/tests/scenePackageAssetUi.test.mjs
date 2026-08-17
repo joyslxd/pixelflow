@@ -12,8 +12,24 @@ const {
   preferredVideoScenePackagesMessageIndex,
   reconcileStaleSceneAssetUiFlags,
   resolveVideoScenePackagesForRestore,
+  scenePackageAssetPrimaryAction,
+  scenePackageAssetSummary,
   scenePackageHasGeneratedImages,
 } = await import(moduleUrl);
+
+const partialPackages = {
+  global_assets: {
+    characters: [
+      {
+        asset_id: "character-host",
+        three_view_images: ["https://cdn.example/host.png"],
+      },
+    ],
+    scenes: [{ asset_id: "scene-room", images: [] }],
+    props: [],
+  },
+  scene_packages: [{ scene_id: "scene-1" }],
+};
 
 test("structure-only packages are not treated as generated images", () => {
   assert.equal(
@@ -169,4 +185,44 @@ test("markConfirmedSceneAssetModelOptions locks model card once generation evide
   const next = markConfirmedSceneAssetModelOptions(messages);
   assert.equal(next[0].artifact.sceneAssetModelConfirmed, true);
   assert.equal(next[1].artifact.sceneAssetsGenerating, true);
+});
+
+test("partial scene assets expose counts and missing retry targets", () => {
+  assert.deepEqual(scenePackageAssetSummary(partialPackages), {
+    status: "partial",
+    requiredCount: 2,
+    readyCount: 1,
+    missingCount: 1,
+    complete: false,
+    missingTargets: [
+      { asset_id: "scene-room", asset_type: "scene_image" },
+    ],
+  });
+});
+
+test("partial images do not materialize the complete generation stage", () => {
+  assert.equal(
+    isSceneAssetGenerationMaterialized(
+      [
+        {
+          id: "message-1",
+          artifact: {
+            type: "video_scene_packages",
+            videoScenePackages: partialPackages,
+            sceneAssetsGenerating: false,
+          },
+        },
+      ],
+      "scene_asset_generation",
+    ),
+    false,
+  );
+});
+
+test("partial assets keep the primary action on retry instead of video generation", () => {
+  assert.deepEqual(scenePackageAssetPrimaryAction(partialPackages), {
+    kind: "retry_assets",
+    label: "继续生成剩余 1 项参考图",
+    missingCount: 1,
+  });
 });

@@ -3,6 +3,7 @@ import { SceneMentionEditor } from "@/components/canvas/SceneMentionEditor";
 import { SceneAssetReplacementPicker } from "@/components/canvas/SceneAssetReplacementPicker";
 import type { ChatMessage } from "@/lib/chat";
 import { buildMentionCandidates, normalizeShotMentions, type SceneMention } from "@/lib/sceneMentions";
+import { scenePackageAssetPrimaryAction, scenePackageAssetSummary } from "@/lib/scenePackageAssetUi";
 import {
   collectSceneImageUrls,
   MAX_REFERENCE_IMAGE_COUNT,
@@ -333,6 +334,11 @@ export function StoryboardPanel({
   const selectedSceneVideo = sceneVideoForScene(selectedScene, generatedSceneVideos);
   const previewVideoUrl = selectedSceneVideo?.video_url || "";
   const sceneAssetQuotaPaused = quotaInsufficient(msg.artifact?.sceneAssetFailures);
+  const sceneAssetSummary = scenePackageAssetSummary(videoScenePackages);
+  const sceneAssetPrimaryAction = scenePackageAssetPrimaryAction(videoScenePackages);
+  const shouldContinueSceneAssets = sceneAssetQuotaPaused
+    || sceneAssetPrimaryAction.kind === "retry_assets";
+  const sceneAssetsNeedInitialGeneration = sceneAssetPrimaryAction.kind === "generate_assets";
   const selectedSceneGenerating = Boolean(
     selectedScene?.scene_id && generatingIdSet.has(selectedScene.scene_id),
   );
@@ -639,9 +645,13 @@ export function StoryboardPanel({
           </button>
           <button
             type="button"
-            onClick={sceneAssetQuotaPaused ? onRetrySceneAssets : onGenerateVideo}
+            onClick={sceneAssetsNeedInitialGeneration
+              ? undefined
+              : (shouldContinueSceneAssets ? onRetrySceneAssets : onGenerateVideo)}
             disabled={
-              sceneAssetQuotaPaused
+              sceneAssetsNeedInitialGeneration
+                ? true
+                : shouldContinueSceneAssets
                 ? !onRetrySceneAssets
                 : (
                   !onGenerateVideo
@@ -649,7 +659,9 @@ export function StoryboardPanel({
                 )
             }
             title={
-              sceneAssetQuotaPaused
+              sceneAssetsNeedInitialGeneration
+                ? "请先在对话中选择生图模型并生成参考图"
+                : shouldContinueSceneAssets
                 ? (onRetrySceneAssets ? undefined : "当前运行模式不允许继续生成参考图")
                 : (
                   selectedScene && generatingIdSet.has(selectedScene.scene_id)
@@ -660,8 +672,10 @@ export function StoryboardPanel({
             className="flex items-center justify-center gap-1.5 rounded-xl bg-brand py-2.5 text-[13px] font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={15} />
-            {sceneAssetQuotaPaused
-              ? "继续生成参考图"
+            {sceneAssetsNeedInitialGeneration
+              ? "请先生成参考图"
+              : shouldContinueSceneAssets
+              ? sceneAssetPrimaryAction.label
               : (selectedScene && generatingIdSet.has(selectedScene.scene_id)
                 ? `分镜 ${selectedScene.scene_index} 生成中…`
                 : (selectedScene
@@ -669,6 +683,11 @@ export function StoryboardPanel({
                   : "确认并生成视频"))}
           </button>
         </div>
+        {sceneAssetSummary.requiredCount > 0 ? (
+          <p className="mt-2 text-center text-[12px] text-ink-soft">
+            参考图已完成 {sceneAssetSummary.readyCount}/{sceneAssetSummary.requiredCount}
+          </p>
+        ) : null}
         {mergedVideoUrl ? (
           <button
             type="button"
