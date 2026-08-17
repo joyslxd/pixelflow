@@ -1483,11 +1483,23 @@ class NativeVideoAgentInvoker:
         next_payload = dict(payload)
         next_payload["messages"] = [HumanMessage(content=f"{note}\n\n{content}")]
         next_payload["workspace_id"] = refreshed.workspace_id
-        reply = (
-            f"已选择 {image_model}（{image_ratio} / {image_size}），"
-            "已启动 generate_scene_assets 生成参考图。"
-            "生成过程中可打开「视频场景包」卡片查看角色、场景与道具；完成后会自动更新参考图。"
+        refreshed_asset_status = summarize_scene_asset_status(
+            refreshed.payload if isinstance(refreshed.payload, Mapping) else {}
         )
+        if refreshed_asset_status["scene_asset_status"] in {"partial", "failed"}:
+            reply = (
+                "本轮参考图已完成 "
+                f"{refreshed_asset_status['scene_asset_ready_count']}/"
+                f"{refreshed_asset_status['scene_asset_required_count']}，"
+                f"剩余 {refreshed_asset_status['scene_asset_missing_count']} 项待生成。"
+                "已保留成功结果，回复「继续生成」可只重试未完成资产。"
+            )
+        else:
+            reply = (
+                f"已选择 {image_model}（{image_ratio} / {image_size}），"
+                "已启动 generate_scene_assets 生成参考图。"
+                "生成过程中可打开「视频场景包」卡片查看角色、场景与道具；完成后会自动更新参考图。"
+            )
         return replace(request, workspace=refreshed), ("generate_scene_assets",), next_payload, reply
 
     async def _bootstrap_patch_scene_if_needed(

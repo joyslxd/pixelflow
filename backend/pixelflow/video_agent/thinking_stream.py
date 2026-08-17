@@ -821,9 +821,13 @@ Planner 会根据你的状态诊断和服务端 Tool Registry 决定具体执行
 - workspace_digest.has_scene_packages=true 且尚无参考图时，
   用户说「没有参考图 / 直接生成 / 生成参考图」→ target_capability=generate_scene_assets，
   intent=continue_images；不要写成 generate_scenes 或「直接生成视频」。
+- workspace_digest.scene_asset_status=partial/failed 时，说明参考图仅完成
+  scene_asset_ready_count/scene_asset_required_count；用户说「继续生成」时必须判定为
+  target_capability=generate_scene_assets、intent=continue_images，保留 scene_asset_missing_targets。
 - 引导选生图模型时：只推荐 workspace_digest.registered_scene_asset_image_models
   （当前 Borgrise：image-2 / Seedream 5.0），禁止推荐 Midjourney、DALL·E、Stable Diffusion。
-- 只有参考图已就绪后，确认生成分镜视频才进入 generate_scenes。
+- 只有 workspace_digest.scene_assets_ready=true 后，确认生成分镜视频才进入 generate_scenes；
+  has_scene_asset_images=true 只表示至少有一张图，不能当作全部就绪。
 - review_generated_scenes：检查生成后的视频镜头
 - compose_video：拼接并导出视频
 - inspect_workspace：只查询工作区状态

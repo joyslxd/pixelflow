@@ -569,7 +569,7 @@ class GenerateSceneAssetsTool:
     spec = VideoToolSpec(
         name="generate_scene_assets",
         description=(
-            "在场景包已就绪且尚无参考图时，为角色/场景/道具生成参考图并更新资产版本。"
+            "在场景包已就绪且参考图未全部完成时，为角色/场景/道具生成或续生参考图。"
             "用户说「没有参考图/直接生成」且已选生图模型时调用；"
             "生图模型只接受已注册 Borgrise 值：gpt-image-2（展示 image-2）、"
             "seeddream-5.0（展示 Seedream 5.0）；不要推荐 Midjourney/DALL·E 等未注册模型。"

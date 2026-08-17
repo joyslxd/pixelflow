@@ -1307,6 +1307,101 @@ async def test_native_invoker_continues_only_missing_scene_assets_before_video()
 
 
 @pytest.mark.asyncio
+async def test_native_invoker_reports_partial_scene_asset_completion() -> None:
+    from pixelflow.video_agent.tools.scene_packages import GenerateSceneAssetsInput
+
+    class _PartialAssetsTool:
+        spec = VideoToolSpec(
+            name="generate_scene_assets",
+            description="生成场景参考图",
+            input_model=GenerateSceneAssetsInput,
+            cost_level=VideoToolCostLevel.BILLABLE,
+            confirmation_required=True,
+            idempotency_mode=VideoToolIdempotencyMode.OPERATION,
+            recovery_mode=VideoToolRecoveryMode.OPERATION,
+            workspace_mutations=(
+                "global_assets",
+                "scene_asset_failures",
+                "scene_asset_job",
+            ),
+        )
+
+        async def execute(self, context: VideoToolContext, arguments):  # noqa: ANN001, ARG002
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="部分参考图已生成，剩余素材可继续重试",
+                workspace_patch={
+                    "global_assets": {
+                        "characters": [
+                            {
+                                "asset_id": "character-host",
+                                "three_view_images": ["https://cdn.example/host.png"],
+                            }
+                        ],
+                        "scenes": [{"asset_id": "scene-room", "images": []}],
+                        "props": [],
+                    },
+                    "scene_asset_failures": [
+                        {
+                            "asset_id": "scene-room",
+                            "asset_type": "scene_image",
+                            "retry_pending": True,
+                        }
+                    ],
+                    "scene_asset_job": {"job_id": "job-partial", "status": "partial"},
+                },
+            )
+
+    registry = VideoToolRegistry([InspectStubTool(), _PartialAssetsTool()])
+    event_repository = MemoryAgentRuntimeRepository()
+    repository = MemoryVideoAgentRepository(event_repository=event_repository)
+    workspace = await repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="workspace-assets-partial-reply-1",
+            conversation_id="conversation-assets-partial-reply-1",
+            payload={
+                "script_plan_confirmed": True,
+                "scene_packages": [{"scene_id": "scene-1", "scene_index": 1}],
+                "global_assets": {
+                    "characters": [
+                        {"asset_id": "character-host", "name": "主播", "three_view_images": []}
+                    ],
+                    "scenes": [{"asset_id": "scene-room", "name": "室内", "images": []}],
+                    "props": [],
+                },
+            },
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    executor = VideoAgentExecutor(repository=repository, registry=registry, clock=lambda: T0)
+    invoker = NativeVideoAgentInvoker(
+        model=BoomIfCalledModel(),
+        registry=registry,
+        executor=executor,
+        video_repository=repository,
+        runtime_repository=event_repository,
+        skill_catalog=SimpleNamespace(),
+        memory_config=MemoryConfig(enabled=False),
+    )
+
+    result = await invoker.invoke(
+        NativeVideoAgentInvokeRequest(
+            user_id="user-1",
+            conversation_id="conversation-assets-partial-reply-1",
+            turn_id="turn-assets-partial-reply-1",
+            plan_id="plan-assets-partial-reply-1",
+            content="确认生图模型 seeddream-5.0，比例 9:16，清晰度 2K，开始生成参考图",
+            workspace=workspace,
+        )
+    )
+
+    assert "1/2" in result.final_text
+    assert "继续生成" in result.final_text
+
+
+@pytest.mark.asyncio
 async def test_native_invoker_bootstraps_single_scene_generate_and_short_circuits() -> None:
     """「确认并生成分镜视频（scene-1）」只生成该镜，禁止进模型改走合并。"""
 
