@@ -47,7 +47,7 @@ function makeWindow() {
   };
 }
 
-test("六类 Supervisor 请求使用 /agent2 路径、编码标识并透传请求体", async () => {
+test("六类 Supervisor 请求使用 /agent 路径、编码标识并透传请求体", async () => {
   const calls = [];
   const signal = new AbortController().signal;
   const transport = createSupervisorApiTransport({
@@ -92,12 +92,12 @@ test("六类 Supervisor 请求使用 /agent2 路径、编码标识并透传请�
   await transport.getRunStatus("conv/001", "run/001", { signal });
 
   assert.deepEqual(calls.map(call => call.url), [
-    "/agent2/conversations/conv%2F001/agent-snapshot",
-    "/agent2/conversations/conv%2F001/turns/start",
-    "/agent2/conversations/conv%2F001/interrupts/interrupt%2F001/responses",
-    "/agent2/conversations/conv%2F001/video-agent/confirmations/confirmation%2F001/responses",
-    "/agent2/conversations/conv%2F001/video-agent/quota/quota%2F001/responses",
-    "/agent2/conversations/conv%2F001/turns/jobs/run%2F001",
+    "/agent/conversations/conv%2F001/agent-snapshot",
+    "/agent/conversations/conv%2F001/turns/start",
+    "/agent/conversations/conv%2F001/interrupts/interrupt%2F001/responses",
+    "/agent/conversations/conv%2F001/video-agent/confirmations/confirmation%2F001/responses",
+    "/agent/conversations/conv%2F001/video-agent/quota/quota%2F001/responses",
+    "/agent/conversations/conv%2F001/turns/jobs/run%2F001",
   ]);
   assert.deepEqual(calls.map(call => call.init.method), ["GET", "POST", "POST", "POST", "POST", "GET"]);
   for (const call of calls) {

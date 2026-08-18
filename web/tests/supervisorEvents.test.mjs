@@ -98,7 +98,7 @@ function createSubscription(client, overrides = {}) {
   return { subscription, events, gaps, errors };
 }
 
-test("事件流使用 /agent2 路径、透传鉴权并按 cursor 断点续传", async () => {
+test("事件流使用 /agent 路径、透传鉴权并按 cursor 断点续传", async () => {
   const calls = [];
   let subscription;
   const client = createSupervisorEventStreamClient({
@@ -128,7 +128,7 @@ test("事件流使用 /agent2 路径、透传鉴权并按 cursor 断点续传", 
 
   await subscription.done;
   assert.deepEqual(received.map((event) => event.sequence), [8]);
-  assert.equal(calls[0].input, "/agent2/conversations/conv%20%2F1/agent-events?cursor=cursor%2F7");
+  assert.equal(calls[0].input, "/agent/conversations/conv%20%2F1/agent-events?cursor=cursor%2F7");
   assert.equal(calls[0].init.headers.Authorization, "Bearer token-1");
   assert.equal(calls[0].init.headers.Accept, "text/event-stream");
   assert.equal(calls[0].init.signal.aborted, true);
@@ -168,8 +168,8 @@ test("断线后使用最新事件 cursor 重连且不重复投递", async () => 
 
   await subscription.done;
   assert.deepEqual(received, [1, 2]);
-  assert.equal(urls[0], "/agent2/conversations/conv-1/agent-events");
-  assert.equal(urls[1], "/agent2/conversations/conv-1/agent-events?cursor=cursor-1");
+  assert.equal(urls[0], "/agent/conversations/conv-1/agent-events");
+  assert.equal(urls[1], "/agent/conversations/conv-1/agent-events?cursor=cursor-1");
 });
 
 test("默认鉴权会等待 content-app 在 iframe 启动后延迟注入", async () => {
@@ -235,8 +235,8 @@ test("瞬时网络断线使用原 cursor 自动重连且不泄露异常文本", 
   await subscription.done;
   assert.equal(requestCount, 2);
   assert.deepEqual(urls, [
-    "/agent2/conversations/conv-1/agent-events?cursor=cursor-2",
-    "/agent2/conversations/conv-1/agent-events?cursor=cursor-2",
+    "/agent/conversations/conv-1/agent-events?cursor=cursor-2",
+    "/agent/conversations/conv-1/agent-events?cursor=cursor-2",
   ]);
   assert.deepEqual(errors, []);
 });
@@ -276,8 +276,8 @@ test("SSE frame 中途断线时丢弃残片，从最后 cursor 重连并接收�
   assert.deepEqual(received, [3]);
   assert.deepEqual(errors, []);
   assert.deepEqual(urls, [
-    "/agent2/conversations/conv-1/agent-events?cursor=cursor-2",
-    "/agent2/conversations/conv-1/agent-events?cursor=cursor-2",
+    "/agent/conversations/conv-1/agent-events?cursor=cursor-2",
+    "/agent/conversations/conv-1/agent-events?cursor=cursor-2",
   ]);
 });
 
@@ -322,7 +322,7 @@ test("序列缺口时不投递越级事件，加载 Snapshot 后从新 cursor �
   assert.equal(gaps[0].expectedSequence, 2);
   assert.equal(gaps[0].receivedSequence, 3);
   assert.equal(gaps[0].cursor, "cursor-1");
-  assert.equal(urls[1], "/agent2/conversations/conv-1/agent-events?cursor=snapshot%2Fcursor-3");
+  assert.equal(urls[1], "/agent/conversations/conv-1/agent-events?cursor=snapshot%2Fcursor-3");
 });
 
 test("Snapshot 恢复永久失败时只返回一次固定安全错误", async () => {

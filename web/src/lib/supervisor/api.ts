@@ -10,7 +10,7 @@ import type {
   VideoAgentConfirmScriptPlanRequest,
 } from "./contracts.js";
 
-const AGENT_API_PREFIX = "/agent2";
+const AGENT_API_PREFIX = "/agent";
 const AUTHORIZATION_READY_EVENT = "contentAppAuthorizationReady";
 const AUTHORIZATION_WAIT_TIMEOUT_MS = 2500;
 

@@ -1,4 +1,4 @@
-/** 与后端 /agent2/flows 对齐的最小前端类型，后续按页面需要扩展。 */
+/** 与后端 /agent/flows 对齐的最小前端类型，后续按页面需要扩展。 */
 
 export type TaskPhase =
   | "intake"
