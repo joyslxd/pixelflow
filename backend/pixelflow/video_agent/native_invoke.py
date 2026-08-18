@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
 import time
 from collections.abc import Mapping
@@ -18,6 +18,7 @@ from pixelflow.video_agent.agent import VIDEO_AGENT_NAME, create_video_agent
 from pixelflow.video_agent.contracts import VideoWorkspace
 from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 from pixelflow.video_agent.events.publisher import NativeAgentEventPublisher
+from pixelflow.video_agent.production_fields import workspace_resolved_aspect_ratio
 from pixelflow.video_agent.tool_runtime_context import bind_tool_runtime_context
 from pixelflow.video_agent.tools.registry import (
     VideoToolContext,
@@ -197,6 +198,15 @@ class NativeVideoAgentInvoker:
             )
         if not bootstrap_tools:
             request, bootstrap_tools, payload, bootstrap_reply = (
+                await self._bootstrap_replace_scene_asset_if_needed(
+                    request=request,
+                    content=content,
+                    runtime_context=runtime_context,
+                    payload=payload,
+                )
+            )
+        if not bootstrap_tools:
+            request, bootstrap_tools, payload, bootstrap_reply = (
                 await self._bootstrap_patch_scene_if_needed(
                     request=request,
                     content=content,
@@ -214,6 +224,10 @@ class NativeVideoAgentInvoker:
                 )
             )
 
+        target_scene = _scene_patch_target_context(content, request.workspace)
+        if target_scene is not None:
+            runtime_context["target_scene"] = target_scene
+
         # 补字段 / 成稿导入 / 重新拆解 / 生图 / 改镜 / 生成视频：
         # 已落定公开回复则禁止再进模型（避免上游 500 把已成功 Tool 冲成空转）。
         # 合并成片走 ReAct + compose_or_export_video，不做确定性 bootstrap。
@@ -223,6 +237,7 @@ class NativeVideoAgentInvoker:
                 ("apply_production_fields",),
                 ("import_script",),
                 ("generate_scene_assets",),
+                ("replace_scene_asset",),
                 ("patch_scene",),
                 ("generate_scenes",),
             }
@@ -813,7 +828,11 @@ class NativeVideoAgentInvoker:
                 analysis,
                 workspace_payload=request.workspace.payload,
             )
-            patch: dict[str, object] = {"script": next_script}
+            patch: dict[str, object] = {
+                "script": next_script,
+                "script_plan_confirmed": False,
+                "script_plan_confirmed_version": None,
+            }
             form_patch = production_fields_form_patch(analysis)
             if form_patch:
                 raw_form = request.workspace.payload.get("form_values")
@@ -1334,6 +1353,12 @@ class NativeVideoAgentInvoker:
                         request.conversation_id,
                     )
 
+        workspace_ratio = workspace_resolved_aspect_ratio(
+            workspace.payload if isinstance(workspace.payload, Mapping) else {}
+        )
+        if workspace_ratio is not None:
+            image_ratio = workspace_ratio
+
         await self._emit_bootstrap_reasoning_open(
             publisher,
             text=f"已确认生图模型 {image_model}，正在调用 generate_scene_assets 生成角色/场景/道具参考图…",
@@ -1501,6 +1526,130 @@ class NativeVideoAgentInvoker:
                 "生成过程中可打开「视频场景包」卡片查看角色、场景与道具；完成后会自动更新参考图。"
             )
         return replace(request, workspace=refreshed), ("generate_scene_assets",), next_payload, reply
+
+    async def _bootstrap_replace_scene_asset_if_needed(
+        self,
+        *,
+        request: NativeVideoAgentInvokeRequest,
+        content: str,
+        runtime_context: dict[str, object],
+        payload: dict[str, Any],
+    ) -> tuple[NativeVideoAgentInvokeRequest, tuple[str, ...], dict[str, Any], str | None]:
+        """把工作台素材选择确定性写入 Workspace，避免模型重建数字人参数。"""
+
+        arguments = _parse_structured_scene_asset_replacement(content)
+        if arguments is None or self._registry.resolve("replace_scene_asset") is None:
+            return request, (), payload, None
+        tool_call_id = f"bootstrap-replace-asset-{uuid4().hex[:12]}"
+        publisher = self._make_publisher(request)
+        started = time.monotonic()
+        plan_id = str(runtime_context.get("plan_id") or request.plan_id or "").strip() or (
+            f"plan-bootstrap-replace-asset-{request.turn_id}"
+        )
+        step_id = str(runtime_context.get("step_id") or "").strip() or (
+            f"{plan_id}-bootstrap-replace-asset"
+        )
+        runtime_context["plan_id"] = plan_id
+        runtime_context["step_id"] = step_id
+        asset_id = str(arguments.get("asset_id") or "").strip()
+
+        await self._emit_bootstrap_reasoning_open(
+            publisher,
+            text="正在将所选角色素材写入视频场景包…",
+        )
+        if publisher is not None:
+            await self._safe_publish(
+                publisher.tool_started(
+                    tool_name="replace_scene_asset",
+                    tool_call_id=tool_call_id,
+                    plan_id=plan_id,
+                    step_id=step_id,
+                    title="替换场景包素材",
+                )
+            )
+        context = VideoToolContext(
+            user_id=request.user_id,
+            workspace=request.workspace,
+            plan_id=plan_id,
+            step_id=step_id,
+            credential=request.credential,
+        )
+        execute = getattr(self._executor, "execute_tool_call", None)
+        try:
+            if callable(execute):
+                result = await execute(
+                    context=context,
+                    tool_name="replace_scene_asset",
+                    arguments=arguments,
+                )
+            else:
+                result = await self._registry.execute(
+                    context,
+                    "replace_scene_asset",
+                    arguments,
+                )
+        except VideoToolValidationError as exc:
+            detail = str(exc).strip()[:280] or "场景包素材替换参数无效"
+            if publisher is not None:
+                await self._safe_publish(
+                    publisher.tool_failed(
+                        tool_name="replace_scene_asset",
+                        tool_call_id=tool_call_id,
+                        public_summary=detail,
+                    )
+                )
+            return request, (), payload, detail
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "bootstrap replace_scene_asset 失败 conversation=%s asset=%s",
+                request.conversation_id,
+                asset_id,
+            )
+            detail = "场景包素材替换未能写入，请重试"
+            if publisher is not None:
+                await self._safe_publish(
+                    publisher.tool_failed(
+                        tool_name="replace_scene_asset",
+                        tool_call_id=tool_call_id,
+                        public_summary=detail,
+                    )
+                )
+            return request, (), payload, detail
+
+        summary = str(getattr(result, "public_summary", "") or "").strip()
+        patch_map = getattr(result, "workspace_patch", None)
+        if not isinstance(patch_map, Mapping) or not patch_map:
+            detail = summary or "场景包素材替换参数无效"
+            if publisher is not None:
+                await self._safe_publish(
+                    publisher.tool_failed(
+                        tool_name="replace_scene_asset",
+                        tool_call_id=tool_call_id,
+                        public_summary=detail[:500],
+                    )
+                )
+            return request, (), payload, detail[:280]
+        if publisher is not None:
+            await self._safe_publish(
+                publisher.tool_completed(
+                    tool_name="replace_scene_asset",
+                    tool_call_id=tool_call_id,
+                    public_summary=(summary or "场景包素材已替换")[:500],
+                    artifact_refs=tuple(getattr(result, "artifact_refs", ()) or ()),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+
+        refreshed = request.workspace
+        get_workspace = getattr(self._video_repository, "get_workspace", None)
+        if callable(get_workspace):
+            loaded = await get_workspace(request.user_id, request.workspace.workspace_id)
+            if loaded is not None:
+                refreshed = loaded
+        runtime_context["workspace"] = refreshed
+        runtime_context["revision"] = refreshed.revision
+        reply = "已替换所选角色素材，引用该角色的镜头已标记为待重新生成。"
+        return replace(request, workspace=refreshed), ("replace_scene_asset",), payload, reply
 
     async def _bootstrap_patch_scene_if_needed(
         self,
@@ -2237,6 +2386,8 @@ def _should_prefer_bootstrap_reply(
             token in text
             for token in ("参考图", "生图", "生成中", "场景包", "模型")
         )
+    if "replace_scene_asset" in bootstrap_tools:
+        return not any(token in text for token in ("素材", "角色", "已替换", "待重新生成"))
     if "patch_scene" in bootstrap_tools:
         return not any(token in text for token in ("分镜", "已更新", "待重新生成", "镜头"))
     if "generate_scenes" in bootstrap_tools:
@@ -2435,6 +2586,24 @@ _SCENE_PATCH_FIELD_SPECS: tuple[tuple[str, str, int], ...] = (
     ("参考素材", "reference_asset_ids", 0),
 )
 
+_SCENE_ASSET_REPLACEMENT_RE = re.compile(
+    r"<<<REPLACE_SCENE_ASSET>>>\s*(?P<payload>\{.*?\})\s*<<<END>>>",
+    re.DOTALL,
+)
+
+
+def _parse_structured_scene_asset_replacement(content: str) -> dict[str, object] | None:
+    match = _SCENE_ASSET_REPLACEMENT_RE.search(content or "")
+    if match is None:
+        return None
+    try:
+        value = json.loads(match.group("payload"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value
+
 
 def _parse_structured_scene_patch(content: str) -> tuple[str, dict[str, object]] | None:
     """解析 FE 分镜面板结构化 Turn：修改分镜 scene-1。镜头描述：…"""
@@ -2452,7 +2621,7 @@ def _parse_structured_scene_patch(content: str) -> tuple[str, dict[str, object]]
     for label, key, limit in _SCENE_PATCH_FIELD_SPECS:
         # 行首或「。；;」后的 FE 字段；「旁白」须用 (?!（对白）) 排除镜头正文「旁白（对白）：」。
         if label == "旁白":
-            pattern = re.compile(rf"(?:^|\n|(?<=[。；;]))\s*旁白(?!（对白）)\s*[：:]")
+            pattern = re.compile(r"(?:^|\n|(?<=[。；;]))\s*旁白(?!（对白）)\s*[：:]")
         else:
             pattern = re.compile(rf"(?:^|\n|(?<=[。；;]))\s*{re.escape(label)}\s*[：:]")
         found = pattern.search(body)
@@ -2469,7 +2638,9 @@ def _parse_structured_scene_patch(content: str) -> tuple[str, dict[str, object]]
             continue
         markers.append((found.start(), found.end(), key, limit))
     if not markers:
-        return scene_id, {"shot_description": body[:10_000]}
+        # 没有显式字段标签的是自然语言指令，由原生 Agent 结合当前镜头理解；
+        # 不能把「场地还是在……」之类指令直接覆盖成完整镜头正文。
+        return None
 
     markers.sort(key=lambda item: item[0])
     patch: dict[str, object] = {}
@@ -2496,6 +2667,72 @@ def _parse_structured_scene_patch(content: str) -> tuple[str, dict[str, object]]
     if not patch:
         return None
     return scene_id, patch
+
+
+_SCENE_CONTEXT_FIELDS: tuple[str, ...] = (
+    "scene_id",
+    "title",
+    "storyline",
+    "shot_description",
+    "prompt",
+    "narration",
+    "transition",
+    "duration_ms",
+    "reference_asset_ids",
+    "edit_status",
+)
+
+
+def _scene_patch_target_context(
+    content: str,
+    workspace: VideoWorkspace,
+) -> dict[str, object] | None:
+    """为自然语言局部改镜提供当前镜头快照，不暴露整个脚本或敏感字段。"""
+
+    text = _followup_instruction(content).strip()
+    match = _SCENE_PATCH_HEAD_RE.match(text)
+    if match is None or _parse_structured_scene_patch(content) is not None:
+        return None
+    scene_id = (match.group("scene_id") or "").strip()
+    body = (match.group("body") or "").strip(" ，,。\n\t")
+    if not scene_id or not body:
+        return None
+
+    payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
+    raw_packages = payload.get("scene_packages") or payload.get("scenes") or []
+    if isinstance(raw_packages, Mapping):
+        raw_packages = raw_packages.get("scene_packages") or raw_packages.get("scenes") or []
+    if not isinstance(raw_packages, list):
+        return None
+    target = next(
+        (
+            item
+            for item in raw_packages
+            if isinstance(item, Mapping)
+            and str(item.get("scene_id") or item.get("id") or "").strip() == scene_id
+        ),
+        None,
+    )
+    if target is None:
+        return None
+
+    context: dict[str, object] = {"scene_id": scene_id}
+    for field in _SCENE_CONTEXT_FIELDS:
+        if field == "scene_id" or field not in target:
+            continue
+        value = target[field]
+        if field == "shot_description" and isinstance(value, Mapping):
+            context[field] = {
+                "text": str(value.get("text") or "")[:10_000],
+                "mentions": list(value.get("mentions") or [])[:24],
+            }
+        elif field == "reference_asset_ids" and isinstance(value, (list, tuple)):
+            context[field] = [str(item) for item in value[:12]]
+        elif isinstance(value, str):
+            context[field] = value[:10_000]
+        elif isinstance(value, (int, float, bool)) or value is None:
+            context[field] = value
+    return context
 
 
 def _parse_generate_scenes_intent(content: str) -> str | None:

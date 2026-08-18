@@ -223,7 +223,13 @@ def _resolve_setting_sections(text: str) -> tuple[str, str, str]:
     character_section = _extract_markdown_section(text, r"角色设定")
     scene_section = _extract_markdown_section(text, r"场景设定")
     prop_section = _extract_markdown_section(text, r"道具(?:与产品)?设定|道具设定")
-    if character_section or scene_section or prop_section:
+    # 导出稿可能在完整合并设定后追加三个「结构对齐保留」空章节。
+    # 只有能解析出实体的独立章节才可覆盖前面的合并设定。
+    if any(
+        _iter_setting_entries(section)
+        for section in (character_section, scene_section, prop_section)
+        if section
+    ):
         return character_section, scene_section, prop_section
 
     combined = _extract_markdown_section(text, r"角色\s*[/／]\s*场景\s*[/／]\s*道具(?:设定)?")
@@ -784,16 +790,18 @@ def _iter_setting_entries(section: str) -> list[tuple[str, str]]:
             ):
                 push(match.group(1), match.group(2))
 
-    # ### 阿杰 / #### 程岚（女1）
-    heading_blocks = re.split(r"(?=^#{2,4}\s+)", section, flags=re.MULTILINE)
+    # ### 阿杰 / #### 程岚（女1） / - ### 安然
+    heading_pattern = r"(?:[-*]\s+)?#{2,4}\s+"
+    heading_blocks = re.split(rf"(?=^{heading_pattern})", section, flags=re.MULTILINE)
     found_heading = False
     for block in heading_blocks:
-        heading = re.match(r"^#{2,4}\s+(.+)$", block.strip(), flags=re.MULTILINE)
+        cleaned_block = block.strip()
+        heading = re.match(rf"^{heading_pattern}(.+)$", cleaned_block, flags=re.MULTILINE)
         if not heading:
             continue
         found_heading = True
         title = heading.group(1).strip()
-        body = block[heading.end() :].strip()
+        body = cleaned_block[heading.end() :].strip()
         title_name = re.sub(r"[*_#`]", "", title).strip()
         title_name = re.split(r"[（(：:\-—|/]", title_name, maxsplit=1)[0].strip()
         if _is_container_setting_heading(title_name):

@@ -787,6 +787,18 @@ class AgentRuntimeService:
                         ),
                         primary_execution_ready=primary_ready,
                     )
+                if (
+                    self.config.mode == "primary"
+                    and route_decision.intent is RouteIntent.VIDEO
+                    and "video" in self.config.enabled_intents
+                    and (
+                        "video" not in self.primary_execution_intents
+                        or self._video_agent_entrypoint is None
+                    )
+                ):
+                    raise AgentRuntimeUnavailableError(
+                        "V2 VideoAgent Runtime 当前不可用",
+                    )
                 # P0-4.2：frontend_v2 历史会话首次视频 Turn 同事务升级为原生模式。
                 wants_video_agent = (
                     (
@@ -1860,6 +1872,9 @@ class AgentRuntimeService:
             if request.confirm_for_generation:
                 patch["script_plan_confirmed"] = True
                 patch["script_plan_confirmed_version"] = next_version
+            else:
+                patch["script_plan_confirmed"] = False
+                patch["script_plan_confirmed_version"] = None
             updated = await self._video_agent_repository.apply_workspace_patch(
                 owner,
                 workspace.workspace_id,
@@ -2006,12 +2021,27 @@ class AgentRuntimeService:
                     workspace_id=workspace.workspace_id,
                     revision=workspace.revision,
                 )
-            if workspace.payload.get("script_plan_confirmed") is not True:
+            script_version = script.get("version")
+            if (
+                workspace.payload.get("script_plan_confirmed") is not True
+                or workspace.payload.get("script_plan_confirmed_version")
+                != script_version
+            ):
+                if not isinstance(script_version, int) or script_version < 1:
+                    raise AgentRuntimeVideoScriptNotReadyError(
+                        "当前脚本缺少有效版本，无法确认",
+                        missing_fields=["脚本版本"],
+                        workspace_id=workspace.workspace_id,
+                        revision=workspace.revision,
+                    )
                 try:
                     workspace = await self._video_agent_repository.apply_workspace_patch(
                         owner,
                         workspace.workspace_id,
-                        {"script_plan_confirmed": True},
+                        {
+                            "script_plan_confirmed": True,
+                            "script_plan_confirmed_version": script_version,
+                        },
                         expected_revision=workspace.revision,
                         now=self._clock(),
                     )

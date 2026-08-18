@@ -16,6 +16,11 @@ def test_system_prompt_routes_tools_without_eight_stage_pipeline() -> None:
     prompt = VIDEO_AGENT_SYSTEM_PROMPT
     assert "import_script" in prompt
     assert "run_script_skill_stage" in prompt
+    assert 'mode="revise"' in prompt
+    assert 'revision_scope="ending_cta"' in prompt
+    assert "该 Tool 成功后立即结束本轮" in prompt
+    assert "script_plan_confirmed_version" in prompt
+    assert "与 digest.script_version 相等" in prompt
     assert "polish_seedance_shot_prompts" in prompt
     assert "prepare_scene_packages" in prompt
     assert "generate_scene_assets" in prompt
@@ -101,6 +106,8 @@ def test_episode_stage_prompt_loads_bgrs_skill_with_six_column_contract() -> Non
     assert "【bgrs Skill 写作指导摘录】" in prompt
     assert "| 时间 | 景别 | 运镜 | 画面 | 旁白/对白 | 屏幕文案 | 行动引导 |" in prompt
     assert "禁止输出 Skill 原文的 △" in prompt
+    assert "禁止新增「地点」或「场景」列" in prompt
+    assert "禁止把 Markdown 标题标记" in prompt
     # Skill 正文进 Tool 执行 Prompt，不得误以为只剩短 STAGE 句
     assert "铁律 11" in prompt or "视听语言优先" in prompt
 
@@ -114,3 +121,5 @@ def test_tool_descriptions_explain_when_not_how_to_write() -> None:
     assert "不是必须跑完八阶段" in stage_desc
     assert "import_script" in stage_desc
     assert "characters" in stage_desc
+    assert "mode=revise" in stage_desc
+    assert "revision_scope=ending_cta" in stage_desc

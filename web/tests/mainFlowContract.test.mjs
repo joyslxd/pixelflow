@@ -57,6 +57,15 @@ test("storyboard global asset rows expose manual addition through the shared pic
   assert.match(workspaceSource, /scene_global_asset_added/);
 });
 
+test("native V2 scene package wires character replacement into a runtime turn", () => {
+  assert.match(workspaceSource, /const handleReplaceVideoAgentGlobalAsset = async/);
+  assert.match(workspaceSource, /replace_scene_asset/);
+  assert.match(
+    workspaceSource,
+    /onReplaceGlobalAsset=\{orchestrationMode === "video_agent_v2"[\s\S]*handleReplaceVideoAgentGlobalAsset/,
+  );
+});
+
 test("manual global asset addition persists in place without clearing generated or dirty scene state", () => {
   const start = workspaceSource.indexOf("const handleAddGlobalAsset = (");
   const end = workspaceSource.indexOf("const handleRemoveReferencedMaterial", start);
@@ -835,7 +844,7 @@ test("V2.1 batch B asset package paths submit Turn instead of gateway jobs", () 
   const modelV2 = workspaceSource.indexOf("V2.1 批次 B：模型确认后提交 Turn", confirmModel);
   assert.notEqual(modelV2, -1, "model confirm must have V2 Turn branch");
   assert.equal(workspaceSource.includes("api.startSceneAssetsJob"), false, "legacy startSceneAssetsJob must be removed from workspace");
-  const modelBranch = workspaceSource.slice(modelV2, modelV2 + 900);
+  const modelBranch = workspaceSource.slice(modelV2, modelV2 + 1_600);
   assert.match(modelBranch, /handleSupervisorTurn/);
   assert.match(modelBranch, /开始生成参考图/);
 
@@ -1207,6 +1216,43 @@ test("image edit options load content-app model configs and submit selected mode
   assert.match(messageBubbleSource, /你也可以重新选择当前模型支持的参数后继续提交/, "unsupported requested params should guide the user to choose supported values");
   assert.match(messageBubbleSource, /imageEditSubmitDisabled/, "image-edit submit should only disable when no usable option exists");
   assert.equal(messageBubbleSource.includes("disabled={Boolean(imageEditUnsupportedReason)}"), false, "unsupported requested params must not block submit after choosing supported values");
+});
+
+test("runtime unavailable turns remain visible after conversation restore", () => {
+  const unavailableStart = workspaceSource.indexOf('error.code === "agent_runtime_unavailable"');
+  const unavailableEnd = workspaceSource.indexOf("return null;", unavailableStart);
+  assert.notEqual(unavailableStart, -1, "runtime unavailable branch must exist");
+  assert.notEqual(unavailableEnd, -1, "runtime unavailable branch must terminate");
+  const unavailableBranch = workspaceSource.slice(unavailableStart, unavailableEnd);
+  assert.match(
+    unavailableBranch,
+    /appendMessageForConversation/,
+    "the rejected user turn must be persisted instead of remaining an optimistic-only bubble",
+  );
+  assert.match(
+    unavailableBranch,
+    /appendPersistedSupervisorNotice/,
+    "the runtime error must be persisted so history never restores as an empty conversation",
+  );
+  assert.ok(
+    unavailableBranch.indexOf("appendPersistedSupervisorNotice")
+      < unavailableBranch.indexOf("appendSupervisorNotice("),
+    "a memory-only notice may only be the fallback after durable persistence fails",
+  );
+});
+
+test("legacy empty conversation records render an explicit recovery notice", () => {
+  const restoredConversationSource = applyConversationSource();
+  assert.match(
+    restoredConversationSource,
+    /restoredDisplayMessages/,
+    "conversation restore must distinguish an empty record from a rendering failure",
+  );
+  assert.match(
+    restoredConversationSource,
+    /这条历史对话没有保存成功的消息/,
+    "old failed conversations must explain why their content cannot be restored",
+  );
 });
 
 test("video results require explicit user confirmation", () => {

@@ -348,6 +348,48 @@ def test_extract_script_setting_assets_nested_under_combined_heading() -> None:
     assert [item["name"] for item in seed["props"]] == ["氧气防晒"]
 
 
+def test_extract_script_setting_assets_prefers_real_combined_settings_over_trailing_placeholders() -> None:
+    """导出稿尾部的结构对齐空章节不能覆盖前面的真实资产设定。"""
+
+    markdown = """
+## 角色/场景/道具设定
+### 角色设定
+### 安然
+- 视觉形象：年轻制片
+### Yann
+- 视觉形象：资深导师
+### 场景设定
+### 临时剪辑室
+- 时空背景：清晨
+### 提案现场
+- 时空背景：白天
+### 办公室梳妆台
+- 时空背景：午后
+### 道具与产品设定
+### 氧气防晒
+- 外观材质：白色瓶身
+
+---
+
+## 角色设定
+*(已在上方“角色/场景/道具设定”中详细定义，此处为结构对齐保留)*
+## 场景设定
+*(已在上方“角色/场景/道具设定”中详细定义，此处为结构对齐保留)*
+## 道具与产品设定
+*(已在上方“角色/场景/道具设定”中详细定义，此处为结构对齐保留)*
+"""
+
+    seed = extract_script_setting_assets(markdown)
+
+    assert [item["name"] for item in seed["characters"]] == ["安然", "Yann"]
+    assert [item["name"] for item in seed["scenes"]] == [
+        "临时剪辑室",
+        "提案现场",
+        "办公室梳妆台",
+    ]
+    assert [item["name"] for item in seed["props"]] == ["氧气防晒"]
+
+
 def test_extract_script_setting_assets_skips_character_relationship_heading() -> None:
     """Skill 常把「角色关系」写成容器标题；不能当唯一出场角色。"""
 

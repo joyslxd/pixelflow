@@ -187,6 +187,29 @@ def test_extract_episode_keeps_shot_size_camera_picture_narration_copy_cta() -> 
     assert "行动引导：无" in second
 
 
+def test_extract_episode_repairs_visual_action_accidentally_written_in_location() -> None:
+    """模型偶发把场景标题和整段画面写入「地点」时，入库前应恢复标准字段。"""
+
+    malformed = """
+## 镜头1 0:00-0:10
+景别：特写转中景
+运镜：拉镜头
+旁白（对白）：@安然（低落、焦虑）：“如果失败呢？”
+屏幕文案：最终提案倒计时：40分钟
+行动引导：无
+地点：`### 海岛临时工作室/房间`。镜头从桌上闪烁红光的`### 损毁的硬盘`慢拉，露出焦躁的`### 安然`正盯着`### 安然的手机`上的剪辑轨道。
+"""
+
+    entries = extract_script_shot_entries(malformed)
+    assert len(entries) == 1
+    text = entries[0]["shot_description"]
+    assert "地点：海岛临时工作室/房间" in text
+    assert "画面：镜头从桌上闪烁红光" in text
+    assert entries[0]["storyline"].startswith("镜头从桌上闪烁红光")
+    assert "###" not in text
+    assert "`" not in text
+
+
 EPISODE_WITH_AT_REFS = """
 ## 镜头1 0:00-0:10
 景别：近景
@@ -347,6 +370,62 @@ def test_prepare_scene_packages_follows_timeline_shot_count() -> None:
     assert len(result["global_assets"]["scenes"]) >= 1
 
 
+def test_prepare_scene_packages_maps_annotated_cast_and_locations_to_formal_settings() -> None:
+    settings = """
+## 角色/场景/道具设定
+### 角色设定
+### 安然
+- 视觉形象：年轻制片
+### Yann
+- 视觉形象：资深导师
+### 场景设定
+### 临时剪辑室
+- 时空背景：清晨
+### 提案现场
+- 时空背景：白天
+### 办公室梳妆台
+- 时空背景：午后
+### 道具与产品设定
+### 氧气防晒
+- 外观材质：白色瓶身
+
+---
+## 角色设定
+*(已在上方详细定义，此处为结构对齐保留)*
+## 场景设定
+*(已在上方详细定义，此处为结构对齐保留)*
+## 道具与产品设定
+*(已在上方详细定义，此处为结构对齐保留)*
+"""
+    shots = """
+0-5秒｜剪辑室
+画面：在@临时剪辑室，@安然 焦虑查看素材。
+旁白（对白）：@安然（焦虑低喃）：“如果失败呢？”
+5-10秒｜提案
+画面：在@提案现场，@Yann（轻声）看向@安然。
+10-15秒｜收束
+画面：回到@办公室梳妆台，@氧气防晒 与合照并列。
+旁白（对白）：@安然（画外音）：“准备好了。”
+"""
+
+    result = prepare_video_scene_packages(
+        form_values={"product_info": "氧气防晒", "video_ratio": "16:9"},
+        plan_markdown=shots,
+        target_duration_ms=15_000,
+        shot_source_markdown=shots,
+        settings_source_markdown=settings,
+    )
+
+    assets = result["global_assets"]
+    assert [item["name"] for item in assets["characters"]] == ["安然", "Yann"]
+    assert [item["name"] for item in assets["scenes"]] == [
+        "临时剪辑室",
+        "提案现场",
+        "办公室梳妆台",
+    ]
+    assert [item["name"] for item in assets["props"]] == ["氧气防晒"]
+
+
 def test_extract_dialogue_cast_from_timeline_script() -> None:
     from pixelflow.creative.asset_manifest import extract_script_setting_assets
 
@@ -441,6 +520,97 @@ CHARACTERS_SETTINGS = """
 """
 
 
+CHARACTERS_SETTINGS_WITH_BULLETED_HEADINGS = """
+## 角色/场景/道具设定
+
+### 角色设定
+- ### 安然
+  - **视觉形象**：职场新人，干练低马尾。
+- ### Yann
+  - **视觉形象**：资深项目负责人，短发微卷。
+
+### 场景设定
+- ### 酒店套房
+  - **光线氛围**：日出前的冷暖交织自然光。
+- ### 会议室
+  - **光线氛围**：明亮微冷的商务顶光。
+
+### 道具与产品设定
+- ### 氧气防晒
+  - **外观材质**：白色磨砂软管。
+"""
+
+
+def test_prepare_parses_bulleted_setting_headings() -> None:
+    result = prepare_video_scene_packages(
+        form_values={"product_info": "氧气防晒", "product_category": "美妆", "video_ratio": "16:9"},
+        plan_markdown="已确认脚本",
+        selected_direction={"title": "妆前防晒"},
+        materials=[],
+        target_duration_ms=30_000,
+        shot_source_markdown=TIMELINE_SCRIPT,
+        settings_source_markdown=CHARACTERS_SETTINGS_WITH_BULLETED_HEADINGS,
+    )
+
+    assets = result["global_assets"]
+    assert {item["name"] for item in assets["characters"]} == {"安然", "Yann"}
+    assert {item["name"] for item in assets["scenes"]} == {"酒店套房", "会议室"}
+    assert "氧气防晒" in {item["name"] for item in assets["props"]}
+
+
+def test_prepare_prefers_richer_current_script_settings_over_stale_pipeline_settings() -> None:
+    current_script = """
+## 角色设定
+### 安然
+职场新人。
+### Yann
+资深导师。
+### 联名方代表
+商务客户代表。
+
+## 场景设定
+### 酒店套房
+日出前的临时剪辑室。
+### 会议室
+提案现场。
+### 办公室梳妆台
+系列收束场景。
+
+## 道具设定
+### 氧气防晒
+核心产品。
+### 任命函
+安然成长的实体证明。
+"""
+    stale_pipeline_settings = """
+## 角色设定
+### 安然
+职场新人。
+## 场景设定
+### 酒店套房
+临时剪辑室。
+## 道具设定
+### 氧气防晒
+核心产品。
+"""
+
+    result = prepare_video_scene_packages(
+        form_values={"product_info": "氧气防晒", "product_category": "美妆", "video_ratio": "16:9"},
+        plan_markdown=current_script,
+        selected_direction={"title": "妆前防晒"},
+        materials=[],
+        target_duration_ms=20_000,
+        shot_source_markdown=EPISODE_WITH_OUTLINE_AND_SHOT_TABLE,
+        settings_source_markdown=stale_pipeline_settings,
+    )
+
+    assets = result["global_assets"]
+    assert {item["name"] for item in assets["characters"]} == {"安然", "Yann"}
+    yann = next(item for item in assets["characters"] if item["name"] == "Yann")
+    assert "资深导师" in yann["description"]
+    assert {item["name"] for item in assets["scenes"]} == {"酒店套房"}
+
+
 def test_prepare_uses_settings_source_for_global_assets() -> None:
     """角色/场景/道具来自 settings_source（characters），不靠拼接稿噪声。"""
 
@@ -511,6 +681,32 @@ EPISODE_MARKDOWN_TABLE = """
 | 0-10秒 | 中景→特写 | 推 | 在@后期剪辑室，@安然盯着手机上仅剩的九段原片，身旁的硬盘指示灯熄灭。 | 安然：“如果失败呢？” | 最终提案倒计时40分钟 | |
 | 10-20秒 | 中景 | 跟 | @安然把手机递给@yann。 | Yann：“你自己定。” | 第一次不兜底 | 无 |
 """
+
+EPISODE_WITH_OUTLINE_AND_SHOT_TABLE = """
+## 大纲
+
+* **0-10秒**：【所有退路同时消失】安然陷入焦虑。
+* **10-20秒**：【Yann第一次不兜底】Yann将决定权交还安然。
+
+## 完整镜头脚本
+
+| 时间 | 景别 | 运镜 | 画面 | 旁白/对白 | 屏幕文案 | 行动引导 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0-10秒 | 中景 | 缓慢向前微推 | 在@酒店套房中，@安然盯着仅剩九段原片的手机。 | @安然：“如果失败呢？” | 最终提案倒计时 | 无 |
+| 10-20秒 | 中景转近景 | 侧平移 | @Yann将手机放进@安然手里，随后退到镜头外。 | @Yann：“选择，你来做。” | 选择，你来做 | 无 |
+"""
+
+
+def test_extract_prefers_complete_shot_table_over_outline_time_ranges() -> None:
+    entries = extract_script_shot_entries(EPISODE_WITH_OUTLINE_AND_SHOT_TABLE)
+
+    assert len(entries) == 2
+    assert entries[0]["storyline"].startswith("在@酒店套房中")
+    assert "景别：中景" in entries[0]["shot_description"]
+    assert "运镜：缓慢向前微推" in entries[0]["shot_description"]
+    assert "旁白（对白）：@安然" in entries[0]["shot_description"]
+    assert entries[0]["asset_requirements"]["characters"]
+
 
 CHARACTERS_WITH_EDIT_ROOM = """
 ## 角色设定

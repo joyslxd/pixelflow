@@ -92,6 +92,7 @@ interface DeferredOwnershipInput {
 interface SendRuntimeOptions {
   skipRuntimeRegistration?: boolean;
   clientInputId?: string;
+  displayContent?: string;
 }
 
 interface SubmitSupervisorActionOptions {

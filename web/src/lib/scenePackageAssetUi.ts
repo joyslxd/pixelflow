@@ -1,6 +1,6 @@
 type ScenePackageLike = {
   global_assets?: unknown;
-  scene_packages?: Array<{ image_urls?: unknown }>;
+  scene_packages?: Array<Record<string, unknown> & { image_urls?: unknown }>;
 };
 
 type ScenePackageArtifact = {
@@ -31,6 +31,25 @@ function hasImageReference(value: unknown): boolean {
   const record = asRecord(value);
   if (!record) return false;
   return hasImageReference(record.url) || hasImageReference(record.image_url);
+}
+
+/** 权威场景包内容指纹；同数量镜头的文字/状态变更也必须触发 UI 投影。 */
+export function scenePackageContentSignature(
+  packages: ScenePackageLike | null | undefined,
+): string {
+  return JSON.stringify((packages?.scene_packages || []).map((scene) => ({
+    scene_id: scene.scene_id,
+    title: scene.title,
+    storyline: scene.storyline,
+    shot_description: scene.shot_description,
+    prompt: scene.prompt,
+    narration: scene.narration,
+    transition: scene.transition,
+    duration_ms: scene.duration_ms,
+    reference_asset_ids: scene.reference_asset_ids,
+    edit_status: scene.edit_status,
+    regenerated_at: scene.regenerated_at,
+  })));
 }
 
 export type ScenePackageAssetSummary = {

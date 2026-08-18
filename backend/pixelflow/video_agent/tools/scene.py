@@ -130,6 +130,38 @@ class ReplaceProjectAssetsInput(BaseModel):
     replacements: tuple[AssetReplacement, ...] = Field(min_length=1, max_length=20)
 
 
+class SceneAssetReplacementPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Literal["digital_human", "image_asset", "local_upload"]
+    display_image_url: str = Field(min_length=1, max_length=4_096)
+    generation_reference_url: str = Field(min_length=1, max_length=4_096)
+    third_asset_id: str | None = Field(default=None, max_length=256)
+    asset_type: str | None = Field(default=None, max_length=64)
+    content_asset_id: str | None = Field(default=None, max_length=256)
+    asset_name: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> SceneAssetReplacementPatch:
+        if not _is_https_url(self.display_image_url):
+            raise ValueError("display_image_url 必须是 HTTPS 图片")
+        if self.source == "digital_human":
+            third_asset_id = str(self.third_asset_id or "").strip().removeprefix("asset://")
+            if not third_asset_id or self.generation_reference_url != f"asset://{third_asset_id}":
+                raise ValueError("数字人生成引用必须与 third_asset_id 一致")
+        elif not _is_https_url(self.generation_reference_url):
+            raise ValueError("图片素材生成引用必须是 HTTPS URL")
+        return self
+
+
+class ReplaceSceneAssetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_group: Literal["characters", "scenes", "props"]
+    asset_id: str = Field(min_length=1, max_length=256)
+    replacement: SceneAssetReplacementPatch
+
+
 class GenerateScenesInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -454,6 +486,112 @@ class ReplaceProjectAssetsTool:
             },
             artifact_refs=tuple(replacements.values()),
             requires_confirmation=True,
+        )
+
+
+class ReplaceSceneAssetTool:
+    spec = VideoToolSpec(
+        name="replace_scene_asset",
+        description="替换场景包中指定的角色、场景或道具素材，并标记引用它的镜头待重新生成",
+        input_model=ReplaceSceneAssetInput,
+        cost_level=VideoToolCostLevel.NONE,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("global_assets", "scenes", "scene_packages", "dirty_scene_ids"),
+    )
+
+    async def execute(
+        self,
+        context: VideoToolContext,
+        arguments: Mapping[str, object],
+    ) -> VideoToolResult:
+        request = _validate(
+            ReplaceSceneAssetInput,
+            arguments,
+            "场景包素材替换参数无效",
+        )
+        payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
+        global_assets = payload.get("global_assets")
+        if not isinstance(global_assets, Mapping):
+            raise VideoToolValidationError("工作区尚无可替换的场景包素材")
+        group_records = _record_list(global_assets.get(request.asset_group))
+        replacement = request.replacement.model_dump(mode="json", exclude_none=True)
+        found = False
+        next_group: list[dict[str, JsonValue]] = []
+        for asset in group_records:
+            current_id = str(asset.get("asset_id") or asset.get("id") or "").strip()
+            if current_id != request.asset_id:
+                next_group.append(asset)
+                continue
+            found = True
+            image_key = "three_view_images" if request.asset_group == "characters" else "images"
+            next_group.append(
+                {
+                    **asset,
+                    image_key: [replacement["display_image_url"]],
+                    "image_url": replacement["display_image_url"],
+                    "url": replacement["display_image_url"],
+                    "generation_reference_url": replacement["generation_reference_url"],
+                    "replacement_source": replacement["source"],
+                    **(
+                        {"third_asset_id": replacement["third_asset_id"]}
+                        if replacement.get("third_asset_id")
+                        else {}
+                    ),
+                    **(
+                        {"replacement_asset_type": replacement["asset_type"]}
+                        if replacement.get("asset_type")
+                        else {}
+                    ),
+                    **(
+                        {"replacement_asset_id": replacement["content_asset_id"]}
+                        if replacement.get("content_asset_id")
+                        else {}
+                    ),
+                    **(
+                        {"replacement_asset_name": replacement["asset_name"]}
+                        if replacement.get("asset_name")
+                        else {}
+                    ),
+                }
+            )
+        if not found:
+            raise VideoToolValidationError("待替换的场景包素材不存在")
+
+        affected: list[str] = []
+        next_scenes: list[dict[str, JsonValue]] = []
+        for scene in _workspace_scenes(payload):
+            next_scene, changed = _replace_scene_package_asset_mention(
+                scene,
+                asset_id=request.asset_id,
+                replacement=replacement,
+            )
+            if changed:
+                scene_id = str(scene.get("scene_id") or "").strip()
+                if scene_id:
+                    affected.append(scene_id)
+                next_scenes.append(next_scene)
+
+        next_global_assets = dict(global_assets)
+        next_global_assets[request.asset_group] = next_group
+        dirty = _ordered_unique([*_text_list(payload.get("dirty_scene_ids")), *affected])
+        workspace_patch: dict[str, JsonValue] = {
+            "global_assets": next_global_assets,
+            "dirty_scene_ids": dirty,
+        }
+        if affected:
+            workspace_patch.update(
+                _scenes_workspace_patch(
+                    next_scenes,
+                    dirty_scene_ids=dirty,
+                    only_scene_ids=affected,
+                )
+            )
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary=f"素材已替换，影响 {len(affected)} 个镜头",
+            workspace_patch=workspace_patch,
         )
 
 
@@ -891,6 +1029,57 @@ def _first_https_asset_url(item: Mapping[str, object]) -> str | None:
             elif isinstance(entry, str) and entry.strip().lower().startswith("https://"):
                 return entry.strip()
     return None
+
+
+def _is_https_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def _replace_scene_package_asset_mention(
+    scene: Mapping[str, JsonValue],
+    *,
+    asset_id: str,
+    replacement: Mapping[str, JsonValue],
+) -> tuple[dict[str, JsonValue], bool]:
+    result = dict(scene)
+    reference_ids = _text_list(scene.get("reference_asset_ids"))
+    shot = scene.get("shot_description")
+    mentions = shot.get("mentions") if isinstance(shot, Mapping) else None
+    mention_changed = False
+    next_mentions: list[JsonValue] = []
+    if isinstance(mentions, list):
+        for mention in mentions:
+            if not isinstance(mention, Mapping):
+                next_mentions.append(mention)
+                continue
+            mention_id = str(
+                mention.get("asset_id") or mention.get("assetId") or mention.get("id") or ""
+            ).strip()
+            if mention_id != asset_id:
+                next_mentions.append(dict(mention))
+                continue
+            mention_changed = True
+            next_mention = {
+                **dict(mention),
+                "image_url": replacement["display_image_url"],
+                "generation_reference_url": replacement["generation_reference_url"],
+                "replacement_source": replacement["source"],
+            }
+            if replacement.get("third_asset_id"):
+                next_mention["third_asset_id"] = replacement["third_asset_id"]
+            else:
+                next_mention.pop("third_asset_id", None)
+            next_mentions.append(next_mention)
+    changed = asset_id in reference_ids or mention_changed
+    if not changed:
+        return result, False
+    if isinstance(shot, Mapping) and isinstance(mentions, list):
+        result["shot_description"] = {**dict(shot), "mentions": next_mentions}
+    result["edit_status"] = "待重新生成"
+    return result, True
 
 
 def _validate(model: type[BaseModel], arguments: Mapping[str, object], message: str):

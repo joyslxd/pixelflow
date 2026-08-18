@@ -1,13 +1,13 @@
 ---
-name: seedance-prompt
-description: 当 PixelFlow 为任意已启用的 Seedance 系列模型编写、检查或修订视频分镜镜头描述时使用；覆盖秒级时间、素材引用、镜头、声音、一致性和电商 UGC 质量检查。
+name: seedance2.0-prompt
+description: 当 PixelFlow 为 Seedance 2.0模型编写、检查或修订视频分镜镜头描述时使用；覆盖秒级时间、素材引用、镜头、声音、一致性和电商 UGC 质量检查。
 ---
 
-# Seedance 系列视频分镜 Prompt Skill
+# Seedance2.0 系列视频分镜 Prompt Skill
 
 ## 适用范围与模型边界
 
-- 本 Skill 面向 content-app 实时配置中所有已启用的 Seedance 系列模型，不限定某一个版本。
+- 本 Skill 面向 content-app 实时配置中 Seedance2.0 系列模型。
 - 调用方必须传入当前 `video_model`；Skill 不改写用户已确认的模型。
 - 画幅、清晰度、声音、参考素材类型和其他模型能力以 content-app 实时配置与生成 API 为准。
 - 若某条规则与当前模型实时能力冲突，保留 PixelFlow 创作合同并由调用层提示参数不兼容，不得假设模型支持。

@@ -7,6 +7,7 @@ assert.ok(moduleUrl, "SCENE_ASSET_MODEL_SELECTION_TEST_MODULE must point to comp
 const {
   SCENE_ASSET_PREFERRED_MODELS,
   preferredSceneAssetImageSize,
+  resolveSceneAssetImageRatio,
   sceneAssetModelLabel,
 } = await import(moduleUrl);
 
@@ -21,4 +22,14 @@ test("preferred scene asset image size follows model defaults", () => {
   assert.equal(preferredSceneAssetImageSize("gpt-image-2", []), "4K");
   assert.equal(preferredSceneAssetImageSize("seeddream-5.0", ["4K", "2K"]), "2K");
   assert.equal(preferredSceneAssetImageSize("seeddream-5.0", []), "2K");
+});
+
+test("scene asset ratio inherits the confirmed video ratio", () => {
+  assert.equal(resolveSceneAssetImageRatio([
+    { scene_image_ratio: "9:16", video_ratio: "16:9" },
+    { scene_image_ratio: "9:16" },
+  ]), "16:9");
+  assert.equal(resolveSceneAssetImageRatio([
+    { aspect_ratio: "1:1" },
+  ]), "1:1");
 });

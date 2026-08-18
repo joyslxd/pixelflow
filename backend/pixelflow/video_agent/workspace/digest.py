@@ -305,10 +305,14 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "has_script": bool(script_content) or bool(pipeline_stages),
             "script_status": str(script.get("status") or "") or None,
             "script_source": str(script.get("source") or "") or None,
+            "script_version": script.get("version"),
             "script_chars": _safe_len(script_content),
             "script_pipeline_stages": pipeline_stages,
             "script_entry_path": str(payload.get("script_entry_path") or "") or None,
             "script_plan_confirmed": bool(payload.get("script_plan_confirmed")),
+            "script_plan_confirmed_version": payload.get(
+                "script_plan_confirmed_version"
+            ),
             "awaiting_production_fields": bool(payload.get("awaiting_production_fields")),
             "has_aspect_ratio": resolved_ratio is not None,
             "video_ratio": resolved_ratio,

@@ -215,6 +215,9 @@ export function createSupervisorApiTransport(
             if (typeof detail.code === "string" && detail.code.trim()) {
               detailCode = detail.code.trim();
             }
+            if (detailCode === "agent_runtime_unavailable") {
+              detailMessage = "视频 Agent 服务未就绪，请稍后重试。";
+            }
             if (
               (
                 detailCode === "video_agent_script_conflict"

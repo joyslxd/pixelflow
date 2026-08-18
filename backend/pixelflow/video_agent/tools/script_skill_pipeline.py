@@ -12,7 +12,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from deerflow.models import create_chat_model
-
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.production_fields import (
     missing_creative_production_fields_async,
@@ -145,7 +144,7 @@ STAGE_PROMPTS: dict[ScriptSkillStage, str] = {
         "格式：时长、画幅、镜头列表（时间、景别、运镜、画面、旁白/对白、屏幕文案、行动引导）。"
         "画面描述须点名上游场景与道具/产品，禁止只写角色动作。"
         "凡引用设定集中的角色/场景/道具名称，画面字段必须写成 @实体名"
-        "（如 形象参考@安然、地点@会议室、道具@氧气防晒），禁止只写裸名「安然盯着…」。"
+        "（如 @安然在@会议室拿起@氧气防晒），禁止只写裸名「安然盯着…」。"
         "必须覆盖用户故事主线与结尾 CTA。输出 Markdown。"
     ),
     "review": (
@@ -468,6 +467,8 @@ def _stage_system_prompt(stage: ScriptSkillStage) -> str:
 _RUN_SCRIPT_SKILL_STAGE_DESCRIPTION = (
     "按需执行脚本创作/优化的单个阶段（不是必须跑完八阶段）。"
     "参数 stage 取 start|plan|characters|episode|review|compliance|export；"
+    "mode=create 时生成阶段产物；mode=revise 时仅允许 stage=episode，必须传 revision_instruction，"
+    "revision_scope=ending_cta 可只创作并回填结尾行动引导，同时保留原脚本其它内容与生产规格；"
     "按 Workspace 缺口与用户意图选择：从创意起步用 start→plan；补设定用 characters；"
     "写/改正文用 episode；自检用 review；合规用 compliance；汇总终稿用 export。"
     "成稿粘贴请改用 import_script，不要用本 Tool 重导入。"
@@ -479,6 +480,9 @@ class ScriptSkillStageInput(BaseModel):
 
     stage: ScriptSkillStage
     creative_direction: str = Field(default="", max_length=100_000)
+    mode: Literal["create", "revise"] = "create"
+    revision_instruction: str = Field(default="", max_length=4_000)
+    revision_scope: Literal["general", "ending_cta"] = "general"
 
 
 def _validated(arguments: Mapping[str, object]) -> ScriptSkillStageInput:
@@ -500,6 +504,8 @@ def _pipeline(payload: Mapping[str, object]) -> dict[str, dict[str, JsonValue]]:
 
 
 def _user_story(context: VideoToolContext, request: ScriptSkillStageInput) -> str:
+    if request.mode == "revise" and request.revision_instruction.strip():
+        return request.revision_instruction.strip()
     latest = context.workspace.payload.get("latest_input")
     if isinstance(latest, str) and latest.strip():
         return latest.strip()
@@ -544,6 +550,9 @@ async def _generate_stage_markdown(
     stage: ScriptSkillStage,
     user_story: str,
     prior: Mapping[str, Mapping[str, JsonValue]],
+    mode: Literal["create", "revise"] = "create",
+    revision_instruction: str = "",
+    revision_scope: Literal["general", "ending_cta"] = "general",
     on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     from pixelflow.video_agent.thinking_stream import stream_chat_tokens
@@ -557,6 +566,25 @@ async def _generate_stage_markdown(
         f"【当前阶段】{STAGE_TITLES[stage]}\n\n"
         f"【用户输入】\n{user_story}\n"
     )
+    system_prompt = _stage_system_prompt(stage)
+    if mode == "revise":
+        current = prior.get(stage, {}).get("content", "")
+        if not isinstance(current, str) or not current.strip():
+            raise VideoToolValidationError("当前没有可局部修改的剧本正文")
+        scope_instruction = (
+            "只修改结尾行动引导及其必要的相邻屏幕文案，不改变镜头数量、时间码、剧情、角色、"
+            "对白、产品事实和其它字段。"
+            if revision_scope == "ending_cta"
+            else "只执行用户明确要求的局部修改，其余内容逐字保留。"
+        )
+        system_prompt += (
+            "\n【局部修订模式】"
+            f"{scope_instruction}必须返回修订后的完整 Markdown，不能只返回修改片段或解释。"
+        )
+        human += (
+            f"\n【修订指令】\n{revision_instruction.strip() or user_story}\n"
+            f"\n【当前完整产物】\n{current.strip()}\n"
+        )
     if prior_text:
         human += f"\n【上游产物】\n{prior_text}\n"
     human += "\n按系统提示完成本阶段，只输出 Markdown。"
@@ -567,7 +595,7 @@ async def _generate_stage_markdown(
     messages = [
         (
             "system",
-            _stage_system_prompt(stage),
+            system_prompt,
         ),
         ("human", human),
     ]
@@ -604,7 +632,15 @@ class RunScriptSkillStageTool:
         confirmation_required=False,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
-        workspace_mutations=("script_pipeline", "script", "script_versions"),
+        workspace_mutations=(
+            "script_pipeline",
+            "script",
+            "script_versions",
+            "form_values",
+            "awaiting_production_fields",
+            "script_plan_confirmed",
+            "script_plan_confirmed_version",
+        ),
     )
 
     async def execute(
@@ -614,16 +650,30 @@ class RunScriptSkillStageTool:
     ) -> VideoToolResult:
         request = _validated(arguments)
         stage = request.stage
+        if request.mode == "revise":
+            if stage != "episode":
+                raise VideoToolValidationError("局部修订模式仅支持 episode")
+            if not request.revision_instruction.strip():
+                raise VideoToolValidationError("局部修订缺少 revision_instruction")
         user_story = _user_story(context, request)
         if not user_story:
             raise VideoToolValidationError("缺少用户创作输入")
 
+        progress_title = (
+            "正在创作结尾行动引导…"
+            if request.mode == "revise" and request.revision_scope == "ending_cta"
+            else f"正在执行 {STAGE_TITLES[stage]}…"
+        )
         await context.emit_progress(
-            f"正在执行 {STAGE_TITLES[stage]}…",
+            progress_title,
             phase=f"skill_{stage}_start",
         )
         await context.emit_progress(
-            f"调用脚本 Skill 阶段 {stage}，交给大模型生成…",
+            (
+                "正在结合当前脚本生成局部修订…"
+                if request.mode == "revise"
+                else f"调用脚本 Skill 阶段 {stage}，交给大模型生成…"
+            ),
             phase=f"skill_{stage}_model",
         )
 
@@ -632,6 +682,8 @@ class RunScriptSkillStageTool:
             json.dumps(
                 {
                     "stage": stage,
+                    "mode": request.mode,
+                    "revision_scope": request.revision_scope,
                     "story": user_story,
                     "prior": {key: prior.get(key, {}).get("content") for key in STAGE_ORDER},
                 },
@@ -666,6 +718,9 @@ class RunScriptSkillStageTool:
                 stage=stage,
                 user_story=user_story,
                 prior=prior,
+                mode=request.mode,
+                revision_instruction=request.revision_instruction,
+                revision_scope=request.revision_scope,
                 on_token=make_generation_progress_on_token(
                     context.emit_progress,
                     phase=f"skill_{stage}_stream",
@@ -702,7 +757,11 @@ class RunScriptSkillStageTool:
             fingerprint,
         )
         markdown = _with_stage_heading(stage, markdown)
-        change_summary = _change_summary(stage, markdown)
+        change_summary = (
+            "已结合当前脚本补充结尾行动引导"
+            if request.mode == "revise" and request.revision_scope == "ending_cta"
+            else _change_summary(stage, markdown)
+        )
         stage_record: dict[str, JsonValue] = {
             "stage": stage,
             "title": STAGE_TITLES[stage],
@@ -712,7 +771,11 @@ class RunScriptSkillStageTool:
             "change_summary": change_summary,
         }
         next_pipeline = {**prior, stage: stage_record}
-        workspace_patch: dict[str, JsonValue] = {"script_pipeline": next_pipeline}
+        workspace_patch: dict[str, JsonValue] = {
+            "script_pipeline": next_pipeline,
+            "script_plan_confirmed": False,
+            "script_plan_confirmed_version": None,
+        }
         artifact_refs = (artifact_ref,)
 
         if stage in {"episode", "export"}:
@@ -730,18 +793,52 @@ class RunScriptSkillStageTool:
                 ),
                 default=0,
             ) + 1
-            script: dict[str, JsonValue] = {
+            existing_script = context.workspace.payload.get("script")
+            script: dict[str, JsonValue] = (
+                dict(existing_script)
+                if request.mode == "revise" and isinstance(existing_script, dict)
+                else {}
+            )
+            script.update({
                 "artifact_ref": artifact_ref,
-                "source": f"skill_{stage}",
+                "source": (
+                    f"skill_{stage}_revision"
+                    if request.mode == "revise"
+                    else f"skill_{stage}"
+                ),
                 "version": version,
-                "status": "draft" if stage == "episode" else "ready",
-                "review_required": stage == "episode",
+                "status": (
+                    str(script.get("status") or "ready")
+                    if request.mode == "revise"
+                    else ("draft" if stage == "episode" else "ready")
+                ),
+                "review_required": (
+                    bool(script.get("review_required", False))
+                    if request.mode == "revise"
+                    else stage == "episode"
+                ),
                 "content": markdown,
-                "missing_requirements": [],
                 "request_fingerprint": fingerprint,
-            }
+            })
+            if request.mode != "revise":
+                script["missing_requirements"] = []
+            elif request.revision_scope == "ending_cta":
+                script["ending_cta"] = "present"
+                script["missing_requirements"] = [
+                    str(item)
+                    for item in (script.get("missing_requirements") or [])
+                    if str(item).strip() != "结尾行动引导"
+                ]
             workspace_patch["script"] = script
             workspace_patch["script_versions"] = [*versions, script]
+            if request.mode == "revise" and request.revision_scope == "ending_cta":
+                raw_form = context.workspace.payload.get("form_values")
+                form_values = dict(raw_form) if isinstance(raw_form, dict) else {}
+                form_values["ending_cta"] = "present"
+                workspace_patch["form_values"] = form_values
+                workspace_patch["awaiting_production_fields"] = bool(
+                    script["missing_requirements"]
+                )
 
         return VideoToolResult(
             tool_name=self.spec.name,

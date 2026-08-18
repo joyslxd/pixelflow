@@ -266,6 +266,35 @@ test("非成功响应保留 HTTP 状态但不信任服务端响应正文", async
   );
 });
 
+test("原生视频 Agent 未就绪时暴露稳定错误码和安全提示", async () => {
+  const transport = createSupervisorApiTransport({
+    fetchImpl: async () => jsonResponse(
+      {
+        detail: {
+          code: "agent_runtime_unavailable",
+        },
+      },
+      { status: 409, statusText: "Conflict" },
+    ),
+    getAuthorization: () => "safe-token",
+  });
+
+  await assert.rejects(
+    transport.startTurn("conv-001", {
+      client_input_id: "client-001",
+      content: "生成一条商品视频",
+      materials: [],
+      reply_to_message_id: null,
+      artifact_refs: [],
+      expected_context_version: 0,
+    }),
+    error => error instanceof SupervisorApiError
+      && error.status === 409
+      && error.code === "agent_runtime_unavailable"
+      && error.message === "视频 Agent 服务未就绪，请稍后重试。",
+  );
+});
+
 test("脚本保存 409 结构化 detail 暴露 current_revision 供重试", async () => {
   const transport = createSupervisorApiTransport({
     fetchImpl: async () => jsonResponse(

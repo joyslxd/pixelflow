@@ -4,6 +4,8 @@ export const SCENE_ASSET_PREFERRED_MODELS = ["gpt-image-2", "seeddream-5.0"] as 
 
 export type SceneAssetPreferredModel = (typeof SCENE_ASSET_PREFERRED_MODELS)[number];
 
+const SCENE_ASSET_RATIOS = new Set(["9:16", "16:9", "1:1"]);
+
 export function sceneAssetModelLabel(model: string): string {
   if (model === "gpt-image-2") return "image-2";
   if (model === "seeddream-5.0") return "Seedream 5.0";
@@ -25,4 +27,21 @@ export function preferredSceneAssetImageSize(model: string, sizes: string[] = []
       || "2K";
   }
   return normalized[0] || "2K";
+}
+
+/** 参考图继承成片画幅；scene_image_ratio 仅兼容尚未保存视频规格的旧工作区。 */
+export function resolveSceneAssetImageRatio(
+  sources: ReadonlyArray<Record<string, unknown> | null | undefined>,
+): string {
+  for (const key of ["video_ratio", "aspect_ratio"] as const) {
+    for (const source of sources) {
+      const ratio = String(source?.[key] || "").trim();
+      if (SCENE_ASSET_RATIOS.has(ratio)) return ratio;
+    }
+  }
+  for (const source of sources) {
+    const ratio = String(source?.scene_image_ratio || "").trim();
+    if (SCENE_ASSET_RATIOS.has(ratio)) return ratio;
+  }
+  return "9:16";
 }

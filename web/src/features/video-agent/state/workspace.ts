@@ -69,6 +69,8 @@ export interface VideoAgentWorkspaceProjection {
   targetDurationMs: number | null;
   /** 脚本方案是否已确认（用于刷新后恢复资产包进度卡）。 */
   scriptPlanConfirmed: boolean;
+  /** 已确认的脚本版本；必须与 script.version 一致才算当前版本已确认。 */
+  scriptPlanConfirmedVersion?: number | null;
   /** Workspace 内场景包 Job 摘要；刷新后判断 prepare 是否仍在跑。 */
   scenePackageJob: {
     jobId: string;
@@ -115,6 +117,20 @@ function optionalText(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function optionalPositiveInteger(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 1 ? number : null;
+}
+
+/** 当前脚本是否需要给用户展示确认入口。 */
+export function workspaceNeedsScriptConfirmation(
+  workspace: VideoAgentWorkspaceProjection | null | undefined,
+): boolean {
+  if (!workspace?.script) return false;
+  return workspace.scriptPlanConfirmed !== true
+    || workspace.scriptPlanConfirmedVersion !== workspace.script.version;
 }
 
 function artifactRef(value: unknown): string | null {
@@ -413,6 +429,9 @@ export function projectVideoWorkspaceSnapshot(
     creationContract: projectCreationContract(value.payload.creation_contract),
     targetDurationMs: projectTargetDurationMs(value.payload.target_duration_ms),
     scriptPlanConfirmed: value.payload.script_plan_confirmed === true,
+    scriptPlanConfirmedVersion: optionalPositiveInteger(
+      value.payload.script_plan_confirmed_version,
+    ),
     scenePackageJob: jobId && jobStatus
       ? { jobId, status: jobStatus }
       : null,
@@ -528,6 +547,7 @@ export function cloneVideoWorkspaceProjectionState(
           ? current.targetDurationMs
           : null,
         script_plan_confirmed: current.scriptPlanConfirmed === true,
+        script_plan_confirmed_version: current.scriptPlanConfirmedVersion,
         scene_package_job: (() => {
           const job = isRecord(current.scenePackageJob) ? current.scenePackageJob : null;
           const jobId = job ? optionalText(job.jobId) : null;

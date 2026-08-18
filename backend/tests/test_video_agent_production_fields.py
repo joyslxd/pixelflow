@@ -154,6 +154,34 @@ def test_production_field_reply_uses_workspace_not_regex() -> None:
     ) is False
 
 
+def test_delegated_cta_creation_is_not_treated_as_a_production_field_value() -> None:
+    waiting_payload = {
+        "awaiting_production_fields": True,
+        "script": {
+            "content": "完整脚本",
+            "aspect_ratio": "16:9",
+            "missing_requirements": ["结尾行动引导"],
+        },
+    }
+
+    assert looks_like_production_field_reply(
+        "结尾行动引导你来补充吧",
+        workspace_payload=waiting_payload,
+    ) is False
+    assert looks_like_production_field_reply(
+        "结尾行动引导 你来补齐吧",
+        workspace_payload=waiting_payload,
+    ) is False
+    assert looks_like_production_field_reply(
+        "结尾怎么写你建议呢",
+        workspace_payload=waiting_payload,
+    ) is False
+    assert looks_like_production_field_reply(
+        "结尾不需要行动引导",
+        workspace_payload=waiting_payload,
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_analyze_production_fields_with_llm_fake_model() -> None:
     class _FieldsModel:

@@ -183,6 +183,17 @@ test("脚本就绪结论气泡提供在右侧查看脚本入口", async () => {
   assert.match(source, /onOpenScenePackageStoryboard/);
 });
 
+test("最新原生 Turn 可按 Workspace 待确认事实展示脚本确认入口", async () => {
+  const source = await import("node:fs").then((fs) =>
+    fs.readFileSync(
+      new URL("../src/features/native-video-agent/chat/AgentTurnGroup.tsx", import.meta.url),
+      "utf8",
+    )
+  );
+  assert.match(source, /showScriptConfirmationCta/);
+  assert.match(source, /查看并确认脚本/);
+});
+
 test("native Turn reducer 跨对话事件不写入", () => {
   let state = createEmptyNativeVideoAgentUiState("conv-1");
   state = reduceNativeVideoAgentEvent(state, {

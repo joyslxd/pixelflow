@@ -17,13 +17,47 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 
 from pixelflow.video_agent.contracts import VideoWorkspace
-from pixelflow.video_agent.workspace.digest import build_workspace_digest
 from pixelflow.video_agent.tool_runtime_context import get_tool_runtime_context
+from pixelflow.video_agent.workspace.digest import build_workspace_digest
 
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_CONTEXT_KEY = "video_workspace_context_reminder"
 _MAX_DIGEST_CHARS = 2_400
+_TARGET_SCENE_FIELDS = {
+    "scene_id",
+    "title",
+    "storyline",
+    "shot_description",
+    "prompt",
+    "narration",
+    "transition",
+    "duration_ms",
+    "reference_asset_ids",
+    "edit_status",
+}
+
+
+def _safe_target_scene(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    safe: dict[str, object] = {}
+    for key in _TARGET_SCENE_FIELDS:
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "shot_description" and isinstance(item, Mapping):
+            safe[key] = {
+                "text": str(item.get("text") or "")[:10_000],
+                "mentions": list(item.get("mentions") or [])[:24],
+            }
+        elif key == "reference_asset_ids" and isinstance(item, (list, tuple)):
+            safe[key] = [str(entry) for entry in item[:12]]
+        elif isinstance(item, str):
+            safe[key] = item[:10_000]
+        elif isinstance(item, (int, float, bool)) or item is None:
+            safe[key] = item
+    return safe or None
 
 
 def format_workspace_context_reminder(
@@ -58,6 +92,9 @@ def format_workspace_context_reminder(
             }
             and value is not None
         }
+        target_scene = _safe_target_scene(extra.get("target_scene"))
+        if target_scene is not None:
+            payload["target_scene"] = target_scene
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(body) > _MAX_DIGEST_CHARS:
         body = body[: _MAX_DIGEST_CHARS - 3] + "..."

@@ -188,7 +188,7 @@ test("workspace prefers live thinking over archived for current turn", async () 
   );
   assert.match(
     source,
-    /空壳[\s\S]*Timeline|0 步空壳/,
+    /orchestrationMode === "video_agent_v2"[\s\S]*stepCount === 0[\s\S]*return false/,
     "video_agent_v2 must hide empty observation plan timeline shells",
   );
   assert.match(

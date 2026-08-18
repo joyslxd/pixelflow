@@ -10,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from pixelflow.creative.contract import build_video_creation_contract
 from pixelflow.creative.script_shots import (
+    compute_scene_packages_source_digest,
     extract_script_shot_entries,
     resolve_shot_source_markdown,
-    compute_scene_packages_source_digest,
 )
 from pixelflow.video_agent.contracts import VideoToolResult
 from pixelflow.video_agent.contracts.plan import VideoAgentContract
@@ -407,6 +407,7 @@ class PrepareScenePackagesTool:
             "creation_contract",
             "target_duration_ms",
             "script_plan_confirmed",
+            "script_plan_confirmed_version",
             "scene_package_job",
             "scene_packages_source_digest",
             "quota_interrupt",
@@ -435,8 +436,17 @@ class PrepareScenePackagesTool:
         # 抽镜头单独读确认后的 episode；角色/场景/道具读 characters。
         shot_source_markdown = resolve_shot_source_markdown(payload, plan_markdown)
         settings_source_markdown = _pipeline_stage_content(payload, "characters")
+        script = payload.get("script")
+        script_version = script.get("version") if isinstance(script, Mapping) else None
+        confirmed_version = payload.get("script_plan_confirmed_version")
         if payload.get("script_plan_confirmed") is not True:
             raise VideoToolValidationError("请先确认脚本方案")
+        if (
+            not isinstance(script_version, int)
+            or script_version < 1
+            or confirmed_version != script_version
+        ):
+            raise VideoToolValidationError("当前版本脚本尚未确认，请重新确认脚本方案")
         from pixelflow.video_agent.production_fields import (
             reconcile_missing_with_workspace,
             workspace_missing_requirements,
@@ -551,6 +561,7 @@ class PrepareScenePackagesTool:
                 "creation_contract": result_contract,
                 "target_duration_ms": result_duration,
                 "script_plan_confirmed": True,
+                "script_plan_confirmed_version": script_version,
                 "scene_package_job": {
                     "job_id": job.job_id,
                     "plan_step_id": context.step_id,

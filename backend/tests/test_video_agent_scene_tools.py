@@ -10,6 +10,7 @@ from pixelflow.video_agent.tools import (
     InspectSceneTool,
     PatchSceneTool,
     ReplaceProjectAssetsTool,
+    ReplaceSceneAssetTool,
     ReviewGeneratedScenesTool,
     SceneGenerationJob,
     VideoToolContext,
@@ -193,6 +194,97 @@ async def test_patch_scene_via_registry_keeps_optional_fields_unset() -> None:
     assert "旁白（对白）" in target["shot_description"]["text"]
     assert target["reference_asset_ids"] == ["character-1"]
     assert target["shot_description"]["mentions"][0]["asset_id"] == "character-1"
+
+
+@pytest.mark.asyncio
+async def test_replace_scene_asset_updates_only_selected_character_and_affected_scene() -> None:
+    context = VideoToolContext(
+        user_id="user-1",
+        plan_id="plan-1",
+        step_id="step-replace-character",
+        workspace=VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            payload={
+                "global_assets": {
+                    "characters": [
+                        {
+                            "asset_id": "character-anran",
+                            "name": "安然",
+                            "three_view_images": ["https://cdn.example.invalid/anran.png"],
+                        },
+                        {
+                            "asset_id": "character-yann",
+                            "name": "Yann",
+                            "three_view_images": ["https://cdn.example.invalid/yann.png"],
+                        },
+                    ],
+                    "scenes": [],
+                    "props": [],
+                },
+                "scene_packages": [
+                    {
+                        "scene_id": "scene-1",
+                        "reference_asset_ids": ["character-anran"],
+                        "shot_description": {
+                            "text": "@安然 面向镜头讲解。",
+                            "mentions": [{
+                                "asset_id": "character-anran",
+                                "name": "安然",
+                                "image_url": "https://cdn.example.invalid/anran.png",
+                            }],
+                        },
+                    },
+                    {
+                        "scene_id": "scene-2",
+                        "reference_asset_ids": ["character-yann"],
+                        "shot_description": {
+                            "text": "@Yann 继续工作。",
+                            "mentions": [{
+                                "asset_id": "character-yann",
+                                "name": "Yann",
+                                "image_url": "https://cdn.example.invalid/yann.png",
+                            }],
+                        },
+                    },
+                ],
+                "dirty_scene_ids": [],
+            },
+        ),
+    )
+
+    result = await ReplaceSceneAssetTool().execute(
+        context,
+        {
+            "asset_group": "characters",
+            "asset_id": "character-anran",
+            "replacement": {
+                "source": "digital_human",
+                "display_image_url": "https://cdn.example.invalid/digital-human-cover.png",
+                "generation_reference_url": "asset://digital-human-7",
+                "third_asset_id": "digital-human-7",
+                "asset_type": "xnszr",
+                "content_asset_id": "42",
+                "asset_name": "数字人A",
+            },
+        },
+    )
+
+    characters = result.workspace_patch["global_assets"]["characters"]
+    assert characters[0]["name"] == "安然"
+    assert characters[0]["three_view_images"] == [
+        "https://cdn.example.invalid/digital-human-cover.png"
+    ]
+    assert characters[0]["generation_reference_url"] == "asset://digital-human-7"
+    assert characters[0]["third_asset_id"] == "digital-human-7"
+    assert characters[1]["three_view_images"] == ["https://cdn.example.invalid/yann.png"]
+
+    scenes = result.workspace_patch["scene_packages"]
+    assert [scene["scene_id"] for scene in scenes] == ["scene-1"]
+    mention = scenes[0]["shot_description"]["mentions"][0]
+    assert mention["image_url"] == "https://cdn.example.invalid/digital-human-cover.png"
+    assert mention["generation_reference_url"] == "asset://digital-human-7"
+    assert result.workspace_patch["dirty_scene_ids"] == ["scene-1"]
 
 
 @pytest.mark.asyncio

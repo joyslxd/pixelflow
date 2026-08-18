@@ -650,6 +650,7 @@ def _public_tool_step_title(tool_name: str) -> str:
         "generate_scene_assets": "生成场景参考图",
         "prepare_scene_packages": "生成视频分镜包",
         "patch_scene": "修改分镜",
+        "replace_scene_asset": "替换场景包素材",
         "import_script": "导入脚本",
         "apply_production_fields": "补全生产字段",
     }

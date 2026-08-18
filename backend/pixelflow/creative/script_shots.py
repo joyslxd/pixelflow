@@ -89,6 +89,10 @@ _TIME_META_LABELS = frozenset({"时间", "时长"})
 _NARRATION_CANONICAL = "旁白（对白）"
 _PICTURE_CANONICAL = "画面"
 
+_INLINE_SETTING_HEADING_PATTERN = re.compile(
+    r"`\s*#{2,4}\s*(?P<name>[^`\n]+?)\s*`"
+)
+
 # 别名 → 写入 shot_description 的规范名（简繁「对/對」均归一为「旁白（对白）」）
 _FIELD_ALIASES: dict[str, str] = {
     "旁白": _NARRATION_CANONICAL,
@@ -208,6 +212,42 @@ def _append_field_value(bucket: dict[str, list[str]], label: str, body: str) -> 
         values.append(cleaned)
 
 
+def _clean_inline_setting_headings(value: str) -> str:
+    """清理模型把设定集三级标题误复制到镜头单元格的标记。"""
+
+    return _INLINE_SETTING_HEADING_PATTERN.sub(
+        lambda match: match.group("name").strip(),
+        str(value or ""),
+    ).strip()
+
+
+def _repair_misplaced_location_picture(fields: dict[str, list[str]]) -> None:
+    """修复「地点：`### 场景`。镜头动作……」这类模型格式漂移。"""
+
+    location_values = fields.get("地点") or []
+    repaired_locations: list[str] = []
+    moved_pictures: list[str] = []
+    for value in location_values:
+        match = re.match(
+            r"^\s*`\s*#{2,4}\s*(?P<location>[^`\n]+?)\s*`\s*[.。；;]?\s*(?P<picture>.+)$",
+            value,
+        )
+        if match:
+            repaired_locations.append(match.group("location").strip())
+            moved_pictures.append(
+                _clean_inline_setting_headings(match.group("picture"))
+            )
+        else:
+            repaired_locations.append(_clean_inline_setting_headings(value))
+    if repaired_locations:
+        fields["地点"] = repaired_locations
+    for picture in moved_pictures:
+        _append_field_value(fields, _PICTURE_CANONICAL, picture)
+
+    for label, values in tuple(fields.items()):
+        fields[label] = [_clean_inline_setting_headings(value) for value in values]
+
+
 def _block_shot_fields(block: str, *, title: str = "") -> tuple[str, str, str]:
     """从镜块正文抽出 (storyline, shot_description, narration)。
 
@@ -262,6 +302,8 @@ def _block_shot_fields(block: str, *, title: str = "") -> tuple[str, str, str]:
             continue
 
         prose_parts.append(cleaned)
+
+    _repair_misplaced_location_picture(fields)
 
     description_lines: list[str] = []
     for key in _EPISODE_FIELD_ORDER:
@@ -699,28 +741,33 @@ def _parse_shot_entries_from_text(plan_markdown: str) -> list[dict[str, Any]]:
     text = str(plan_markdown or "")
     if not text.strip():
         return []
-    entries: list[dict[str, Any]] = []
-    for match in _SHOT_LINE_PATTERN.finditer(text):
-        start = _timecode_to_sec(match.group("sh"), match.group("sm"), match.group("ss"))
-        end = _timecode_to_sec(match.group("eh"), match.group("em"), match.group("es"))
-        index = int(match.group("index"))
-        block_end = match.end()
-        next_shot = _SHOT_LINE_PATTERN.search(text, block_end)
-        heading = _SHOT_HEADING_PATTERN.search(text, block_end)
-        block = text[block_end : next_shot.start() if next_shot else len(text)]
-        title = f"镜头{index}"
-        if heading and int(heading.group("index")) == index:
-            extra = heading.group("title").strip(" -—–:")
-            if extra:
-                title = extra[:80]
-        _append_shot_entry(
-            entries,
-            index=index,
-            start=start,
-            end=end,
-            title=title,
-            block=block,
-        )
+    # 导出稿常先写带时码的大纲，再写完整镜头表。表格含六字段，应作为权威镜头源。
+    entries = _parse_markdown_shot_tables(text)
+    if len(entries) < 2:
+        entries = []
+
+    if not entries:
+        for match in _SHOT_LINE_PATTERN.finditer(text):
+            start = _timecode_to_sec(match.group("sh"), match.group("sm"), match.group("ss"))
+            end = _timecode_to_sec(match.group("eh"), match.group("em"), match.group("es"))
+            index = int(match.group("index"))
+            block_end = match.end()
+            next_shot = _SHOT_LINE_PATTERN.search(text, block_end)
+            heading = _SHOT_HEADING_PATTERN.search(text, block_end)
+            block = text[block_end : next_shot.start() if next_shot else len(text)]
+            title = f"镜头{index}"
+            if heading and int(heading.group("index")) == index:
+                extra = heading.group("title").strip(" -—–:")
+                if extra:
+                    title = extra[:80]
+            _append_shot_entry(
+                entries,
+                index=index,
+                start=start,
+                end=end,
+                title=title,
+                block=block,
+            )
 
     # 无「镜头N + 时码」时，回退成稿时间线「N—M秒｜标题」。
     if not entries:

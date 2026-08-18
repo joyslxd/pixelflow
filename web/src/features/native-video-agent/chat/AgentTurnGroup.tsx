@@ -18,6 +18,8 @@ interface AgentTurnGroupProps {
   now?: number;
   /** 打开右侧脚本预览；有脚本草稿时由外层传入。 */
   onOpenScriptPreview?: () => void;
+  /** 当前 Turn 是最新回复，且 Workspace 中当前脚本版本等待确认。 */
+  showScriptConfirmationCta?: boolean;
   /** 打开分镜资产包画布；有场景包时由外层传入。 */
   onOpenScenePackageStoryboard?: () => void;
 }
@@ -33,6 +35,7 @@ export function AgentTurnGroup({
   resultCardsSlot,
   now,
   onOpenScriptPreview,
+  showScriptConfirmationCta = false,
   onOpenScenePackageStoryboard,
 }: AgentTurnGroupProps) {
   const sections = nativeTurnSectionPresence(turn);
@@ -44,7 +47,7 @@ export function AgentTurnGroup({
     && turnOffersScenePackageStoryboard(turn);
   const showScriptPreviewCta = Boolean(onOpenScriptPreview)
     && !showScenePackageCta
-    && turnOffersScriptPreview(turn);
+    && (showScriptConfirmationCta || turnOffersScriptPreview(turn));
 
   const responseBody = turn.responseText.trim()
     || (turn.responseStatus === "streaming" ? "…" : "");
@@ -123,7 +126,7 @@ export function AgentTurnGroup({
               className="mt-3 inline-flex items-center rounded-lg bg-accent/10 px-3 py-1.5 text-sm font-medium text-accent ring-1 ring-accent/20 transition hover:bg-accent/15"
               onClick={() => onOpenScriptPreview?.()}
             >
-              在右侧查看脚本
+              {showScriptConfirmationCta ? "查看并确认脚本" : "在右侧查看脚本"}
             </button>
           ) : null}
         </div>

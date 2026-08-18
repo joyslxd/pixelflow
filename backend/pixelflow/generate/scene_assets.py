@@ -225,10 +225,10 @@ def build_reference_binding_index(
         if asset_id:
             for url in urls:
                 append_unique(by_asset_id.setdefault(asset_id, []), url)
-        if asset_type in by_type:
+        elif asset_type in by_type:
             for url in urls:
                 append_unique(by_type[asset_type], url)
-        if not asset_id and asset_type not in by_type:
+        else:
             for url in urls:
                 append_unique(global_urls, url)
 
@@ -245,11 +245,9 @@ def build_reference_binding_index(
                 asset_id = item["asset_id"]
                 if name and name in name_haystack:
                     append_unique(by_asset_id.setdefault(asset_id or name, []), url)
-                    append_unique(by_type[item["asset_type"]], url)
                     matched_asset = True
                 elif asset_id and asset_id in name_haystack:
                     append_unique(by_asset_id.setdefault(asset_id, []), url)
-                    append_unique(by_type[item["asset_type"]], url)
                     matched_asset = True
         if matched_asset:
             continue
@@ -270,6 +268,7 @@ def build_reference_binding_index(
         "by_type": by_type,
         "global_urls": global_urls,
         "all_urls": all_urls,
+        "allow_all_fallback": not brief and not asset_reference_bindings,
     }
 
 
@@ -285,6 +284,7 @@ def resolve_reference_urls_for_asset(
     by_type = index.get("by_type") if isinstance(index.get("by_type"), dict) else {}
     global_urls = index.get("global_urls") if isinstance(index.get("global_urls"), list) else []
     all_urls = index.get("all_urls") if isinstance(index.get("all_urls"), list) else []
+    allow_all_fallback = index.get("allow_all_fallback") is True
     candidates: list[str] = []
     for key in (asset_id, asset_name):
         if key and key in by_asset_id:
@@ -296,7 +296,8 @@ def resolve_reference_urls_for_asset(
             if url not in candidates:
                 candidates.append(url)
     if not candidates:
-        for url in global_urls or all_urls:
+        fallback_urls = global_urls or (all_urls if allow_all_fallback else [])
+        for url in fallback_urls:
             if url not in candidates:
                 candidates.append(url)
     return candidates[: max(1, limit)]

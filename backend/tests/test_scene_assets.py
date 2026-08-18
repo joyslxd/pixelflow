@@ -115,6 +115,48 @@ def test_generate_scene_assets_uses_brief_binding_for_character_reference():
     assert any(urls == ["https://x/girl.png"] for urls in captured.values())
 
 
+def test_named_character_reference_does_not_leak_to_other_characters():
+    calls: dict[str, tuple[str, list[str]]] = {}
+
+    class FakeImageSkill:
+        async def text_to_image(self, **kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            calls[prompt] = ("text", [])
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/text.png"}], raw={})
+
+        async def reference_image(self, **kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            calls[prompt] = ("reference", list(kwargs.get("reference_images") or []))
+            return ImageGenerationResult(ok=True, images=[{"url": "https://x/reference.png"}], raw={})
+
+    result = asyncio.run(
+        generate_scene_assets(
+            image_skill=FakeImageSkill(),
+            global_assets={
+                "characters": [
+                    {"asset_id": "character-anran", "name": "安然", "three_view_prompt": "安然三视图"},
+                    {"asset_id": "character-yann", "name": "Yann", "three_view_prompt": "Yann三视图"},
+                ],
+                "scenes": [],
+                "props": [],
+            },
+            scene_packages=[{"scene_id": "scene-1", "scene_index": 1}],
+            materials=[{"url": "https://x/yann.png", "mediaType": "image"}],
+            reference_brief="Yann 参考图 1",
+            image_ratio="16:9",
+            image_size="2K",
+            model="seeddream-5.0",
+            quota_checker=lambda _value: False,
+        )
+    )
+
+    assert result["ok"] is True
+    anran_call = next(value for prompt, value in calls.items() if "安然三视图" in prompt)
+    yann_call = next(value for prompt, value in calls.items() if "Yann三视图" in prompt)
+    assert anran_call == ("text", [])
+    assert yann_call == ("reference", ["https://x/yann.png"])
+
+
 def test_global_asset_edit_ratio_and_prompt():
     assert global_asset_edit_ratio("scenes") == "9:16"
     assert global_asset_edit_ratio("props") == "1:1"

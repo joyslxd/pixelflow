@@ -12,7 +12,6 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from deerflow.config.memory_config import MemoryConfig
-
 from pixelflow.agent_runtime.persistence.repositories import MemoryAgentRuntimeRepository
 from pixelflow.video_agent.contracts import (
     AgentPlanStatus,
@@ -23,18 +22,19 @@ from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint, video_agent_p
 from pixelflow.video_agent.events.publisher import NativeAgentEventPublisher
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.native_invoke import (
-    NativeVideoAgentInvokeRequest,
     NativeVideoAgentInvoker,
-    choose_public_response_text,
-    strip_tool_markup,
+    NativeVideoAgentInvokeRequest,
     _looks_like_merge_videos_intent,
     _parse_generate_scenes_intent,
     _parse_scene_asset_model_confirm,
+    _parse_structured_scene_asset_replacement,
     _parse_structured_scene_patch,
     _public_model_failure_message,
+    _scene_patch_target_context,
+    choose_public_response_text,
+    strip_tool_markup,
 )
 from pixelflow.video_agent.runner import VideoAgentRunner, VideoAgentRunScope
-from pixelflow.video_agent.tools.scene_packages import PrepareScenePackagesInput
 from pixelflow.video_agent.tools.registry import (
     VideoToolContext,
     VideoToolCostLevel,
@@ -43,6 +43,7 @@ from pixelflow.video_agent.tools.registry import (
     VideoToolRegistry,
     VideoToolSpec,
 )
+from pixelflow.video_agent.tools.scene_packages import PrepareScenePackagesInput
 from pixelflow.video_agent.workspace.repository import MemoryVideoAgentRepository
 
 T0 = datetime(2026, 8, 12, tzinfo=UTC)
@@ -102,6 +103,71 @@ def test_parse_structured_scene_patch_from_storyboard_turn() -> None:
     assert with_fe_narration is not None
     assert with_fe_narration[1]["shot_description"] == "只改画面"
     assert "继续" in str(with_fe_narration[1]["narration"])
+
+    # 自然语言局部修改必须交给原生 Agent 理解，不能把指令本身覆盖成镜头正文。
+    assert _parse_structured_scene_patch(
+        "修改分镜 scene-2，场地还是在临时剪辑室"
+    ) is None
+
+
+def test_parse_structured_scene_asset_replacement_from_storyboard_turn() -> None:
+    parsed = _parse_structured_scene_asset_replacement(
+        "替换场景包角色「安然」\n"
+        "<<<REPLACE_SCENE_ASSET>>>\n"
+        '{"asset_group":"characters","asset_id":"character-anran","replacement":'
+        '{"source":"digital_human","display_image_url":"https://cdn.example.invalid/a.png",'
+        '"generation_reference_url":"asset://digital-7","third_asset_id":"digital-7",'
+        '"asset_type":"xnszr"}}\n'
+        "<<<END>>>"
+    )
+    assert parsed is not None
+    assert parsed["asset_id"] == "character-anran"
+    assert parsed["replacement"]["third_asset_id"] == "digital-7"
+    assert _parse_structured_scene_asset_replacement("替换一下角色") is None
+
+
+def test_scene_patch_target_context_exposes_only_requested_scene() -> None:
+    workspace = VideoWorkspace(
+        workspace_id="workspace-scenes",
+        conversation_id="conversation-scenes",
+        revision=4,
+        payload={
+            "scene_packages": [
+                {
+                    "scene_id": "scene-1",
+                    "shot_description": {"text": "会议室开场", "mentions": []},
+                },
+                {
+                    "scene_id": "scene-2",
+                    "title": "手机特写",
+                    "storyline": "安然检查素材",
+                    "shot_description": {
+                        "text": "安然攥着只剩九段轨道的手机",
+                        "mentions": [{"asset_id": "character-1"}],
+                    },
+                    "prompt": "安然攥着手机",
+                    "narration": "如果失败呢？",
+                    "duration_ms": 5_000,
+                    "reference_asset_ids": ["character-1"],
+                    "authorization": "Bearer must-not-leak",
+                },
+            ],
+        },
+        created_at=T0,
+        updated_at=T0,
+    )
+
+    context = _scene_patch_target_context(
+        "修改分镜 scene-2，场地还是在临时剪辑室",
+        workspace,
+    )
+
+    assert context is not None
+    assert context["scene_id"] == "scene-2"
+    assert context["shot_description"]["text"] == "安然攥着只剩九段轨道的手机"
+    assert context["reference_asset_ids"] == ["character-1"]
+    assert "authorization" not in context
+    assert "会议室开场" not in str(context)
 
 
 def test_parse_generate_scenes_intent_phrases() -> None:
@@ -1164,6 +1230,10 @@ async def test_native_invoker_bootstraps_generate_scene_assets_and_short_circuit
             conversation_id="conversation-assets-boot-1",
             payload={
                 "script_plan_confirmed": True,
+                "script": {
+                    "content": "完整脚本",
+                    "aspect_ratio": "16:9",
+                },
                 "scene_packages": [
                     {
                         "scene_id": "scene-1",
@@ -1208,6 +1278,8 @@ async def test_native_invoker_bootstraps_generate_scene_assets_and_short_circuit
     )
 
     assert assets.calls == 1
+    assert assets.last_arguments is not None
+    assert assets.last_arguments["image_ratio"] == "16:9"
     assert "generate_scene_assets" in result.tool_names
     assert "已启动" in result.final_text or "参考图" in result.final_text
     events = await event_repository.list_events("user-1", "conversation-assets-boot-1")

@@ -36,6 +36,7 @@ from pixelflow.agent_runtime.contracts import (
     WorkflowRecord,
     WorkflowStatus,
 )
+from pixelflow.agent_runtime.conversation_router import ConversationRouteService
 from pixelflow.agent_runtime.fakes import FakeContextPort, FakeOperationPort
 from pixelflow.agent_runtime.identity import (
     conversation_message_id,
@@ -46,7 +47,10 @@ from pixelflow.agent_runtime.identity import (
 )
 from pixelflow.agent_runtime.persistence import MemoryCompactionQueueRepository
 from pixelflow.agent_runtime.ports import ContextPort, OperationConflictError, OperationPort
-from pixelflow.agent_runtime.service import AgentRuntimeService
+from pixelflow.agent_runtime.service import (
+    AgentRuntimeService,
+    AgentRuntimeUnavailableError,
+)
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "agent_runtime" / "contracts-v1.json"
@@ -498,6 +502,52 @@ async def test_start_turn_revalidates_mutated_dto_before_registration(
             user_id=user_id,
             conversation_id=conversation_id,
             request=request,
+        )
+
+    assert await task_store.list_conversation_messages(
+        conversation_id,
+        user_id=user_id,
+    ) == []
+    assert await repository.list_turns(user_id, conversation_id) == []
+
+
+@pytest.mark.asyncio
+async def test_primary_video_turn_fails_before_registration_when_native_runtime_is_unavailable() -> None:
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("video",),
+            new_conversation_rollout_percent=100,
+        ),
+        repository=repository,
+        task_store=task_store,
+        conversation_router=ConversationRouteService(),
+        primary_execution_intents=(),
+    )
+    assignment = service.assignment_for_new_conversation({})
+    user_id = "user-native-runtime-unavailable"
+    conversation_id = "conversation-native-runtime-unavailable"
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            context=assignment.context,
+            orchestration_mode=assignment.orchestration_mode,
+            orchestration_version=assignment.orchestration_version,
+        )
+    )
+
+    with pytest.raises(AgentRuntimeUnavailableError):
+        await service.start_turn(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request={
+                "client_input_id": "33333333-3333-4333-8333-333333333333",
+                "content": "生成一条商品视频",
+                "expected_context_version": 0,
+            },
         )
 
     assert await task_store.list_conversation_messages(

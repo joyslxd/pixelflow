@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import HumanMessage
@@ -54,6 +53,34 @@ def test_format_workspace_context_reminder_is_safe_and_bounded() -> None:
     assert "workspace-1" in text
     assert "seedance-prompt" in text
     assert "leak" not in text
+
+
+def test_format_workspace_context_reminder_includes_safe_target_scene() -> None:
+    workspace = VideoWorkspace(
+        workspace_id="workspace-1",
+        conversation_id="conversation-1",
+        payload={},
+        created_at=T0,
+        updated_at=T0,
+    )
+
+    text = format_workspace_context_reminder(
+        workspace,
+        extra={
+            "turn_id": "turn-1",
+            "target_scene": {
+                "scene_id": "scene-2",
+                "title": "手机特写",
+                "shot_description": {"text": "安然攥着手机", "mentions": []},
+                "authorization": "Bearer must-not-leak",
+            },
+        },
+    )
+
+    assert '"target_scene"' in text
+    assert '"scene_id":"scene-2"' in text
+    assert "安然攥着手机" in text
+    assert "must-not-leak" not in text
 
 
 def test_workspace_middleware_appends_reminder_via_wrap_model_call() -> None:

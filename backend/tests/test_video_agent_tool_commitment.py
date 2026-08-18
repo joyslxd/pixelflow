@@ -8,8 +8,8 @@ from langchain_core.messages import AIMessage
 
 from pixelflow.video_agent.contracts import VideoWorkspace
 from pixelflow.video_agent.middleware.tool_commitment import (
-    narrated_forceable_tool,
     VideoToolCommitmentMiddleware,
+    narrated_forceable_tool,
 )
 from pixelflow.video_agent.workspace.digest import (
     build_workspace_digest,
@@ -70,6 +70,9 @@ def test_build_workspace_digest_includes_scene_video_fields() -> None:
     digest = build_workspace_digest(
         _workspace(
             {
+                "script": {"content": "# 脚本", "version": 3},
+                "script_plan_confirmed": True,
+                "script_plan_confirmed_version": 3,
                 "scenes": [
                     {
                         "scene_id": "scene-1",
@@ -83,6 +86,9 @@ def test_build_workspace_digest_includes_scene_video_fields() -> None:
     assert digest["scene_count"] == 1
     assert digest["scene_videos_ready_count"] == 1
     assert digest["scene_videos_polling_count"] == 0
+    assert digest["script_version"] == 3
+    assert digest["script_plan_confirmed"] is True
+    assert digest["script_plan_confirmed_version"] == 3
 
 
 def test_summarize_scene_asset_status_distinguishes_partial_from_ready() -> None:

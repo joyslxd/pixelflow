@@ -125,6 +125,8 @@ class ImportScriptTool:
             "script_entry_path",
             "form_values",
             "awaiting_production_fields",
+            "script_plan_confirmed",
+            "script_plan_confirmed_version",
         ),
     )
 
@@ -211,6 +213,8 @@ class ImportScriptTool:
         workspace_patch: dict[str, JsonValue] = {
             "script": script,
             "script_versions": [*versions, script],
+            "script_plan_confirmed": False,
+            "script_plan_confirmed_version": None,
         }
         form_values = context.workspace.payload.get("form_values")
         next_form = dict(form_values) if isinstance(form_values, dict) else {}
@@ -300,6 +304,8 @@ class BrainstormScriptTool:
             "script_entry_path",
             "form_values",
             "awaiting_production_fields",
+            "script_plan_confirmed",
+            "script_plan_confirmed_version",
         ),
     )
 
@@ -385,6 +391,11 @@ class BrainstormScriptTool:
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"已生成创意脚本草稿版本 {version}",
-            workspace_patch={"script": script, "script_versions": [*versions, script]},
+            workspace_patch={
+                "script": script,
+                "script_versions": [*versions, script],
+                "script_plan_confirmed": False,
+                "script_plan_confirmed_version": None,
+            },
             artifact_refs=(artifact_ref,),
         )

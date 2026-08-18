@@ -13,6 +13,7 @@ const {
   resolveSelectedSceneId,
   selectSceneEvidence,
   selectVideoAssetPackage,
+  workspaceNeedsScriptConfirmation,
 } = await import(moduleUrl);
 
 function snapshot(revision, title, videoUrl) {
@@ -51,6 +52,45 @@ function snapshot(revision, title, videoUrl) {
     },
   };
 }
+
+test("current exported script version remains actionable until explicitly confirmed", () => {
+  const waiting = projectVideoWorkspaceSnapshot({
+    workspace_id: "workspace-confirm",
+    conversation_id: "conversation-1",
+    revision: 4,
+    payload: {
+      script: {
+        artifact_ref: "artifact:script-v4",
+        content: "# 准备做足，东西可以很少",
+        version: 4,
+        status: "ready",
+      },
+      script_pipeline: {
+        export: { stage: "export", content: "# 导出终稿" },
+      },
+      script_plan_confirmed: false,
+      script_plan_confirmed_version: null,
+      scenes: [],
+      assets: [],
+      qc: {},
+    },
+  }, "conversation-1");
+
+  assert.equal(workspaceNeedsScriptConfirmation(waiting), true);
+
+  const confirmed = {
+    ...waiting,
+    scriptPlanConfirmed: true,
+    scriptPlanConfirmedVersion: 4,
+  };
+  assert.equal(workspaceNeedsScriptConfirmation(confirmed), false);
+
+  const staleConfirmation = {
+    ...confirmed,
+    scriptPlanConfirmedVersion: 3,
+  };
+  assert.equal(workspaceNeedsScriptConfirmation(staleConfirmation), true);
+});
 
 test("asset package and right evidence share one authoritative revision", () => {
   const state = applyVideoWorkspaceSnapshot(

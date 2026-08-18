@@ -50,6 +50,7 @@ import type { ChatMessage, CanvasState, Brief, BriefShot, JianyingDraftRecordMap
 import type { AgentUserMessagePayload } from "@/lib/authStorage";
 import { activePlanSnapshotForConversation } from "@/lib/activePlanSnapshot";
 import { preferredSceneAssetImageSize,
+  resolveSceneAssetImageRatio,
   SCENE_ASSET_PREFERRED_MODELS,
   sceneAssetModelLabel,
 } from "@/lib/sceneAssetModelSelection";
@@ -71,6 +72,7 @@ import {
   preferredVideoScenePackagesMessageIndex,
   reconcileStaleSceneAssetUiFlags,
   resolveVideoScenePackagesForRestore,
+  scenePackageContentSignature,
   scenePackageHasGeneratedImages,
 } from "@/lib/scenePackageAssetUi";
 import {
@@ -136,6 +138,7 @@ import {
   resolveCanvasKindFromArtifact,
 } from "@/features/native-video-agent/canvas";
 import { useVideoAgent } from "@/features/video-agent/hooks/useVideoAgent";
+import { workspaceNeedsScriptConfirmation } from "@/features/video-agent/state/workspace";
 import {
   emptyVideoAgentPlanHistory,
   loadVideoAgentPlanHistory,
@@ -658,19 +661,26 @@ export function WorkspacePage() {
     videoAgentCompletedStepKey,
   ]);
 
-  // prepare_scene_packages 完成后必须拉 Snapshot，否则对话里没有「视频场景包」卡片。
-  const nativePrepareCompletedKey = useMemo(() => {
+  // 场景包结构或单镜头修改完成后必须拉 Snapshot，Workspace 才能投影到对话卡片。
+  const nativeWorkspaceMutationCompletedKey = useMemo(() => {
     if (orchestrationMode !== "video_agent_v2") return "";
     return selectNativeAgentTurns(supervisorRuntime.nativeUiState)
       .flatMap((turn) => turn.tools)
-      .filter((tool) => tool.toolName === "prepare_scene_packages" && tool.status === "completed")
+      .filter((tool) => (
+        (
+          tool.toolName === "prepare_scene_packages"
+          || tool.toolName === "patch_scene"
+          || tool.toolName === "replace_scene_asset"
+        )
+        && tool.status === "completed"
+      ))
       .map((tool) => `${tool.toolCallId}:${tool.completedAt || tool.publicSummary}`)
       .join("|");
   }, [orchestrationMode, supervisorRuntime.nativeUiState]);
   useEffect(() => {
-    if (!nativePrepareCompletedKey || !currentConversationId) return;
+    if (!nativeWorkspaceMutationCompletedKey || !currentConversationId) return;
     void supervisorRuntime.refreshSnapshot().catch(() => {});
-  }, [currentConversationId, nativePrepareCompletedKey]);
+  }, [currentConversationId, nativeWorkspaceMutationCompletedKey]);
 
   // 仅看「最近一次」generate_scene_assets：历史失败不得把进度卡永久钉在失败态。
   const nativeAssetsToolSignal = useMemo(() => {
@@ -1135,7 +1145,7 @@ export function WorkspacePage() {
       stage = "completed";
     } else if (packages.length > 0) {
       stage = "awaiting_image_model";
-    } else if (jobActive || workspace.scriptPlanConfirmed) {
+    } else if (jobActive) {
       stage = "prepare_scene_packages";
     }
     if (!stage) return;
@@ -1160,7 +1170,6 @@ export function WorkspacePage() {
   }, [
     orchestrationMode,
     videoAgentView.workspace?.revision,
-    videoAgentView.workspace?.scriptPlanConfirmed,
     videoAgentView.workspace?.scenePackageJob?.jobId,
     videoAgentView.workspace?.scenePackageJob?.status,
     videoAgentView.workspace?.scenePackages?.length,
@@ -2669,6 +2678,31 @@ export function WorkspacePage() {
   const handleReplaceGlobalAsset = (asset: SceneGlobalAssetReference, replacement: SceneGlobalAssetReplacement) => {
     const reference = selectedStoryboardMessageId ? { ...asset, storyboard_message_id: selectedStoryboardMessageId } : asset;
     void startSceneGlobalAssetRevision(reference, "replace", replacement);
+  };
+
+  const handleReplaceVideoAgentGlobalAsset = async (
+    asset: SceneGlobalAssetReference,
+    replacement: SceneGlobalAssetReplacement,
+  ) => {
+    const command = {
+      asset_group: asset.asset_group,
+      asset_id: asset.asset_id,
+      replacement: {
+        source: replacement.source,
+        display_image_url: replacement.displayImageUrl,
+        generation_reference_url: replacement.generationReferenceUrl,
+        ...(replacement.thirdAssetId ? { third_asset_id: replacement.thirdAssetId } : {}),
+        ...(replacement.assetType ? { asset_type: replacement.assetType } : {}),
+        ...(replacement.contentAssetId ? { content_asset_id: replacement.contentAssetId } : {}),
+        ...(replacement.assetName ? { asset_name: replacement.assetName } : {}),
+      },
+    };
+    await handleSend(
+      `replace_scene_asset\n<<<REPLACE_SCENE_ASSET>>>\n${JSON.stringify(command)}\n<<<END>>>`,
+      {
+        displayContent: `将${asset.name}替换为${replacement.assetName || "所选素材"}`,
+      },
+    );
   };
 
   const handleAddGlobalAsset = (
@@ -4619,6 +4653,8 @@ export function WorkspacePage() {
       : existing?.artifact?.mergedVideo;
     const existingMergedUrl = String(existing?.artifact?.mergedVideo?.merged_video_url || "").trim();
     const nextMergedUrl = String(nextMergedVideo?.merged_video_url || "").trim();
+    const scenePackagesChanged = scenePackageContentSignature(existingPackages)
+      !== scenePackageContentSignature({ scene_packages: packages });
     if (
       existing
       && existingPackages
@@ -4629,6 +4665,7 @@ export function WorkspacePage() {
       && Boolean(existing.artifact?.sceneAssetsGenerating) === sceneAssetsGenerating
       && Boolean(existing.artifact?.sceneAssetsAwaitingModel) === sceneAssetsAwaitingModel
       && existingMergedUrl === nextMergedUrl
+      && !scenePackagesChanged
     ) {
       if (packagesStepStuckRunning && !assetsStepRunning) {
         setAssetPackageProgressSteps((current) => applyAssetPackageJobStage(
@@ -4877,11 +4914,12 @@ export function WorkspacePage() {
       return Array.isArray(list) ? list.map((item) => String(item || "")).filter(Boolean) : [];
     })();
     const imageSize = preferredSceneAssetImageSize(model, sizeOptions);
-    const imageRatio = String(
-      (videoScenePackages.creation_contract as Record<string, unknown> | undefined)?.scene_image_ratio
-      || artifact.formValues?.scene_image_ratio
-      || "9:16",
-    );
+    const imageRatio = resolveSceneAssetImageRatio([
+      videoAgentView.workspace?.creationContract,
+      videoScenePackages.creation_contract as Record<string, unknown> | undefined,
+      artifact.creationContract,
+      artifact.formValues,
+    ]);
     const previousContract = (videoScenePackages.creation_contract || artifact.creationContract || {}) as Record<string, unknown>;
     const creationContract = {
       ...previousContract,
@@ -4982,7 +5020,7 @@ export function WorkspacePage() {
             conversationId: targetConversationId,
             clientInputId: uid(),
             content: (
-              `确认生图模型 ${model}，比例 ${imageRatio}，清晰度 ${imageSize}，开始生成参考图`
+              `确认生图模型 ${model}，清晰度 ${imageSize}，按视频画幅 ${imageRatio} 开始生成参考图`
               + (brief ? `。用途：${brief}` : "")
             ),
             materials: [
@@ -6644,6 +6682,20 @@ export function WorkspacePage() {
       if (!restoredLastPhase || base.last_phase === restoredLastPhase) return base;
       return { ...base, last_phase: restoredLastPhase };
     })();
+    const restoredDisplayMessages: ChatMessage[] = reconciledMessages.length > 0
+      ? reconciledMessages
+      : [{
+          id: `empty-conversation:${detail.conversation.conversation_id}`,
+          conversationId: detail.conversation.conversation_id,
+          role: "assistant",
+          content: "这条历史对话没有保存成功的消息。它可能创建于 Agent 运行环境未就绪时，请重新发送原始需求。",
+          time: formatMessageTime(
+            detail.conversation.updated_at,
+            "zh-CN",
+            undefined,
+            detail.conversation.updated_at,
+          ),
+        }];
     applySnapshot({
       ...snapshot,
       pendingScenePackageJob: resumableScenePackageJob,
@@ -6681,7 +6733,7 @@ export function WorkspacePage() {
       imageEditConfirmedSelections,
       workflowProgress: restoredWorkflowProgress,
       workflow_progress: restoredWorkflowProgress,
-      messages: reconciledMessages,
+      messages: restoredDisplayMessages,
     }, detail.conversation.conversation_id);
     if (!pendingPlanJobMaterialized && pendingPlanJob?.context.processedKey) {
       processedArtifactIdsRef.current.add(pendingPlanJob.context.processedKey);
@@ -7363,7 +7415,8 @@ export function WorkspacePage() {
       } catch (error) {
         // 新建会话：PUT 标题与 turns/start 并发升级易 409；刷新后重试一次。
         const status = error instanceof SupervisorApiError ? error.status : 0;
-        if (status !== 409) throw error;
+        const code = error instanceof SupervisorApiError ? error.code : null;
+        if (status !== 409 || code === "agent_runtime_unavailable") throw error;
         await supervisorRuntime.refreshSnapshot().catch(() => {});
         startedRaw = await supervisorRuntime.startTurn(request);
       }
@@ -7409,6 +7462,42 @@ export function WorkspacePage() {
       return started;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return null;
+      if (
+        error instanceof SupervisorApiError
+        && error.code === "agent_runtime_unavailable"
+      ) {
+        primaryExecutionReadyRef.current = false;
+        delete thinkingTurnAnchorsRef.current[pendingTurn.clientInputId];
+        setOptimisticAgentThinking((current) => (
+          current?.turnId === pendingTurn.clientInputId ? null : current
+        ));
+        await persistPendingSupervisorTurns(
+          (current) => current.filter(
+            (item) => item.clientInputId !== pendingTurn.clientInputId,
+          ),
+          targetConversationId,
+        ).catch(() => {});
+        // Runtime 拒绝 Turn 时不会替我们落用户消息。把输入与失败回执都写入
+        // Conversation，避免刷新后只剩一个无消息的历史会话标题。
+        await appendMessageForConversation({
+          id: pendingTurn.clientInputId,
+          conversationId: targetConversationId,
+          role: "user",
+          content: pendingTurn.content,
+          materials: pendingTurn.materials,
+          time: "",
+        }, targetConversationId);
+        try {
+          await appendPersistedSupervisorNotice(
+            error.message,
+            targetConversationId,
+            `agent-runtime-unavailable:${targetConversationId}:${pendingTurn.clientInputId}:v1`,
+          );
+        } catch {
+          appendSupervisorNotice(error.message, targetConversationId);
+        }
+        return null;
+      }
       appendSupervisorNotice("会话 Agent 请求失败，请稍后重试。", targetConversationId);
       return null;
     }
@@ -7645,7 +7734,7 @@ export function WorkspacePage() {
       id: runtimeOptions.clientInputId ?? uid(),
       conversationId: activeConversation || undefined,
       role: "user",
-      content: text,
+      content: runtimeOptions.displayContent?.trim() || text,
       materials,
       time: "",
     };
@@ -11025,6 +11114,10 @@ export function WorkspacePage() {
             // video_agent_v2：思考/工具/回答由 AgentTurnGroup 独占，并锚在触发该 Turn 的用户消息后。
             if (orchestrationMode === "video_agent_v2") {
               const turns = selectNativeAgentTurns(supervisorRuntime.nativeUiState);
+              const latestTurnId = turns[turns.length - 1]?.turnId || "";
+              const scriptConfirmationRequired = workspaceNeedsScriptConfirmation(
+                videoAgentView.workspace,
+              );
               const blocks: Array<{ afterMessageId: string; content: ReactElement }> = [];
               for (const turn of turns) {
                 const historyAnchor = (supervisorRuntime.state.agentThinkingHistory || [])
@@ -11043,6 +11136,7 @@ export function WorkspacePage() {
                       key={turn.turnId}
                       turn={turn}
                       onOpenScriptPreview={nativeScriptPreviewOpener}
+                      showScriptConfirmationCta={scriptConfirmationRequired && turn.turnId === latestTurnId}
                       onOpenScenePackageStoryboard={nativeScenePackageStoryboardOpener}
                     />
                   ),
@@ -11284,6 +11378,10 @@ export function WorkspacePage() {
           // 有锚点的 Turn 已进 agentActivityBlocks；这里只兜底尚未解析到用户消息的 Turn。
           if (orchestrationMode !== "video_agent_v2") return null;
           const turns = selectNativeAgentTurns(supervisorRuntime.nativeUiState);
+          const latestTurnId = turns[turns.length - 1]?.turnId || "";
+          const scriptConfirmationRequired = workspaceNeedsScriptConfirmation(
+            videoAgentView.workspace,
+          );
           const orphans = turns.filter((turn) => {
             const historyAnchor = (supervisorRuntime.state.agentThinkingHistory || [])
               .find((item) => item.turnId === turn.turnId);
@@ -11300,6 +11398,7 @@ export function WorkspacePage() {
               key={turn.turnId}
               turn={turn}
               onOpenScriptPreview={nativeScriptPreviewOpener}
+              showScriptConfirmationCta={scriptConfirmationRequired && turn.turnId === latestTurnId}
               onOpenScenePackageStoryboard={nativeScenePackageStoryboardOpener}
             />
           ));
@@ -11484,8 +11583,12 @@ export function WorkspacePage() {
                 }}
                 onReferenceGlobalAsset={handleReferenceGlobalAsset}
                 onDeleteGlobalAsset={handleDeleteGlobalAsset}
-                onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
-                onSupervisorReplaceGlobalAsset={supervisorVideoArtifact?.onReplaceGlobalAsset}
+                onReplaceGlobalAsset={orchestrationMode === "video_agent_v2"
+                  ? (asset, replacement) => void handleReplaceVideoAgentGlobalAsset(asset, replacement)
+                  : legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
+                onSupervisorReplaceGlobalAsset={orchestrationMode === "video_agent_v2"
+                  ? undefined
+                  : supervisorVideoArtifact?.onReplaceGlobalAsset}
                 onAddGlobalAsset={legacyArtifactActionsEnabled
                   ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
                   : supervisorVideoArtifact?.onAddGlobalAsset}
@@ -11557,8 +11660,12 @@ export function WorkspacePage() {
             : undefined}
           onDeleteGlobalAsset={runtimePolicy.supervisorEnabled || legacyArtifactActionsEnabled ? handleDeleteGlobalAsset
             : undefined}
-          onReplaceGlobalAsset={legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
-          onSupervisorReplaceGlobalAsset={supervisorVideoArtifact?.onReplaceGlobalAsset}
+          onReplaceGlobalAsset={orchestrationMode === "video_agent_v2"
+            ? (asset, replacement) => void handleReplaceVideoAgentGlobalAsset(asset, replacement)
+            : legacyArtifactActionsEnabled ? handleReplaceGlobalAsset : undefined}
+          onSupervisorReplaceGlobalAsset={orchestrationMode === "video_agent_v2"
+            ? undefined
+            : supervisorVideoArtifact?.onReplaceGlobalAsset}
           onAddGlobalAsset={legacyArtifactActionsEnabled
             ? (assetGroup, replacement) => handleAddGlobalAsset(selectedStoryboardMessage, assetGroup, replacement)
             : supervisorVideoArtifact?.onAddGlobalAsset}

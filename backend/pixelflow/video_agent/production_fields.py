@@ -1,6 +1,7 @@
-"""创作确认前的生产字段探测：时长 / 画幅 / 结尾行动引导。
+"""创作确认前的生产字段探测：时长 / 画幅；结尾行动引导由对话与脚本结合上下文撰写。
 
 以用户原文（latest_input）为准；字段有无与缺项一律由 LLM 判定，禁止本地正则猜字段。
+硬前置只拦「视频画幅」：成片接口必须有比例。结尾 CTA 不是推进闸门。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 CLARIFY_MARKER = "还需要你确认"
 ALLOWED_MISSING = ("视频画幅", "结尾行动引导")
+REQUIRED_MISSING = ("视频画幅",)
 PRODUCTION_FIELDS_TIMEOUT_SEC = 20.0
 PRODUCTION_FIELDS_INPUT_MAX_CHARS = 6_000
 PRODUCTION_FIELDS_FOLLOWUP_MAX_CHARS = 800
@@ -43,6 +45,46 @@ def user_latest_input(payload: Mapping[str, object] | None) -> str:
         return ""
     latest = payload.get("latest_input")
     return latest.strip() if isinstance(latest, str) else ""
+
+
+def required_production_missing(missing: Sequence[str] | None) -> list[str]:
+    """推进视觉化生产真正要拦的缺项（目前只有画幅）。"""
+
+    return [
+        str(item).strip()
+        for item in (missing or ())
+        if str(item).strip() in REQUIRED_MISSING
+    ]
+
+
+def _turn_has_production_field_hint(content: str) -> bool:
+    """本轮是否在明确补画幅/CTA，而不是普通改稿对话。
+
+    只作补字段降级入口，避免把「把旁白改口语一点」截胡成填表。
+    """
+
+    compact = re.sub(r"\s+", "", normalize_user_text(content))
+    if not compact:
+        return False
+    if re.search(
+        r"9\s*:\s*16|16\s*:\s*9|1\s*:\s*1|竖屏|横屏|画幅",
+        compact,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r"行动引导|结尾引导|不用引导|不要cta|无需行动引导|ending_cta",
+        compact,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"第一个|第二个|第三个|第四个|第1个|第2个|第3个|第4个|"
+            r"选项[一二三四1-4AaBb]|①|②|③|④|[ＡＢabAB](?=$|[,，.。])",
+            compact,
+        )
+    )
 
 
 def workspace_missing_requirements(
@@ -215,6 +257,14 @@ def looks_like_production_field_reply(
         return False
     # 「确认脚本」等成片确认优先走 prepare bootstrap。
     if _looks_like_script_confirm_command(text):
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if re.search(
+        r"(?:你来|请你|帮我|替我).{0,10}(?:补充|补齐|补全|写|设计|建议|决定|定一个|选一个|想一个)"
+        r"|(?:你建议|由你决定|交给你)",
+        compact,
+    ):
+        # 用户授权 Agent 创作，不是提供了可直接落库的字段值。
         return False
     if workspace_payload is None:
         return len(text) <= 48

@@ -55,8 +55,8 @@ def prepare_video_scene_packages(
     """根据 plan.md 和采集数据生成前端可编辑的视频场景包。"""
     selected_direction = selected_direction or {}
     materials = materials or []
-    # 角色/场景/道具优先读 script_pipeline.characters，不用整份拼接稿或结构 LLM。
-    settings_markdown = str(settings_source_markdown or "").strip() or plan_markdown
+    # 通常优先读 script_pipeline.characters；用户编辑后，当前脚本可能已有更完整的正式设定。
+    settings_markdown = _select_settings_markdown(settings_source_markdown, plan_markdown)
     duration_ms, durations, authoritative_blueprints = _resolve_scene_schedule(
         target_duration_ms,
         scene_blueprints,
@@ -201,6 +201,29 @@ def prepare_video_scene_packages(
         "global_assets": global_assets,
         "scene_packages": scenes,
     }
+
+
+def _select_settings_markdown(settings_source: str, current_script: str) -> str:
+    """在阶段设定与当前脚本之间选择更完整的正式设定。"""
+
+    stage_text = str(settings_source or "").strip()
+    script_text = str(current_script or "").strip()
+    if not stage_text:
+        return script_text
+    if not script_text:
+        return stage_text
+
+    def score(text: str) -> tuple[int, int]:
+        if not re.search(
+            r"(?:^|\n)#{2,4}\s*.*(?:角色设定|场景设定|道具(?:与产品)?设定)",
+            text,
+        ):
+            return (0, 0)
+        manifest = extract_script_setting_assets(text)
+        counts = [len(manifest.get(collection) or []) for collection in ("characters", "scenes", "props")]
+        return (sum(count > 0 for count in counts), sum(counts))
+
+    return script_text if score(script_text) > score(stage_text) else stage_text
 
 
 async def prepare_video_scene_packages_with_llm(

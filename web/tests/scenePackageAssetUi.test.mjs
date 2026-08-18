@@ -13,9 +13,36 @@ const {
   reconcileStaleSceneAssetUiFlags,
   resolveVideoScenePackagesForRestore,
   scenePackageAssetPrimaryAction,
+  scenePackageContentSignature,
   scenePackageAssetSummary,
   scenePackageHasGeneratedImages,
 } = await import(moduleUrl);
+
+test("scene package signature changes when shot text changes at the same count", () => {
+  const before = {
+    scene_packages: [{
+      scene_id: "scene-2",
+      shot_description: { text: "安然攥着手机", mentions: [] },
+      image_urls: [],
+    }],
+  };
+  const after = {
+    scene_packages: [{
+      scene_id: "scene-2",
+      shot_description: { text: "安然在临时剪辑室攥着手机", mentions: [] },
+      image_urls: [],
+    }],
+  };
+
+  assert.notEqual(
+    scenePackageContentSignature(before),
+    scenePackageContentSignature(after),
+  );
+  assert.equal(
+    scenePackageContentSignature(before),
+    scenePackageContentSignature(structuredClone(before)),
+  );
+});
 
 const partialPackages = {
   global_assets: {

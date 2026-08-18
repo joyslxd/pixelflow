@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import pickle
 from datetime import UTC, datetime, timedelta
@@ -31,7 +30,6 @@ from pixelflow.video_agent.contracts import (
 )
 from pixelflow.video_agent.credentials import (
     TransientVideoAgentCredential,
-    VideoAgentCredentialUnavailableError,
 )
 from pixelflow.video_agent.executor import VideoAgentExecutor
 from pixelflow.video_agent.tools import (
@@ -467,6 +465,58 @@ async def test_save_video_agent_script_conflict_returns_current_revision() -> No
     assert detail["workspace_id"] == workspace.workspace_id
 
 
+@pytest.mark.asyncio
+async def test_save_video_agent_script_edit_invalidates_prior_confirmation() -> None:
+    app, _task_store, video_repository, _tool = await _make_confirmation_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": AUTHORIZATION},
+    ) as client:
+        created = await client.post(
+            "/agent/conversations",
+            json={"title": "脚本修改撤销确认"},
+        )
+        conversation_id = created.json()["conversation_id"]
+        workspace = await video_repository.create_workspace(
+            str(USER_ID),
+            VideoWorkspace(
+                workspace_id="workspace-script-invalidate-confirmation",
+                conversation_id=conversation_id,
+                payload={
+                    "script_plan_confirmed": True,
+                    "script_plan_confirmed_version": 1,
+                    "script": {
+                        "artifact_ref": "artifact:script-confirmed-v1",
+                        "source": "user_edit",
+                        "version": 1,
+                        "status": "ready",
+                        "content": "旧脚本",
+                    },
+                },
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        )
+        response = await client.put(
+            f"/agent/conversations/{conversation_id}/video-agent/script",
+            json={
+                "markdown": "新脚本",
+                "expected_revision": workspace.revision,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    stored = await video_repository.get_workspace(
+        str(USER_ID),
+        workspace.workspace_id,
+    )
+    assert stored is not None
+    assert stored.payload["script"]["version"] == 2
+    assert stored.payload.get("script_plan_confirmed") is False
+    assert stored.payload.get("script_plan_confirmed_version") is None
+
+
 class _FakePreparePort:
     def __init__(self) -> None:
         self.calls = 0
@@ -573,6 +623,9 @@ async def test_confirm_script_plan_command_starts_prepare() -> None:
     )
     assert stored is not None
     assert stored.payload.get("script_plan_confirmed") is True
+    assert stored.payload.get("script_plan_confirmed_version") == stored.payload[
+        "script"
+    ]["version"]
 
 
 @pytest.mark.asyncio

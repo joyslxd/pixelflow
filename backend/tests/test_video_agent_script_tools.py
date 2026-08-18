@@ -5,6 +5,7 @@ import pytest
 from pixelflow.video_agent.contracts import VideoWorkspace
 from pixelflow.video_agent.tools import VideoToolContext, VideoToolRegistry
 from pixelflow.video_agent.tools.script import BrainstormScriptTool, ImportScriptTool
+from pixelflow.video_agent.tools.script_skill_pipeline import RunScriptSkillStageTool
 
 MATURE_SCRIPT = """# 夏日保温杯短视频
 
@@ -55,6 +56,90 @@ def _patch_import_structure(monkeypatch: pytest.MonkeyPatch) -> None:
         "pixelflow.video_agent.tools.script_skill_pipeline.extract_imported_script_structure",
         _fake_structure,
     )
+
+
+@pytest.mark.asyncio
+async def test_episode_revision_generates_delegated_cta_without_rewriting_production_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_episode = "## 剧本正文\n\n| 时间 | 行动引导 |\n|---|---|\n| 170-180秒 | 待用户确认 |"
+    revised_episode = "## 剧本正文\n\n| 时间 | 行动引导 |\n|---|---|\n| 170-180秒 | 点击右下角，锁定氧气底气 |"
+    captured: dict[str, object] = {}
+
+    async def _fake_generate(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return revised_episode
+
+    monkeypatch.setattr(
+        "pixelflow.video_agent.tools.script_skill_pipeline._generate_stage_markdown",
+        _fake_generate,
+    )
+    context = _context(
+        {
+            "script_plan_confirmed": True,
+            "script_plan_confirmed_version": 1,
+            "awaiting_production_fields": True,
+            "latest_input": "结尾行动引导你来补充吧",
+            "form_values": {"video_ratio": "16:9"},
+            "script": {
+                "artifact_ref": "artifact:video-script-v1",
+                "source": "user_import",
+                "version": 1,
+                "status": "ready",
+                "review_required": False,
+                "content": original_episode,
+                "duration_sec": 180,
+                "aspect_ratio": "16:9",
+                "video_ratio": "16:9",
+                "missing_requirements": ["结尾行动引导"],
+            },
+            "script_versions": [
+                {
+                    "artifact_ref": "artifact:video-script-v1",
+                    "source": "user_import",
+                    "version": 1,
+                    "status": "ready",
+                    "review_required": False,
+                    "content": original_episode,
+                    "duration_sec": 180,
+                    "aspect_ratio": "16:9",
+                    "video_ratio": "16:9",
+                    "missing_requirements": ["结尾行动引导"],
+                }
+            ],
+            "script_pipeline": {
+                "episode": {
+                    "stage": "episode",
+                    "title": "生成剧本正文 /episode",
+                    "content": original_episode,
+                }
+            },
+        }
+    )
+
+    result = await RunScriptSkillStageTool().execute(
+        context,
+        {
+            "stage": "episode",
+            "mode": "revise",
+            "revision_scope": "ending_cta",
+            "revision_instruction": "结合当前脚本补充合适的结尾行动引导",
+        },
+    )
+
+    assert captured["mode"] == "revise"
+    assert captured["revision_instruction"] == "结合当前脚本补充合适的结尾行动引导"
+    assert result.workspace_patch["script_pipeline"]["episode"]["content"] == revised_episode
+    script = result.workspace_patch["script"]
+    assert script["version"] == 2
+    assert script["duration_sec"] == 180
+    assert script["aspect_ratio"] == "16:9"
+    assert script["ending_cta"] == "present"
+    assert script["missing_requirements"] == []
+    assert result.workspace_patch["form_values"]["ending_cta"] == "present"
+    assert result.workspace_patch["awaiting_production_fields"] is False
+    assert result.workspace_patch["script_plan_confirmed"] is False
+    assert result.workspace_patch["script_plan_confirmed_version"] is None
 
 
 def test_split_import_structure_markdown_separates_shots() -> None:
@@ -166,7 +251,12 @@ async def test_import_script_creates_ready_version_without_plan_review(
     )
     _patch_import_structure(monkeypatch)
     result = await ImportScriptTool().execute(
-        _context(),
+        _context(
+            {
+                "script_plan_confirmed": True,
+                "script_plan_confirmed_version": 1,
+            }
+        ),
         {"markdown": MATURE_SCRIPT},
     )
 
@@ -180,6 +270,8 @@ async def test_import_script_creates_ready_version_without_plan_review(
     assert result.requires_confirmation is False
     assert result.artifact_refs == (script["artifact_ref"],)
     assert result.workspace_patch["script_versions"] == [script]
+    assert result.workspace_patch["script_plan_confirmed"] is False
+    assert result.workspace_patch["script_plan_confirmed_version"] is None
     pipeline = result.workspace_patch["script_pipeline"]
     assert pipeline["episode"]["source"] == "user_complete_script"
     assert "角色设定" in pipeline["characters"]["content"]

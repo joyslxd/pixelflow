@@ -15,7 +15,6 @@ from pixelflow.video_agent.tools.scene_packages import (
     ScenePackageOperationJob,
 )
 
-
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 
 
@@ -37,6 +36,7 @@ class FakePackagePort:
 def _context(**payload) -> VideoToolContext:
     script_in = payload.get("script")
     default_script = {
+        "version": 1,
         "status": "ready",
         "content": "# 脚本\n镜头1",
         "aspect_ratio": "9:16",
@@ -49,6 +49,7 @@ def _context(**payload) -> VideoToolContext:
         script = dict(default_script)
     base: dict = {
         "script_plan_confirmed": True,
+        "script_plan_confirmed_version": 1,
         "script": script,
     }
     for key, value in payload.items():
@@ -116,6 +117,29 @@ async def test_prepare_scene_packages_tool_writes_workspace_assets() -> None:
     assert "女主推门进酒店" in plan_md
     assert port.prepare_calls[0]["form_values"].get("video_duration_sec") == 60
     assert isinstance(result.workspace_patch.get("creation_contract"), dict)
+
+
+@pytest.mark.asyncio
+async def test_prepare_scene_packages_rejects_stale_script_confirmation() -> None:
+    port = FakePackagePort(
+        ScenePackageOperationJob(
+            job_id="job-must-not-start",
+            status="polling",
+            result={},
+        )
+    )
+    tool = PrepareScenePackagesTool(operation_port=port)
+
+    with pytest.raises(VideoToolValidationError, match="当前版本"):
+        await tool.execute(
+            _context(
+                script={"version": 2},
+                script_plan_confirmed_version=1,
+            ),
+            {},
+        )
+
+    assert port.prepare_calls == []
 
 
 @pytest.mark.asyncio
