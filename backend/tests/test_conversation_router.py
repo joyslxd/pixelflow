@@ -87,6 +87,19 @@ async def test_colloquial_make_video_ad_uses_rule_without_llm() -> None:
 
 
 @pytest.mark.asyncio
+async def test_product_creative_video_noun_phrase_uses_rule_without_llm() -> None:
+    classifier = FakeClassifier(RuntimeError("不应调用"))
+    decision = await ConversationRouteService(llm_classifier=classifier).route(
+        content="伊菲丹 3 分钟断句创意视频 卖防晒霜的",
+    )
+
+    assert decision.intent is RouteIntent.VIDEO
+    assert decision.decision_source is RouteDecisionSource.RULE
+    assert decision.requires_clarification is False
+    assert classifier.calls == []
+
+
+@pytest.mark.asyncio
 async def test_generate_timed_ad_story_uses_video_rule_without_llm() -> None:
     classifier = FakeClassifier(RuntimeError("不应调用"))
     story = (

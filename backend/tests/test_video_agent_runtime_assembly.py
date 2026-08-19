@@ -82,6 +82,7 @@ def test_core_runtime_assembly_registers_all_tools_without_jianying() -> None:
         "polish_seedance_shot_prompts",
         "prepare_scene_packages",
         "replace_project_assets",
+        "replace_scene_asset",
         "review_generated_scenes",
         "run_script_skill_stage",
     )

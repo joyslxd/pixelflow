@@ -174,6 +174,8 @@ def test_parse_generate_scenes_intent_phrases() -> None:
     assert _parse_generate_scenes_intent("确认并生成分镜视频") == "all"
     assert _parse_generate_scenes_intent("确认并生成分镜视频（scene-2）") == "all"
     assert _parse_generate_scenes_intent("生成视频吧") == "all"
+    assert _parse_generate_scenes_intent("生成全部分镜视频") == "all"
+    assert _parse_generate_scenes_intent("请帮我生成所有的分镜视频") == "all"
     assert _parse_generate_scenes_intent("重新生成已修改的分镜视频（scene-1）") == "dirty"
     assert _parse_generate_scenes_intent("资产包是可以的") is None
     # 合并意图不得误入 generate_scenes bootstrap
@@ -399,6 +401,92 @@ class ScriptedToolModel(BaseChatModel):
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         for chunk in self._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
             yield chunk
+
+
+class RawReasoningModel(BaseChatModel):
+    """模拟供应商流式返回英文 reasoning_content。"""
+
+    @property
+    def _llm_type(self) -> str:
+        return "raw-reasoning-model"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content="已核对当前工作区"))]
+        )
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                additional_kwargs={
+                    "reasoning_content": "RAW_PRIVATE_REASONING must never reach frontend"
+                },
+            )
+        )
+        yield ChatGenerationChunk(message=AIMessageChunk(content="已核对当前工作区"))
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        for chunk in self._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_native_invoker_never_publishes_raw_model_reasoning() -> None:
+    registry = VideoToolRegistry([InspectStubTool()])
+    event_repository = MemoryAgentRuntimeRepository()
+    repository = MemoryVideoAgentRepository(event_repository=event_repository)
+    workspace = await repository.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="workspace-safe-reasoning",
+            conversation_id="conversation-safe-reasoning",
+            payload={"latest_input": "查看当前状态"},
+            created_at=T0,
+            updated_at=T0,
+        ),
+    )
+    invoker = NativeVideoAgentInvoker(
+        model=RawReasoningModel(),
+        registry=registry,
+        executor=VideoAgentExecutor(
+            repository=repository,
+            registry=registry,
+            clock=lambda: T0,
+        ),
+        video_repository=repository,
+        runtime_repository=event_repository,
+        skill_catalog=SimpleNamespace(),
+        memory_config=MemoryConfig(enabled=False),
+    )
+
+    await invoker.invoke(
+        NativeVideoAgentInvokeRequest(
+            user_id="user-1",
+            conversation_id="conversation-safe-reasoning",
+            turn_id="turn-safe-reasoning",
+            plan_id="plan-safe-reasoning",
+            content="查看当前状态",
+            workspace=workspace,
+        )
+    )
+
+    events = await event_repository.list_events(
+        "user-1", "conversation-safe-reasoning"
+    )
+    reasoning_text = " ".join(
+        str(event.payload.get("delta") or event.payload.get("summary") or "")
+        for event in events
+        if "reasoning_summary" in event.type.value
+    )
+    assert "RAW_PRIVATE_REASONING" not in reasoning_text
+    assert "正在" in reasoning_text or "已完成" in reasoning_text
 
 
 @pytest.mark.asyncio
@@ -1800,7 +1888,7 @@ class VerbalReprepareModel(BaseChatModel):
             yield chunk
 
 
-class PrepareScenePackagesStubTool:
+class FailsafePrepareScenePackagesStubTool:
     """failsafe 直执路径的 prepare stub。"""
 
     spec = VideoToolSpec(
@@ -1832,7 +1920,7 @@ class PrepareScenePackagesStubTool:
 async def test_native_invoker_reprepare_empty_turn_failsafe_prepare() -> None:
     """「重新生成视频分镜包」模型空转时，必须 failsafe 直执 prepare，不得停在已完成本轮处理。"""
 
-    prepare = PrepareScenePackagesStubTool()
+    prepare = FailsafePrepareScenePackagesStubTool()
     registry = VideoToolRegistry([InspectStubTool(), prepare])
     event_repository = MemoryAgentRuntimeRepository()
     repository = MemoryVideoAgentRepository(event_repository=event_repository)
@@ -1903,7 +1991,7 @@ async def test_native_invoker_reprepare_empty_turn_failsafe_prepare() -> None:
 async def test_native_invoker_reprepare_verbal_reply_still_failsafe_prepare() -> None:
     """模型只口头答应、未发 Tool Call 时，不得当成成功结束。"""
 
-    prepare = PrepareScenePackagesStubTool()
+    prepare = FailsafePrepareScenePackagesStubTool()
     registry = VideoToolRegistry([InspectStubTool(), prepare])
     event_repository = MemoryAgentRuntimeRepository()
     repository = MemoryVideoAgentRepository(event_repository=event_repository)

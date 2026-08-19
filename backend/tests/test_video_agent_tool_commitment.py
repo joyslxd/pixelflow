@@ -284,3 +284,23 @@ def test_tool_commitment_skips_force_when_compose_awaiting_confirmation() -> Non
 
     out = middleware._maybe_force_tool(_Resp([message]), request=request)
     assert out.result[0].tool_calls in (None, [])
+
+
+def test_tool_commitment_never_forces_compose_for_generate_all_scenes_request() -> None:
+    """用户说「生成全部分镜视频」时，模型口述合并也不得被补发为成片 Tool。"""
+
+    from langchain.agents.middleware.types import ModelRequest
+    from langchain_core.messages import HumanMessage
+
+    request = ModelRequest(
+        messages=[HumanMessage(content="生成全部分镜视频")],
+        model=None,  # type: ignore[arg-type]
+    )
+    message = AIMessage(
+        content="分镜生成后再合并成片。",
+        additional_kwargs={
+            "reasoning_content": "后续需要调用 compose_or_export_video 完成导出。"
+        },
+    )
+
+    assert narrated_forceable_tool(message, request=request) is None

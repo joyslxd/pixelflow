@@ -470,7 +470,7 @@ def _scene_video_request(
         "videoCount": 1,
         "sound": sound,
     }
-    image_urls = _https_urls(request.get("image_urls"))
+    image_urls = _image_reference_urls(request.get("image_urls"), model=model)
     video_urls = _https_urls(request.get("video_urls"))
     audio_urls = _https_urls(request.get("audio_urls"))
     if mode == "text_to_video":
@@ -699,6 +699,39 @@ def _https_urls(value: object) -> list[str]:
         if parsed.scheme != "https" or not parsed.netloc:
             raise ContentAppTaskContractError("参考素材必须使用HTTPS URL")
         urls.append(item.strip())
+    return urls
+
+
+def _image_reference_urls(value: object, *, model: str) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    asset_reference_models = {
+        "seedance-2.0",
+        "seedance-2.0-fast",
+        "seedance-2.0-mini",
+    }
+    allow_asset_uri = model.strip().lower() in asset_reference_models
+    urls: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ContentAppTaskContractError("图片参考素材格式无效")
+        normalized = item.strip()
+        parsed = urlparse(normalized)
+        if parsed.scheme == "https" and parsed.netloc:
+            urls.append(normalized)
+            continue
+        asset_id = normalized.removeprefix("asset://")
+        if (
+            allow_asset_uri
+            and normalized.startswith("asset://")
+            and asset_id
+            and not any(character.isspace() for character in asset_id)
+        ):
+            urls.append(normalized)
+            continue
+        raise ContentAppTaskContractError(
+            "图片参考素材必须使用HTTPS URL或当前模型支持的asset ID"
+        )
     return urls
 
 

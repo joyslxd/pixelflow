@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -27,9 +26,9 @@ from pixelflow.video_agent.tools.registry import (
 )
 from pixelflow.video_agent.tools.scene import SceneGenerationJob
 
-# Workspace 镜头正文使用 @asset_id；发给视频模型时再换成 @正式名称。
-# 只用 ASCII：\w 会吞掉紧随的中文（如 @character-2握住 → 整段匹配失败）。
-_AT_ASSET_ID_TOKEN = re.compile(r"@([A-Za-z][A-Za-z0-9_-]*)")
+_SEEDANCE_ASSET_REFERENCE_MODELS = frozenset(
+    {"seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"}
+)
 
 SceneProviderRequestBuilder = Callable[
     [Mapping[str, JsonValue], int],
@@ -224,12 +223,6 @@ def build_scene_provider_request(
     contract = payload.get("creation_contract")
     contract_map = contract if isinstance(contract, Mapping) else {}
     global_assets = payload.get("global_assets")
-    # 仅改 Provider 提示词：@character-1 → @安然；落库正文仍保留 @asset_id。
-    prompt = _rewrite_prompt_asset_ids_to_names(
-        prompt,
-        global_assets=global_assets,
-        scene=scene,
-    )
 
     model = _first_text(scene.get("model"), contract_map.get("video_model"))
     ratio = _first_text(scene.get("ratio"), contract_map.get("video_ratio"))
@@ -244,15 +237,23 @@ def build_scene_provider_request(
     if duration_sec is None:
         raise VideoToolExecutionError("镜头生成请求缺少有效时长（4-15 秒）")
 
-    # mentions 常缺 image_url（资产图后未回填）；按 reference_asset_ids / mentions.asset_id
-    # 从 global_assets 补齐，否则会误走 text_to_video。
-    image_urls = _collect_https_urls(
-        scene.get("image_urls"),
-        _mention_image_urls(scene.get("shot_description")),
-        _global_asset_image_urls_for_scene(
-            scene, contract_map=None, global_assets=global_assets
-        ),
+    # 绑定顺序就是 Provider image_urls 顺序。正文保留稳定 @asset_id，避免人物名称
+    # 与参考图位置脱节；Seedance 2.0 的数字人资产优先传 asset:// 引用。
+    bound_image_urls, bindings = _ordered_scene_asset_references(
+        scene,
+        global_assets=global_assets,
+        model=model,
     )
+    image_urls = _collect_image_references(
+        bound_image_urls,
+        scene.get("image_urls"),
+        _mention_image_urls(
+            scene.get("shot_description"),
+            excluded_asset_ids={asset_id for asset_id, _name in bindings},
+        ),
+        allow_asset_uri=_supports_asset_reference(model),
+    )
+    prompt = _prepend_reference_bindings(prompt, bindings)
     video_urls = _collect_https_urls(scene.get("video_urls"))
     audio_urls = _collect_https_urls(scene.get("audio_urls"))
     if len(image_urls) > 9:
@@ -349,63 +350,17 @@ def _resolve_scene_prompt(scene: Mapping[str, Any]) -> str:
     return str(scene.get("storyline") or "").strip()
 
 
-def _rewrite_prompt_asset_ids_to_names(
+def _prepend_reference_bindings(
     prompt: str,
-    *,
-    global_assets: object,
-    scene: Mapping[str, Any],
+    bindings: Sequence[tuple[str, str]],
 ) -> str:
-    """把发给视频模型的 @asset_id 换成 @正式名称，便于与参考图身份对齐。
-
-    Workspace / mentions 仍以 asset_id 为稳定主键；参考图 URL 也按 asset_id 解析。
-    仅在组装 content-app 请求时改写提示词，避免模型只看到 character-1 这类不透明 ID。
-    """
-
-    lookup = _global_asset_name_lookup(global_assets)
-    shot = scene.get("shot_description")
-    if isinstance(shot, Mapping):
-        mentions = shot.get("mentions")
-        if isinstance(mentions, list):
-            for item in mentions:
-                if not isinstance(item, Mapping):
-                    continue
-                asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
-                name = str(item.get("name") or "").strip()
-                if not asset_id or not name or "@" in name:
-                    continue
-                lookup.setdefault(asset_id, name)
-    if not lookup:
+    if not bindings:
         return prompt
-
-    def _replace(match: re.Match[str]) -> str:
-        asset_id = match.group(1)
-        name = lookup.get(asset_id)
-        if not name or name == asset_id:
-            return match.group(0)
-        return f"@{name}"
-
-    return _AT_ASSET_ID_TOKEN.sub(_replace, prompt)
-
-
-def _global_asset_name_lookup(value: object) -> dict[str, str]:
-    """从 global_assets 建立 asset_id → 正式名称映射。"""
-
-    if not isinstance(value, Mapping):
-        return {}
-    result: dict[str, str] = {}
-    for key in ("characters", "scenes", "props"):
-        items = value.get(key)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, Mapping):
-                continue
-            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
-            name = str(item.get("name") or "").strip()
-            if not asset_id or not name or "@" in name or asset_id in result:
-                continue
-            result[asset_id] = name
-    return result
+    lines = [
+        f"@图片{index} = @{asset_id}（{name}）"
+        for index, (asset_id, name) in enumerate(bindings, start=1)
+    ]
+    return "【参考素材绑定】\n" + "\n".join(lines) + "\n\n【镜头内容】\n" + prompt
 
 
 def _resolve_duration_sec(scene: Mapping[str, Any]) -> int | None:
@@ -451,7 +406,11 @@ def _infer_generation_mode(
     return "text_to_video"
 
 
-def _mention_image_urls(shot_description: object) -> list[str]:
+def _mention_image_urls(
+    shot_description: object,
+    *,
+    excluded_asset_ids: set[str] | None = None,
+) -> list[str]:
     if not isinstance(shot_description, Mapping):
         return []
     mentions = shot_description.get("mentions")
@@ -460,22 +419,25 @@ def _mention_image_urls(shot_description: object) -> list[str]:
     urls: list[str] = []
     for item in mentions:
         if isinstance(item, Mapping):
+            asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+            if excluded_asset_ids and asset_id in excluded_asset_ids:
+                continue
             url = item.get("image_url") or item.get("url")
             if isinstance(url, str):
                 urls.append(url)
     return urls
 
 
-def _global_asset_image_urls_for_scene(
+def _ordered_scene_asset_references(
     scene: Mapping[str, Any],
     *,
-    contract_map: Mapping[str, Any] | None,
     global_assets: object,
-) -> list[str]:
-    del contract_map
-    lookup = _global_asset_image_lookup(global_assets)
-    if not lookup:
-        return []
+    model: str,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """按镜头引用顺序返回素材值及与之同序的 asset_id/name 绑定。"""
+
+    asset_lookup = _global_asset_record_lookup(global_assets)
+    mention_lookup = _scene_mention_lookup(scene)
     asset_ids: list[str] = []
     raw_ids = scene.get("reference_asset_ids")
     if isinstance(raw_ids, (list, tuple)):
@@ -493,24 +455,41 @@ def _global_asset_image_urls_for_scene(
                 asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
                 if asset_id:
                     asset_ids.append(asset_id)
+
     urls: list[str] = []
-    seen: set[str] = set()
+    bindings: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
     for asset_id in asset_ids:
-        if asset_id in seen:
+        if asset_id in seen_ids:
             continue
-        seen.add(asset_id)
-        url = lookup.get(asset_id)
-        if url:
-            urls.append(url)
+        seen_ids.add(asset_id)
+        record = asset_lookup.get(asset_id)
+        mention = mention_lookup.get(asset_id)
+        url = _asset_record_reference(
+            record,
+            allow_asset_uri=_supports_asset_reference(model),
+        )
+        if url is None and mention is not None:
+            url = _asset_record_reference(
+                mention,
+                allow_asset_uri=_supports_asset_reference(model),
+            )
+        if not url or url in urls:
+            continue
+        name = _asset_display_name(record) or _asset_display_name(mention) or asset_id
+        urls.append(url)
+        bindings.append((asset_id, name))
         if len(urls) >= 9:
             break
-    return urls
+    return urls, bindings
 
 
-def _global_asset_image_lookup(value: object) -> dict[str, str]:
+def _global_asset_record_lookup(
+    value: object,
+) -> dict[str, Mapping[str, Any]]:
     if not isinstance(value, Mapping):
         return {}
-    result: dict[str, str] = {}
+    result: dict[str, Mapping[str, Any]] = {}
     for key in ("characters", "scenes", "props"):
         items = value.get(key)
         if not isinstance(items, list):
@@ -521,13 +500,47 @@ def _global_asset_image_lookup(value: object) -> dict[str, str]:
             asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
             if not asset_id or asset_id in result:
                 continue
-            url = _asset_record_image_url(item)
-            if url:
-                result[asset_id] = url
+            result[asset_id] = item
     return result
 
 
-def _asset_record_image_url(item: Mapping[str, Any]) -> str | None:
+def _scene_mention_lookup(
+    scene: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    shot = scene.get("shot_description")
+    if not isinstance(shot, Mapping):
+        return {}
+    mentions = shot.get("mentions")
+    if not isinstance(mentions, list):
+        return {}
+    result: dict[str, Mapping[str, Any]] = {}
+    for item in mentions:
+        if not isinstance(item, Mapping):
+            continue
+        asset_id = str(item.get("asset_id") or item.get("id") or "").strip()
+        if asset_id and asset_id not in result:
+            result[asset_id] = item
+    return result
+
+
+def _asset_display_name(item: Mapping[str, Any] | None) -> str:
+    if item is None:
+        return ""
+    name = str(item.get("name") or "").strip()
+    return name if "@" not in name else ""
+
+
+def _asset_record_reference(
+    item: Mapping[str, Any] | None,
+    *,
+    allow_asset_uri: bool,
+) -> str | None:
+    if item is None:
+        return None
+    if allow_asset_uri:
+        asset_uri = _safe_asset_uri(item.get("generation_reference_url"))
+        if asset_uri:
+            return asset_uri
     for key in ("image_url", "url", "generation_reference_url"):
         url = _safe_https_url(item.get(key))
         if url:
@@ -553,6 +566,10 @@ def _asset_record_image_url(item: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _supports_asset_reference(model: str) -> bool:
+    return model.strip().lower() in _SEEDANCE_ASSET_REFERENCE_MODELS
+
+
 def _collect_https_urls(*groups: object) -> list[str]:
     result: list[str] = []
     for group in groups:
@@ -570,6 +587,42 @@ def _collect_https_urls(*groups: object) -> list[str]:
             if url and url not in result:
                 result.append(url)
     return result
+
+
+def _collect_image_references(
+    *groups: object,
+    allow_asset_uri: bool,
+) -> list[str]:
+    result: list[str] = []
+    for group in groups:
+        values: Sequence[object]
+        if group is None:
+            continue
+        if isinstance(group, (str, bytes)):
+            values = [group]
+        elif isinstance(group, Sequence):
+            values = group
+        else:
+            continue
+        for item in values:
+            reference = _safe_https_url(item)
+            if reference is None and allow_asset_uri:
+                reference = _safe_asset_uri(item)
+            if reference and reference not in result:
+                result.append(reference)
+    return result
+
+
+def _safe_asset_uri(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized.startswith("asset://"):
+        return None
+    asset_id = normalized.removeprefix("asset://")
+    if not asset_id or any(character.isspace() for character in asset_id):
+        return None
+    return normalized
 
 
 def _safe_https_url(value: object) -> str | None:

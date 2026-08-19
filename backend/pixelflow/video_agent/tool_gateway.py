@@ -138,6 +138,7 @@ class VideoToolGateway:
                 "确认并生成分镜视频" in compact
                 or "重新生成已修改的分镜视频" in compact
                 or "继续生成失败的分镜视频" in compact
+                or bool(re.search(r"生成(?:全部|所有)(?:的)?分镜视频", compact))
             )
             merge_turn = any(
                 token in compact
@@ -163,6 +164,31 @@ class VideoToolGateway:
                 tool_context=tool_context,
                 runtime=runtime,
             )
+            existing_pending = tool_context.workspace.payload.get(
+                "native_pending_confirmation"
+            )
+            if isinstance(existing_pending, Mapping) and existing_pending:
+                pending_id = str(
+                    existing_pending.get("confirmation_id") or ""
+                ).strip()
+                pending_tool = str(existing_pending.get("tool_name") or "").strip()
+                pending_call = str(
+                    existing_pending.get("tool_call_id") or ""
+                ).strip()
+                current_call = str(runtime.get("tool_call_id") or "").strip()
+                if pending_id and (
+                    pending_tool != name
+                    or (pending_call and pending_call != current_call)
+                ):
+                    return self._safe_payload(
+                        tool_name=pending_tool or name,
+                        public_summary=(
+                            f"「{pending_tool or '当前计费步骤'}」的确认单已发出；"
+                            "请先在界面确认或取消，本轮不再启动其他工具。"
+                        ),
+                        requires_confirmation=True,
+                        confirmation_id=pending_id,
+                    )
             gate = self._evaluate_confirmation_gate(
                 spec=tool_spec,
                 workspace=tool_context.workspace,

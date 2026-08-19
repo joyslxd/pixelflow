@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # 流式 delta 事件节流：过密会打爆 Outbox/SSE。
 _RESPONSE_DELTA_MIN_CHARS = 8
 _REASONING_DELTA_MIN_CHARS = 12
+_SAFE_MODEL_REASONING_PROGRESS = "正在核对工作区状态和执行前置条件…"
+_SAFE_MODEL_REASONING_COMPLETED = "已完成工作区状态与执行条件检查"
 
 # 模型偶发把伪 Tool Call 写进 content；这些标记起必须从公开回答切断。
 _TOOL_MARKUP_MARKERS: tuple[str, ...] = (
@@ -2031,8 +2033,7 @@ class NativeVideoAgentInvoker:
     ) -> NativeVideoAgentInvokeResult:
         publisher = self._make_publisher(request)
         started = time.monotonic()
-        reasoning_buf = ""
-        reasoning_pending = ""
+        safe_reasoning_started = False
         # 若同 Turn 已发过 bootstrap open(chunk=0)，从此处继续，避免 event_id 冲突。
         reasoning_chunk_i = max(0, int(reasoning_chunk_start))
         response_chunk_i = 0
@@ -2068,7 +2069,7 @@ class NativeVideoAgentInvoker:
             gen_pending = ""
 
         async def _consume(stream) -> None:
-            nonlocal reasoning_buf, reasoning_pending, reasoning_chunk_i
+            nonlocal safe_reasoning_started, reasoning_chunk_i
             nonlocal public_response, gen_content, gen_pending, gen_streamed_len
             nonlocal gen_blocked, final_state
             async for event in stream:
@@ -2097,9 +2098,10 @@ class NativeVideoAgentInvoker:
                             gen_streamed_len = len(publishable)
                             await _publish_response_pending()
                     if reasoning_delta:
-                        reasoning_buf += reasoning_delta
-                        reasoning_pending += reasoning_delta
-                        if len(reasoning_pending) >= _REASONING_DELTA_MIN_CHARS:
+                        # reasoning_content 是模型私有推理，不可原样暴露给前端。
+                        # 首次收到时只发布服务端定义的安全进度。
+                        if not safe_reasoning_started:
+                            safe_reasoning_started = True
                             shared = runtime_context.get("reasoning_chunk_seq")
                             if isinstance(shared, list) and shared:
                                 shared[0] = int(shared[0]) + 1
@@ -2109,11 +2111,10 @@ class NativeVideoAgentInvoker:
                             if publisher is not None:
                                 await self._safe_publish(
                                     publisher.reasoning_summary_delta(
-                                        delta=reasoning_pending,
+                                        delta=_SAFE_MODEL_REASONING_PROGRESS,
                                         chunk_index=reasoning_chunk_i,
                                     )
                                 )
-                            reasoning_pending = ""
                     continue
                 if kind == "on_chat_model_end" and isinstance(data, dict):
                     output = data.get("output")
@@ -2166,14 +2167,6 @@ class NativeVideoAgentInvoker:
                 )
 
             await _publish_response_pending(force=True)
-            if reasoning_pending and publisher is not None:
-                reasoning_chunk_i += 1
-                await self._safe_publish(
-                    publisher.reasoning_summary_delta(
-                        delta=reasoning_pending,
-                        chunk_index=reasoning_chunk_i,
-                    )
-                )
 
             result = (
                 _summarize_invoke_result(final_state)
@@ -2199,11 +2192,11 @@ class NativeVideoAgentInvoker:
                 tool_names=result.tool_names,
                 message_count=result.message_count,
             )
-            if reasoning_buf.strip() and publisher is not None:
+            if safe_reasoning_started and publisher is not None:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 await self._safe_publish(
                     publisher.reasoning_summary_completed(
-                        summary=reasoning_buf.strip()[:2_000],
+                        summary=_SAFE_MODEL_REASONING_COMPLETED,
                         duration_ms=duration_ms,
                     )
                 )
@@ -2753,7 +2746,10 @@ def _parse_generate_scenes_intent(content: str) -> str | None:
     compact = re.sub(r"\s+", "", text)
     if compact in {"生成视频", "生成视频吧", "生成分镜视频", "生成分镜视频吧", "开始生成视频"}:
         return "all"
-    if len(text) <= 40 and re.match(r"^(请)?(帮我)?生成(分镜)?视频", text):
+    if len(text) <= 40 and re.match(
+        r"^(请)?(帮我)?生成(?:全部|所有)?(?:的)?(?:分镜)?视频",
+        text,
+    ):
         return "all"
     return None
 

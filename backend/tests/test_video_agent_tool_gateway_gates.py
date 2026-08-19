@@ -82,6 +82,33 @@ class _DestructiveTool:
         )
 
 
+class _ComposeTool:
+    spec = VideoToolSpec(
+        name="compose_or_export_video",
+        description="计费合并成片",
+        input_model=_EmptyInput,
+        cost_level=VideoToolCostLevel.BILLABLE,
+        confirmation_required=True,
+        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
+        recovery_mode=VideoToolRecoveryMode.OPERATION,
+        workspace_mutations=("outputs",),
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(
+        self,
+        context: VideoToolContext,
+        arguments: dict[str, object],
+    ) -> VideoToolResult:
+        self.calls += 1
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="已启动成片合并",
+        )
+
+
 async def _setup(
     *,
     tool: Any,
@@ -146,6 +173,112 @@ async def test_gateway_blocks_confirmation_required_tool_and_persists_pending() 
 
     emitted = await events.list_events("user-1", "conversation-1")
     assert any(item.type.value == "agent.confirmation.requested" for item in emitted)
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_overwrite_existing_pending_confirmation() -> None:
+    """第二个计费 Tool 不得覆盖本 Turn 已持久化的第一张确认单。"""
+
+    generate = _BillableTool()
+    compose = _ComposeTool()
+    now = datetime(2026, 8, 19, 13, 9, tzinfo=UTC)
+    events = MemoryAgentRuntimeRepository()
+    repo = MemoryVideoAgentRepository(event_repository=events)
+    workspace = await repo.create_workspace(
+        "user-1",
+        VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            payload={"latest_input": "请继续处理当前视频任务"},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    gateway = VideoToolGateway(
+        registry=VideoToolRegistry([generate, compose]),
+        video_repository=repo,
+        runtime_repository=events,
+    )
+    runtime = {
+        "user_id": "user-1",
+        "workspace": workspace,
+        "plan_id": "plan-1",
+        "step_id": "plan-1-native",
+        "turn_id": "turn-1",
+        "conversation_id": "conversation-1",
+        "tool_call_id": "generate-call",
+    }
+
+    first = json.loads(await gateway.invoke("generate_scenes", {}, runtime_context=runtime))
+    refreshed = await repo.get_workspace("user-1", "workspace-1")
+    assert refreshed is not None
+    second = json.loads(
+        await gateway.invoke(
+            "compose_or_export_video",
+            {},
+            runtime_context={
+                **runtime,
+                "workspace": refreshed,
+                "tool_call_id": "compose-call",
+            },
+        )
+    )
+
+    stored = await repo.get_workspace("user-1", "workspace-1")
+    assert stored is not None
+    pending = stored.payload.get("native_pending_confirmation")
+    assert isinstance(pending, dict)
+    assert pending["tool_name"] == "generate_scenes"
+    assert pending["confirmation_id"] == first["confirmation_id"]
+    assert second["confirmation_id"] == first["confirmation_id"]
+    assert generate.calls == 0
+    assert compose.calls == 0
+    confirmations = [
+        event
+        for event in await events.list_events("user-1", "conversation-1")
+        if event.type.value == "agent.confirmation.requested"
+    ]
+    assert len(confirmations) == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_compose_when_user_requested_generate_all_scenes() -> None:
+    """即使模型第一步就选错 Tool，Gateway 也不得为合并成片发确认单。"""
+
+    compose = _ComposeTool()
+    gateway, repo, events, workspace, _ = await _setup(
+        tool=compose,
+        payload={"latest_input": "生成全部分镜视频"},
+    )
+
+    result = json.loads(
+        await gateway.invoke(
+            "compose_or_export_video",
+            {},
+            runtime_context={
+                "user_id": "user-1",
+                "workspace": workspace,
+                "plan_id": "plan-1",
+                "step_id": "plan-1-native",
+                "turn_id": "turn-1",
+                "conversation_id": "conversation-1",
+                "tool_call_id": "compose-call",
+            },
+        )
+    )
+
+    assert result["requires_confirmation"] is False
+    assert "generate_scenes" in result["public_summary"]
+    assert compose.calls == 0
+    stored = await repo.get_workspace("user-1", "workspace-1")
+    assert stored is not None
+    assert stored.payload.get("native_pending_confirmation") is None
+    confirmations = [
+        event
+        for event in await events.list_events("user-1", "conversation-1")
+        if event.type.value == "agent.confirmation.requested"
+    ]
+    assert confirmations == []
 
 
 @pytest.mark.asyncio

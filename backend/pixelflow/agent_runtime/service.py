@@ -892,6 +892,25 @@ class AgentRuntimeService:
                     is OrchestrationMode.VIDEO_AGENT_V2
                 )
         response_turn = registration.turn
+        if (
+            registration.created
+            and registration.route_decision is not None
+            and registration.route_decision.requires_clarification
+        ):
+            # Router 已给出澄清问题，本轮没有后台执行器会再来收尾。
+            # 立即释放 ACCEPTED，否则后续补充会永久停在 QUEUED。
+            await self._complete_video_agent_runtime_turn(
+                user_id=owner,
+                conversation_id=conversation_id,
+                turn_id=registration.turn.turn_id,
+                chain_next=False,
+            )
+            completed_turn = await self.repository.get_turn(
+                owner,
+                registration.turn.turn_id,
+            )
+            if completed_turn is not None:
+                response_turn = completed_turn
         if video_agent_execution_ready and self._video_agent_entrypoint is not None:
             video_content = body.content
             try:

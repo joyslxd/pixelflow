@@ -73,7 +73,7 @@ _USER_MERGE_INTENT = re.compile(
 
 _USER_GENERATE_SCENES_INTENT = re.compile(
     r"确认并生成分镜视频|重新生成已修改的分镜视频|继续生成失败的分镜视频|"
-    r"^(?:请)?(?:帮我)?生成(?:分镜)?视频",
+    r"^(?:请)?(?:帮我)?生成(?:全部|所有)?(?:的)?(?:分镜)?视频",
     re.IGNORECASE | re.UNICODE,
 )
 

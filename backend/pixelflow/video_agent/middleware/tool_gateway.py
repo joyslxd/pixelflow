@@ -88,17 +88,24 @@ def strip_blocked_tool_retries(state: AgentState) -> dict | None:
     if not tool_calls:
         return None
     history = messages[:-1]
-    blocked = tools_awaiting_confirmation(history) | tools_soft_failed(history)
-    if not blocked:
+    awaiting = tools_awaiting_confirmation(history)
+    failed = tools_soft_failed(history)
+    if not awaiting and not failed:
         return None
-    kept = [
-        call
-        for call in tool_calls
-        if str(call.get("name") or "").strip() not in blocked
-    ]
+    # 确认单是 Turn 级硬边界：一旦已发出，不再允许任何后续 Tool。
+    # 否则另一个计费 Tool 可以覆盖工作区里唯一的 pending confirmation。
+    kept = (
+        []
+        if awaiting
+        else [
+            call
+            for call in tool_calls
+            if str(call.get("name") or "").strip() not in failed
+        ]
+    )
     if len(kept) == len(tool_calls):
         return None
-    if tools_soft_failed(history):
+    if failed and not awaiting:
         hint = (
             "该工具本轮已失败，请勿再次调用；"
             "请用一两句话说明失败结果，然后结束本轮。"
@@ -177,7 +184,7 @@ class VideoToolGatewayMiddleware(AgentMiddleware[AgentState]):
 
 
 class VideoConfirmationAwaitMiddleware(AgentMiddleware[AgentState]):
-    """确认等待或业务失败后，阻止同轮再调同一计费 Tool。
+    """确认等待后结束本 Turn；业务失败后阻止同轮重试同一 Tool。
 
     必须排在 ``LoopDetectionMiddleware`` 之后注册：LangGraph after_model 按
     注册顺序反向执行，这样才能先剥离 tool_calls，再让 LoopDetection 计数。

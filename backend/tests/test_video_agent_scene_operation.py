@@ -252,6 +252,7 @@ async def test_scene_operation_fills_image_urls_from_global_assets() -> None:
                             "asset_id": "character-1",
                             "name": "安然",
                             "images": ["https://cdn.example.invalid/anran.png"],
+                            "generation_reference_url": "asset://asset-anran-001",
                         }
                     ],
                     "scenes": [],
@@ -266,7 +267,13 @@ async def test_scene_operation_fills_image_urls_from_global_assets() -> None:
                         "reference_asset_ids": ["character-1"],
                         "shot_description": {
                             "text": "0-5秒: 画面：@character-1盯着手机。",
-                            "mentions": [{"asset_id": "character-1", "name": "安然"}],
+                            "mentions": [
+                                {
+                                    "asset_id": "character-1",
+                                    "name": "安然",
+                                    "image_url": "https://cdn.example.invalid/anran.png",
+                                }
+                            ],
                         },
                         "variants": [],
                     }
@@ -277,15 +284,19 @@ async def test_scene_operation_fills_image_urls_from_global_assets() -> None:
         {"scene_ids": ["scene-3"], "variant_count": 1},
     )
     request = service.start_calls[0]["request"]
-    # Provider 提示词用正式名；image_urls 仍按 asset_id 从 global_assets 绑定。
-    assert request["prompt"] == "0-5秒: 画面：@安然盯着手机。"
-    assert request["image_urls"] == ["https://cdn.example.invalid/anran.png"]
+    assert request["prompt"] == (
+        "【参考素材绑定】\n"
+        "@图片1 = @character-1（安然）\n\n"
+        "【镜头内容】\n"
+        "0-5秒: 画面：@character-1盯着手机。"
+    )
+    assert request["image_urls"] == ["asset://asset-anran-001"]
     assert request["generation_mode"] == "reference_mode_video"
 
 
 @pytest.mark.asyncio
-async def test_scene_operation_rewrites_multiple_asset_ids_to_names() -> None:
-    """多角色/道具/场景的 @asset_id 在 Provider prompt 中一并换成正式名。"""
+async def test_scene_operation_keeps_asset_ids_and_binds_image_names_in_order() -> None:
+    """提示词保留 @asset_id，并与实际参考图顺序、展示名一一绑定。"""
 
     repository = MemoryAgentRuntimeRepository()
     service = ScriptedSceneJobService()
@@ -369,9 +380,15 @@ async def test_scene_operation_rewrites_multiple_asset_ids_to_names() -> None:
     )
     request = service.start_calls[0]["request"]
     assert request["prompt"] == (
-        "0-10秒: 地点:@海岛临时剪辑房。"
-        "形象参考@安然握住道具:@录音笔，"
-        "放进形象参考@Yann手中"
+        "【参考素材绑定】\n"
+        "@图片1 = @scene-8451cb6d9d（海岛临时剪辑房）\n"
+        "@图片2 = @character-2（安然）\n"
+        "@图片3 = @prop-2（录音笔）\n"
+        "@图片4 = @character-1（Yann）\n\n"
+        "【镜头内容】\n"
+        "0-10秒: 地点:@scene-8451cb6d9d。"
+        "形象参考@character-2握住道具:@prop-2，"
+        "放进形象参考@character-1手中"
     )
     assert request["image_urls"] == [
         "https://cdn.example.invalid/room.png",

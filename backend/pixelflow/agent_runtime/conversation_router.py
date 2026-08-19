@@ -25,6 +25,7 @@ IntentClassifier = Callable[
 _VIDEO_ANALYSIS = re.compile(r"视频分析|拆解.{0,8}视频|分析.{0,8}(?:这个|该|参考)?视频", re.IGNORECASE)
 _VIDEO = re.compile(
     r"图生视频|文生视频|"
+    r"(?:创意|带货|商品|电商|产品|品牌|营销)(?:短)?视频|"
     r"(?:生成|制作|做|拍|出|创作|拍摄|创建).{0,36}"
     r"(?:视频|短片|影片|广告片|宣传片|品牌片|TVC|tvc|"
     r"(?:\d+(?:\.\d+)?\s*(?:s|秒|S|分钟|min)\s*)?广告)|"

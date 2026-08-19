@@ -115,3 +115,46 @@ def test_confirmation_await_middleware_after_model() -> None:
     out = mw.after_model(state, runtime=None)  # type: ignore[arg-type]
     assert out is not None
     assert out["messages"][0].tool_calls == []
+
+
+def test_confirmation_await_strips_all_follow_up_tools_after_first_confirmation() -> None:
+    """任一确认单已发出后，本 Turn 必须结束，不得再探查或发第二张确认单。"""
+
+    pending = ToolMessage(
+        content=json.dumps(
+            {
+                "tool_name": "generate_scenes",
+                "requires_confirmation": True,
+                "confirmation_id": "confirm-generate",
+            }
+        ),
+        tool_call_id="generate-call",
+        name="generate_scenes",
+    )
+    follow_up = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "inspect_video_workspace",
+                "args": {},
+                "id": "inspect-call",
+                "type": "tool_call",
+            },
+            {
+                "name": "compose_or_export_video",
+                "args": {"output_type": "mp4"},
+                "id": "compose-call",
+                "type": "tool_call",
+            },
+        ],
+    )
+
+    update = strip_repeat_while_awaiting_confirmation(
+        {"messages": [HumanMessage(content="生成全部分镜视频"), pending, follow_up]}
+    )
+
+    assert update is not None
+    stripped = update["messages"][0]
+    assert isinstance(stripped, AIMessage)
+    assert stripped.tool_calls == []
+    assert "确认单已发出" in str(stripped.content)

@@ -557,6 +557,51 @@ async def test_primary_video_turn_fails_before_registration_when_native_runtime_
     assert await repository.list_turns(user_id, conversation_id) == []
 
 
+@pytest.mark.asyncio
+async def test_route_clarification_completes_turn_instead_of_blocking_queue() -> None:
+    task_store = MemoryPixelFlowTaskStore()
+    repository = MemoryCompactionQueueRepository()
+    service = AgentRuntimeService(
+        config=AgentRuntimeConfig(
+            mode="primary",
+            enabled_intents=("video",),
+            new_conversation_rollout_percent=100,
+        ),
+        repository=repository,
+        task_store=task_store,
+        conversation_router=ConversationRouteService(
+            llm_classifier=lambda *_args: (_ for _ in ()).throw(RuntimeError("不可用")),
+        ),
+        primary_execution_intents=(),
+    )
+    assignment = service.assignment_for_new_conversation({})
+    user_id = "user-route-clarification"
+    conversation_id = "conversation-route-clarification"
+    await task_store.create_conversation(
+        PixelFlowConversationRecord(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            context=assignment.context,
+            orchestration_mode=assignment.orchestration_mode,
+            orchestration_version=assignment.orchestration_version,
+        )
+    )
+
+    await service.start_turn(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        request={
+            "client_input_id": "44444444-4444-4444-8444-444444444444",
+            "content": "照这个做一版",
+            "expected_context_version": 0,
+        },
+    )
+
+    turns = await repository.list_turns(user_id, conversation_id)
+    assert len(turns) == 1
+    assert turns[0].status is TurnStatus.COMPLETED
+
+
 def test_non_mutating_decision_and_nested_job_fail_closed(
     contract_fixture: dict[str, object],
 ) -> None:

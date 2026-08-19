@@ -387,6 +387,45 @@ async def test_scene_video_service_maps_text_generation_to_safe_artifact() -> No
 
 
 @pytest.mark.asyncio
+async def test_scene_video_service_preserves_seedance_asset_image_reference() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/video/reference-mode-video"
+        assert json.loads(request.content)["imageUrls"] == [
+            "asset://asset-anran-001"
+        ]
+        return httpx.Response(
+            200,
+            json={"data": {"taskId": "provider-scene-asset-1", "status": "PENDING"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        service = make_scene_video_job_service(
+            client=client,
+            base_url="https://content-app.invalid/api",
+            status_headers_provider=lambda: {
+                "Authorization": "Bearer scene-status-service"
+            },
+            status_auth_mode="service_authorization",
+        )
+        started = await ProviderJobAdapter(service).start(
+            {
+                "generation_mode": "reference_mode_video",
+                "prompt": "@character-1 出镜",
+                "model": "seedance-2.0",
+                "ratio": "9:16",
+                "size": "720p",
+                "duration_sec": 5,
+                "sound": "on",
+                "image_urls": ["asset://asset-anran-001"],
+            },
+            authorization=AUTHORIZATION,
+            idempotency_key="operation:v1:scene-asset-reference-test",
+        )
+
+    assert started.outcome is ProviderJobOutcome.POLLING
+
+
+@pytest.mark.asyncio
 async def test_quality_review_service_projects_only_workflow_fields() -> None:
     requests: list[httpx.Request] = []
 
