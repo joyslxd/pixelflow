@@ -11,18 +11,15 @@ RUN pip install --no-cache-dir "uv==0.7.20"
 COPY pyproject.toml uv.lock README.md ./
 # 用途：复制部署方预置的受校验 wheel；影响：存在官方 Runtime 本地文件时优先使用，避免受网络波动影响。
 COPY wheels/ /wheels/
-# 用途：先离线安装 Runtime 和 Linux 平台二进制依赖；影响：服务器包源不可用时仍能完成可复现构建。
-RUN uv venv && uv pip install --no-index --find-links /wheels \
+# 用途：按锁文件同步通用生产依赖；影响：严格校验通用依赖，二进制依赖在下一层离线补齐。
+RUN uv sync --locked --no-dev \
+    --no-install-project
+# 用途：在同步完成后离线覆盖 Runtime 和 Linux 二进制依赖；影响：uv 不会再将预置 wheel 作为未锁定项卸载。
+RUN uv pip install --no-index --find-links /wheels \
     "deepseek-harness-runtime-bin==0.1.1rc1" \
     "pydantic-core==2.46.4" \
     "typing-extensions==4.16.0" \
     "uvloop==0.22.1"
-# 用途：按锁文件同步其余生产依赖；影响：仍严格校验其余依赖，且不重复下载已预置的 Linux wheel。
-RUN uv sync --locked --no-dev \
-    --no-install-project \
-    --no-install-package deepseek-harness-runtime-bin \
-    --no-install-package pydantic-core \
-    --no-install-package uvloop
 
 # 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
 COPY src ./src
