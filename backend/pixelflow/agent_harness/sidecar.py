@@ -65,8 +65,12 @@ class AgentHarnessSidecarClient:
         """注入仅限内部网络的 Sidecar 地址和短期 JWT 签名材料。"""
 
         normalized = base_url.rstrip("/")
-        if not normalized.startswith("https://") and not normalized.startswith("http://127.0.0.1:"):
-            raise ValueError("Sidecar 地址必须使用 HTTPS，M0 仅允许 loopback HTTP")
+        if (
+            not normalized.startswith("https://")
+            and not normalized.startswith("http://127.0.0.1:")
+            and not normalized.startswith("http://harness-sidecar:")
+        ):
+            raise ValueError("Sidecar 地址必须使用 HTTPS，M0 仅允许 loopback 或受控 Compose HTTP")
         if len(gateway_jwt_signing_key) < 32 or not gateway_instance_id:
             raise ValueError("Gateway 服务 JWT 配置无效")
         self._base_url = normalized

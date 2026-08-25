@@ -7,8 +7,10 @@ WORKDIR /app
 # 用途：安装 uv 固定版本；影响：按 uv.lock 安装可复现的官方 Linux Runtime。
 RUN pip install --no-cache-dir "uv==0.7.20"
 
-# 用途：先复制依赖清单和包元数据说明以利用 Docker 缓存；影响：仅依赖或 README 元数据变更时才重新下载 Runtime。
+# 用途：先复制依赖清单、源码和官方 Composition；影响：同步项目包时可安装真实 Sidecar 模块。
 COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY engines ./engines
 # 用途：复制部署方预置的受校验 wheel；影响：存在官方 Runtime 本地文件时优先使用，避免受网络波动影响。
 COPY wheels/ /wheels/
 # 用途：先离线安装 Runtime 和 Linux 平台二进制依赖；影响：服务器包源不可用时仍能完成可复现构建。
@@ -21,10 +23,6 @@ RUN uv sync --locked --no-dev \
     --no-install-package deepseek-harness-runtime-bin \
     --no-install-package pydantic-core \
     --no-install-package uvloop
-
-# 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
-COPY src ./src
-COPY engines ./engines
 
 # 用途：声明 Sidecar 内部 HTTP 端口；影响：部署编排需仅向 Gateway 所在网络开放该端口。
 EXPOSE 8090
