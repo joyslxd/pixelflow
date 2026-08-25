@@ -107,11 +107,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # PixelFlow 自有引擎必须先创建本领域表，再注入同一会话工厂给 Repository。
         if persistence_engine is not None:
             from pixelflow.agent_tools.repository import ensure_sql_agent_tool_schema
+            from pixelflow.preferences.model import PixelFlowUserPreferenceRow
             from pixelflow.tasks import ensure_sql_conversation_schema
 
             await ensure_schema(persistence_engine)
             await ensure_sql_conversation_schema(persistence_engine)
             await ensure_sql_agent_tool_schema(persistence_engine)
+            # 用途：创建结构化用户偏好表；影响：Harness Context 首次读取偏好时不会因缺表中断新 Run。
+            async with persistence_engine.begin() as connection:
+                await connection.run_sync(
+                    lambda sync_connection: PixelFlowUserPreferenceRow.metadata.create_all(
+                        sync_connection,
+                        tables=[PixelFlowUserPreferenceRow.__table__],
+                    ),
+                )
 
         if pixelflow_mysql_url:
             from pixelflow.preferences.mysql import make_mysql_preference_store
