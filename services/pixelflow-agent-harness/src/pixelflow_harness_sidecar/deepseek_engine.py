@@ -60,10 +60,11 @@ class DeepSeekHarnessEngine:
 
         from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig
 
-        self._settings.agent_home.mkdir(parents=True, exist_ok=True)
-        session_root = self._settings.agent_home / "sessions"
+        # 活动 Skill 根由部署编排只读挂载；Runtime 的会话与 Run 快照必须写入独立持久卷。
+        runtime_root = self._settings.run_store_path.parent / "runtime"
+        session_root = runtime_root / "sessions"
         session_root.mkdir(parents=True, exist_ok=True)
-        run_home = self._settings.agent_home / "run-skill-snapshots" / run_id
+        run_home = runtime_root / "run-skill-snapshots" / run_id
         skill_snapshot.materialize(run_home)
         # 该文本只在本次模型请求中存在；Sidecar Repository 只保存 request_digest。
         model_input = (
