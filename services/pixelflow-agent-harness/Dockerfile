@@ -12,6 +12,8 @@ COPY wheels/ /wheels/
 RUN pip install --no-index --find-links /wheels "uv==0.7.20"
 # 用途：按锁文件同步通用生产依赖；影响：严格校验通用依赖，二进制依赖在下一层离线补齐。
 RUN uv sync --locked --no-dev \
+    --offline \
+    --find-links /wheels \
     --no-install-project \
     --no-install-package deepseek-harness-runtime-bin \
     --no-install-package pydantic-core \
