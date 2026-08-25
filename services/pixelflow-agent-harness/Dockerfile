@@ -11,8 +11,10 @@ RUN pip install --no-cache-dir "uv==0.7.20"
 COPY pyproject.toml uv.lock README.md ./
 # 用途：复制部署方预置的受校验 wheel；影响：存在官方 Runtime 本地文件时优先使用，避免受网络波动影响。
 COPY wheels/ /wheels/
-# 用途：按锁文件同步生产依赖；影响：锁文件漂移立即构建失败，避免使用宿主机二进制。
-RUN uv sync --locked --no-dev --find-links /wheels
+# 用途：先离线安装官方 Runtime；影响：锁文件中的远端直链不会阻塞已校验的本地 Linux wheel。
+RUN uv venv && uv pip install --no-index --find-links /wheels "deepseek-harness-runtime-bin==0.1.1rc1"
+# 用途：按锁文件同步其余生产依赖；影响：仍严格校验剩余依赖，且不重复下载已预置 Runtime。
+RUN uv sync --locked --no-dev --no-install-package deepseek-harness-runtime-bin
 
 # 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
 COPY src ./src
