@@ -35,6 +35,9 @@ services/**/.pytest_cache/
 # 用途：忽略 Sidecar Ruff 的本地检查缓存；影响：静态检查加速数据不提交，规则变更后会自动失效。
 services/**/.ruff_cache/
 
+# 用途：忽略服务器手动提供的 Linux Runtime wheel；影响：Docker 构建可离线使用该文件，但二进制不进入 Git。
+services/pixelflow-agent-harness/wheels/*.whl
+
 .claude/
 
 .understand-anything/

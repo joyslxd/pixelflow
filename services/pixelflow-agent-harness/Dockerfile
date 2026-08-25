@@ -9,8 +9,10 @@ RUN pip install --no-cache-dir "uv==0.7.20"
 
 # 用途：先复制依赖清单和包元数据说明以利用 Docker 缓存；影响：仅依赖或 README 元数据变更时才重新下载 Runtime。
 COPY pyproject.toml uv.lock README.md ./
+# 用途：复制部署方预置的受校验 wheel；影响：存在官方 Runtime 本地文件时优先使用，避免受网络波动影响。
+COPY wheels/ /wheels/
 # 用途：按锁文件同步生产依赖；影响：锁文件漂移立即构建失败，避免使用宿主机二进制。
-RUN uv sync --locked --no-dev
+RUN uv sync --locked --no-dev --find-links /wheels
 
 # 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
 COPY src ./src
