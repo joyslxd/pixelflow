@@ -4,13 +4,12 @@ FROM python:3.12-slim-bookworm
 # 用途：声明镜像内 Sidecar 工作目录；影响：后续复制和启动命令均在该目录执行。
 WORKDIR /app
 
-# 用途：安装 uv 固定版本；影响：按 uv.lock 安装可复现的官方 Linux Runtime。
-RUN pip install --no-cache-dir "uv==0.7.20"
-
-# 用途：先复制依赖清单和包元数据说明以复用依赖缓存；影响：源码变更不会重新下载生产依赖。
+# 用途：先复制依赖清单和预置 wheel 以复用离线依赖缓存；影响：源码变更不会重新下载生产依赖。
 COPY pyproject.toml uv.lock README.md ./
 # 用途：复制部署方预置的受校验 wheel；影响：存在官方 Runtime 本地文件时优先使用，避免受网络波动影响。
 COPY wheels/ /wheels/
+# 用途：离线安装固定 uv 构建工具；影响：服务器无法访问 Python 包源时仍可进入锁文件同步步骤。
+RUN pip install --no-index --find-links /wheels "uv==0.7.20"
 # 用途：按锁文件同步通用生产依赖；影响：严格校验通用依赖，二进制依赖在下一层离线补齐。
 RUN uv sync --locked --no-dev \
     --no-install-project
