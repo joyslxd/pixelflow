@@ -17,6 +17,7 @@ COPY wheels/ /wheels/
 RUN uv venv && uv pip install --no-index --find-links /wheels \
     "deepseek-harness-runtime-bin==0.1.1rc1" \
     "pydantic-core==2.46.4" \
+    "typing-extensions==4.16.0" \
     "uvloop==0.22.1"
 # 用途：按锁文件同步其余生产依赖；影响：仍严格校验其余依赖，且不重复下载已预置的 Linux wheel。
 RUN uv sync --locked --no-dev \
