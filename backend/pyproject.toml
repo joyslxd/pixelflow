@@ -1,27 +1,32 @@
 [project]
+# 用途：声明 Gateway Python 分发名称；影响：仅影响构建与依赖解析标识。
 name = "pixelflow"
+# 用途：标识当前内部版本；影响：升级时需要同步锁文件与部署镜像标签。
 version = "0.1.0"
-description = "AI e-commerce short-video generation Agent platform (based on DeerFlow harness)"
+# 用途：说明项目职责；影响：仅影响包元数据与开发者阅读。
+description = "基于独立 Harness Sidecar 的电商内容创作 Agent 平台"
+# 用途：指定项目说明文件；影响：构建发布时作为包元数据读取。
 readme = "README.md"
+# 用途：限定受支持的 Python 版本；影响：低版本解释器会拒绝安装。
 requires-python = ">=3.12"
+# 用途：声明 Gateway 运行依赖；影响：镜像与本地同步会安装这些库。
 dependencies = [
-    "deerflow-harness",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.27",
     "sse-starlette>=2.1.0",
     "uvicorn[standard]>=0.34.0",
-    "langgraph-sdk>=0.1.51",
     "bcrypt>=4.0.0",
     "pyjwt>=2.9.0",
     "email-validator>=2.0.0",
     "asyncmy>=0.2.10",
+    # 用途：为 PixelFlow 自有 SQLite Repository、Tool Ledger 和记忆 WriteOutbox 提供异步驱动；移除会使本地/CI SQLite 验证和默认 SQLite 运行时启动失败。
+    "aiosqlite>=0.22.1",
+    "mem0ai>=2.0.19",
 ]
 
-[project.optional-dependencies]
-postgres = ["deerflow-harness[postgres]"]
-
 [dependency-groups]
+# 用途：声明仅开发使用的依赖组；影响：生产镜像不应依赖这些测试工具。
 dev = [
     "blockbuster>=1.5.26,<1.6",
     "prompt-toolkit>=3.0.0",
@@ -33,18 +38,17 @@ dev = [
 [tool.pytest.ini_options]
 # 默认跳过已隔离的 V1 video workflow 单元测试（批次 E）；需要时显式：
 #   uv run pytest -m v1_workflow_legacy
+# 用途：默认排除隔离旧流程测试；影响：常规 pytest 不会意外执行已下线架构用例。
 addopts = ["-m", "not v1_workflow_legacy"]
+# 用途：声明项目测试标记；影响：调用方可按标记选择真实外部环境用例。
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
     "v1_workflow_legacy: quarantined agent_workflows/video unit tests (Batch E)",
+    "m0_real: 调用真实 Sidecar、DeepSeek 模型与 Gateway Tool Broker 的 M0 纵向测试",
+    "mem0_real: 调用隔离 Volcengine Mem0 环境的长期记忆验证",
 ]
 
 [tool.uv]
+# 用途：指定依赖索引地址；影响：uv 同步会从该源解析公开依赖。
 index-url = "https://pypi.org/simple"
-
-[tool.uv.workspace]
-members = ["packages/harness"]
-
-[tool.uv.sources]
-deerflow-harness = { workspace = true }

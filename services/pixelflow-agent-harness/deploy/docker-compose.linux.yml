@@ -1,0 +1,51 @@
+# 用途：提供 Linux 云服务器的 Sidecar 部署模板；影响：仅创建内部 Sidecar 服务，不替代 Gateway 部署。
+services:
+  gateway:
+    # 用途：运行 PixelFlow Gateway；影响：仅经服务器 loopback 供既有 Nginx 转发，不直接暴露公网端口。
+    image: ${PIXELFLOW_GATEWAY_IMAGE:?请注入已发布的 Gateway 镜像}
+    # 用途：为 Gateway 提供稳定审计名称；影响：重启与日志查询均使用该容器名。
+    container_name: pixelflow-gateway
+    # 用途：确保 Gateway 异常退出后自动恢复；影响：恢复期间新 Harness Run 会暂时拒绝。
+    restart: unless-stopped
+    env_file:
+      # 用途：从服务器受保护文件注入 Gateway Secret；影响：修改后必须重建容器，文件不得提交。
+      - .env.gateway
+    ports:
+      # 用途：绑定既有 Nginx 上游端口；影响：仅本机 Nginx 可访问 Gateway API。
+      - "127.0.0.1:8001:8001"
+    volumes:
+      # 用途：持久化 Gateway SQLite、会话与 Tool Ledger；影响：容器重建后保留 Harness 业务真相。
+      - ${PIXELFLOW_GATEWAY_DATA_DIR:?请注入 Gateway 数据目录}:/var/lib/pixelflow-gateway
+
+  harness-sidecar:
+    # 用途：指定已构建的 Sidecar 镜像；影响：发布时替换为带版本号的私有镜像地址。
+    image: ${PIXELFLOW_HARNESS_IMAGE:?请注入已发布的 Sidecar 镜像}
+    # 用途：为容器提供稳定审计名称；影响：便于日志和运维定位，不影响 Run 身份。
+    container_name: pixelflow-harness-sidecar
+    # 用途：确保异常退出自动恢复；影响：Gateway 短暂不可用后仍需通过 readiness 重新开放准入。
+    restart: unless-stopped
+    env_file:
+      # 用途：从服务器受保护文件注入 Secret；影响：该文件不得提交仓库，修改后需重建容器。
+      - .env.sidecar
+    ports:
+      # 用途：仅绑定服务器 loopback；影响：Gateway 应经同机反向代理或私网访问，不向公网暴露 Sidecar。
+      - "127.0.0.1:8090:8090"
+    volumes:
+      # 用途：挂载唯一活动 Skill 根；影响：新 Run 从该目录快照 Skill，运行中 Run 不读取后续修改。
+      - ${PIXELFLOW_AGENT_HOME:?请注入服务器 Skill 根}:/var/lib/pixelflow-agent:ro
+      # 用途：持久化 Sidecar Run/Event SQLite；影响：容器重启后可回放同一 Run 事件。
+      - ${PIXELFLOW_HARNESS_DATA_DIR:?请注入服务器数据目录}:/var/lib/pixelflow-agent-data
+    environment:
+      # 用途：声明容器内活动 Skill 根；影响：必须与只读卷挂载路径一致，否则 readiness 失败。
+      PIXELFLOW_AGENT_HOME: /var/lib/pixelflow-agent
+      # 用途：声明 Run/Event 数据位置；影响：必须位于可写数据卷中，避免容器重建丢失事件。
+      PIXELFLOW_HARNESS_RUN_STORE: /var/lib/pixelflow-agent-data/runs.sqlite3
+    healthcheck:
+      # 用途：检测 HTTP 进程存活；影响：完整 JWT/readiness 由 Gateway 准入和 Linux CI 验证。
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/live', timeout=3)"]
+      # 用途：设置健康检查间隔；影响：故障最多约十秒被编排系统发现。
+      interval: 10s
+      # 用途：限制单次健康检查等待；影响：超时视为失败，不阻塞容器主进程。
+      timeout: 3s
+      # 用途：声明连续失败阈值；影响：三次失败后容器被标记不健康。
+      retries: 3

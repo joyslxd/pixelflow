@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "description": "用途：声明 M0 探针 npm 包身份；影响：仅供隔离装配夹具定位，不进入真实 Sidecar Composition。" },
+    "version": { "description": "用途：冻结探针包版本；影响：变更后需要重新审阅其测试边界。" },
+    "private": { "description": "用途：禁止发布内部探针；影响：取值为 true 时 npm publish 会被拒绝。" },
+    "type": { "description": "用途：指定探针模块格式；影响：module 使测试按 ESM 加载。" },
+    "scripts": {
+      "properties": {
+        "build": { "description": "用途：编译探针 TypeScript；影响：仅影响本地装配夹具构建。" },
+        "test": { "description": "用途：执行探针 schema 测试；影响：不作为真实 Sidecar 准入证据。" }
+      }
+    },
+    "dependencies": {
+      "properties": {
+        "@deepseek-ai/dsh-tools": { "description": "用途：提供官方 Tool 类型；影响：仅用于探针的结构化 schema 验证。" }
+      }
+    },
+    "devDependencies": {
+      "properties": {
+        "typescript": { "description": "用途：固定探针的 TypeScript 编译器；影响：仅影响测试夹具构建。" }
+      }
+    }
+  }
+}

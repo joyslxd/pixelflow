@@ -1,0 +1,41 @@
+[build-system]
+# 用途：声明 Sidecar 的 Python 构建后端；影响：固定 hatchling 版本保证本地与发布构建一致，升级需重跑 M0 合同测试。
+requires = ["hatchling==1.30.1"]
+# 用途：指定构建入口；影响：取值改变会影响 wheel 生成方式，仅在重新构建 Sidecar 时生效。
+build-backend = "hatchling.build"
+
+[project]
+# 用途：声明独立 Sidecar 的 Python 分发名称；影响：用于构建与依赖定位，不向 PixelFlow 用户暴露。
+name = "pixelflow-agent-harness"
+# 用途：标识尚处于 M0 Spike 的内部版本；影响：升级时需同步更新兼容性报告和锁文件。
+version = "0.0.1"
+# 用途：说明本包的职责边界；影响：不参与运行时配置。
+description = "PixelFlow Agent Harness Sidecar 的稳定协议与 M0 兼容性骨架"
+# 用途：指定项目说明文档；影响：打包时作为元数据，修改后需重新构建。
+readme = "README.md"
+# 用途：限定支持的 Python 版本；影响：低于 3.10 时拒绝安装，部署端必须按锁文件使用同一依赖版本。
+requires-python = ">=3.10"
+# 用途：声明 Sidecar 的稳定 DTO、内部 HTTP/SSE 服务与固定 Harness SDK；影响：SDK 会安装对应官方 Runtime wheel。
+dependencies = ["deepseek-harness-sdk==0.1.1rc1", "fastapi>=0.115,<1", "httpx>=0.28,<1", "pydantic>=2.11,<3", "PyJWT>=2.9,<3", "uvicorn[standard]>=0.34,<1"]
+
+[dependency-groups]
+# 用途：提供本地测试与静态检查工具；影响：仅开发环境安装，不进入 Sidecar 运行镜像。
+dev = ["pytest>=8.0", "pytest-asyncio>=1.0", "ruff>=0.14"]
+
+[tool.pytest.ini_options]
+# 用途：限定 M0 合同测试目录；避免误收集主工程测试，修改后仅影响本 Sidecar 本地测试。
+testpaths = ["tests"]
+# 用途：把 src 布局加入测试导入路径；避免测试依赖临时环境变量，修改后仅影响本 Sidecar 测试进程。
+pythonpath = ["src"]
+# 用途：声明 M0 的 Runtime 与真实模型测试标记；影响：真实模型仅显式开启时执行，避免默认消耗 token。
+markers = ["m0_runtime: 需要固定 DeepSeek Harness SDK 与本地 Runtime wheel 的 M0 集成测试", "m0_real: 调用真实 Ark DeepSeek 模型的 M0 非计费纵向测试"]
+
+[tool.ruff]
+# 用途：设置静态检查的目标 Python 语法版本；影响：升级需重跑全量检查。
+target-version = "py310"
+# 用途：限定静态检查的源码与测试范围；影响：不扫描主工程，避免两套项目配置互相影响。
+src = ["src", "tests"]
+
+[tool.hatch.build.targets.wheel]
+# 用途：指定需要打包的 Sidecar 源码目录；修改后影响发布 wheel 内容，需重新构建。
+packages = ["src/pixelflow_harness_sidecar"]

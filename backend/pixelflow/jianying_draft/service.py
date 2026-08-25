@@ -257,7 +257,7 @@ class JianyingDraftService:
             return len(self._replaced_jobs)
 
     async def claim_terminal_experience(self, job_id: str) -> bool:
-        """原子领取终态经验写入权，避免并发轮询重复记录 PowerMem。"""
+        """原子领取终态经验写入权，避免并发轮询重复记录长期记忆。"""
 
         async with self._lock:
             job = self._jobs.get(job_id)

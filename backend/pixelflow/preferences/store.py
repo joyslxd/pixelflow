@@ -1,7 +1,7 @@
 """PixelFlow P0 结构化偏好存储。
 
 Store 负责保存用户风格偏好、负向规则、默认视频参数和最近反馈。它不是语义记忆
-系统；``semantic_memory`` 字段默认只返回 disabled 状态，启用 PowerMem 时由网关覆盖。
+系统；``semantic_memory`` 字段默认只返回 disabled 状态，启用 LongTermMemoryPort 时由网关覆盖。
 """
 
 from __future__ import annotations

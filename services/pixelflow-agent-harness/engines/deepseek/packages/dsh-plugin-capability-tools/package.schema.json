@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "description": "用途：声明 Capability Plugin 的 npm 包身份；影响：Cordis 构建与依赖解析按此名称定位。" },
+    "version": { "description": "用途：冻结 Plugin 内部版本；影响：版本变更要求重跑 Sidecar 本地门禁。" },
+    "private": { "description": "用途：禁止将内部 Plugin 发布到公共 npm；影响：取值为 true 时 npm publish 会被拒绝。" },
+    "type": { "description": "用途：指定 Node 模块格式；影响：module 使构建产物按 ESM 加载。" },
+    "scripts": {
+      "properties": {
+        "build": { "description": "用途：编译 TypeScript Plugin；影响：构建失败时 M00 门禁拒绝通过。" }
+      }
+    },
+    "dependencies": {
+      "properties": {
+        "@deepseek-ai/dsh-tools": { "description": "用途：提供官方 Harness Tool 类型与注册接口；影响：版本漂移会改变 Plugin 合同。" }
+      }
+    },
+    "devDependencies": {
+      "properties": {
+        "@types/node": { "description": "用途：提供 Node 类型声明；影响：仅影响 TypeScript 编译期检查。" },
+        "typescript": { "description": "用途：固定 TypeScript 编译器；影响：升级需重新验证生成的 Plugin。" }
+      }
+    }
+  }
+}

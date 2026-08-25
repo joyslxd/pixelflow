@@ -2,7 +2,14 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { api, type ConversationTraceEvent } from "@/lib/api";
+import { getBrowserAuthorization } from "@/lib/authStorage";
+
+interface ConversationTraceEvent {
+  id: number;
+  event: string;
+  data: Record<string, unknown>;
+  created_at: string;
+}
 
 const EVENT_LABEL: Record<string, string> = {
   llm_call: "LLM 调用",
@@ -21,7 +28,11 @@ export function TracePage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.fetchConversationTrace(conversationId);
+      const response = await fetch(`/agent/conversations/${conversationId}/trace`, {
+        headers: { Authorization: getBrowserAuthorization() },
+      });
+      if (!response.ok) throw new Error(`加载 Trace 失败（${response.status}）`);
+      const res = await response.json() as { items: ConversationTraceEvent[] };
       setEvents(res.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

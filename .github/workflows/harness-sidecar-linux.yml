@@ -1,0 +1,111 @@
+# 用途：标识 Linux Sidecar 验证工作流；影响：仅影响 GitHub Actions 展示名称。
+name: Harness Sidecar Linux 验证
+
+# 用途：声明触发条件；影响：限定何时执行 Sidecar 门禁。
+on:
+  pull_request:
+  # 用途：限定 push 触发分支；影响：仅 main 更新自动验证。
+  push:
+    # 用途：指定自动验证的目标分支；影响：其他分支 push 不会消耗 Linux Runner。
+    branches: [main]
+  # 用途：允许受控手工调度；影响：管理员可选择真实模型验证。
+  workflow_dispatch:
+    inputs:
+      run_real_sidecar:
+        # 用途：显式开启真实模型 Sidecar 链路；取值为 true 时必须配置仓库 Secret，避免默认 CI 消耗测试额度。
+        description: 是否执行真实 Sidecar 非计费纵向链路
+        # 用途：限制手工输入为布尔值；false 不执行真实模型调用，true 失败关闭校验 Secret。
+        required: true
+        # 用途：默认保持安全且无模型费用；仅影响本次手工调度，不影响运行中任务。
+        default: false
+        # 用途：让 GitHub UI 提供布尔开关；取值只能为 true 或 false。
+        type: boolean
+
+jobs:
+  contract:
+    # 用途：在 Linux x86_64 安装官方 Runtime wheel 并执行无模型费用的 Sidecar 合同测试；每次提交都执行。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # 用途：将所有命令限定到 Sidecar 子工程；修改后只影响本工作流命令的相对路径。
+        working-directory: services/pixelflow-agent-harness
+    steps:
+      # 用途：检出被验证的提交；影响：后续步骤使用当前工作流对应源码。
+      - name: 检出源码
+        # 用途：固定检出官方 Action；影响：升级 Action 版本需重新验证供应链。
+        uses: actions/checkout@v4
+      # 用途：为 Sidecar 安装解释器；影响：后续 uv 使用指定 Python 版本。
+      - name: 安装 Python
+        # 用途：固定安装 Python 的官方 Action；影响：升级 Action 版本需重新验证 Runtime。
+        uses: actions/setup-python@v5
+        with:
+          # 用途：与 Sidecar 锁文件支持范围一致；升级后需要重新验证官方 Runtime wheel。
+          python-version: "3.12"
+      # 用途：安装锁文件同步工具；影响：保证 CI 不依赖 Runner 预装 uv。
+      - name: 安装 uv
+        # 用途：固定安装 uv 的官方 Action；影响：升级 Action 版本需重新检查锁文件兼容性。
+        uses: astral-sh/setup-uv@v6
+      # 用途：同步被锁定的运行依赖；影响：依赖漂移会失败关闭。
+      - name: 同步锁定依赖
+        # 用途：严格按锁文件安装 Linux Runtime；锁文件漂移会立即失败，避免使用本机 macOS 二进制。
+        run: uv sync --locked --all-groups
+      # 用途：执行默认质量门禁；影响：真实模型用例仍被排除。
+      - name: 执行静态检查和非计费合同链路
+        # 用途：验证 HTTP、SQLite、SSE、重放和安全组合；排除真实模型标记，默认不消耗测试额度。
+        run: |
+          uv run ruff check src tests
+          uv run pytest -q -m "not m0_real"
+
+  # 用途：定义真实模型验收 Job；影响：仅满足 if 条件时创建。
+  real-sidecar:
+    # 用途：仅由人工手工调度开启真实模型非计费纵向测试；未开启时不创建 Job，避免 Secret 暴露和测试额度消耗。
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_sidecar }}
+    # 用途：依赖合同 Job；影响：合同失败时禁止真实模型调用。
+    needs: contract
+    # 用途：选择 Linux Runner；影响：使用官方 Runtime 的 Linux wheel。
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # 用途：与合同 Job 使用同一 Sidecar 工作目录；确保真实链路验证的是同一份锁定依赖。
+        working-directory: services/pixelflow-agent-harness
+    # 用途：绑定受保护环境；影响：Secret 仅在管理员批准后可用。
+    environment: harness-sidecar-real-test
+    env:
+      # 用途：显式允许 pytest 执行 m0_real 用例；只影响本 Job，运行结束后自动失效。
+      PIXELFLOW_RUN_REAL_M0: "1"
+      # 用途：从 GitHub Secret 注入隔离测试模型凭据；缺失时下方门禁失败，绝不写入仓库或日志。
+      DEEPSEEK_API_KEY: ${{ secrets.PIXELFLOW_M0_DEEPSEEK_API_KEY }}
+      # 用途：从 GitHub Secret 注入兼容模型 HTTPS 端点；仅供本 Job 测试，变更后需要重新手工调度验证。
+      DEEPSEEK_BASE_URL: ${{ secrets.PIXELFLOW_M0_DEEPSEEK_BASE_URL }}
+      # 用途：可选覆盖隔离测试模型名；为空时 Sidecar 使用其已验证默认值。
+      PIXELFLOW_M0_DEEPSEEK_MODEL: ${{ secrets.PIXELFLOW_M0_DEEPSEEK_MODEL }}
+    steps:
+      # 用途：检出真实验收源码；影响：与合同 Job 使用同一提交。
+      - name: 检出源码
+        # 用途：固定检出官方 Action；影响：升级 Action 版本需重新验证供应链。
+        uses: actions/checkout@v4
+      # 用途：为真实验收安装解释器；影响：后续 uv 使用指定 Python 版本。
+      - name: 安装 Python
+        # 用途：固定安装 Python 的官方 Action；影响：升级 Action 版本需重新验证 Runtime。
+        uses: actions/setup-python@v5
+        with:
+          # 用途：与合同 Job 保持同一解释器版本；避免 Linux Runtime ABI 漂移。
+          python-version: "3.12"
+      # 用途：安装锁文件同步工具；影响：保证真实验收不依赖 Runner 预装 uv。
+      - name: 安装 uv
+        # 用途：固定安装 uv 的官方 Action；影响：升级 Action 版本需重新检查锁文件兼容性。
+        uses: astral-sh/setup-uv@v6
+      # 用途：同步真实验收依赖；影响：依赖漂移会失败关闭。
+      - name: 同步锁定依赖
+        # 用途：按锁文件安装官方 Linux Runtime；任何依赖漂移均失败关闭。
+        run: uv sync --locked --all-groups
+      # 用途：校验真实模型 Secret；影响：缺失时立即失败而不执行 pytest。
+      - name: 校验受保护测试凭据
+        # 用途：缺少 Secret 时失败关闭，不允许 pytest 把真实用例静默跳过而错误报告为已验证。
+        run: |
+          test -n "$DEEPSEEK_API_KEY"
+          test -n "$DEEPSEEK_BASE_URL"
+      # 用途：执行真实 Sidecar 验收；影响：会消耗隔离模型账号的少量 token。
+      - name: 执行真实 Sidecar 非计费纵向链路
+        # 用途：真实启动 Sidecar、调用模型并验证 SQLite/SSE 重放；只在受保护环境手工开启。
+        run: uv run pytest -q -m m0_real

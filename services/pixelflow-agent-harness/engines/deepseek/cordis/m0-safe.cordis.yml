@@ -1,0 +1,54 @@
+# 用途：提供 M0 的最小安全 JSON-RPC Composition；只装载 Agent loop、Session、Skill 和模型适配器，不装载 Bash、PTY、文件读写、Web、MCP、Subagent 或通用任务工具。
+
+# 用途：启用 Python SDK 所需的 stdio JSON-RPC 服务；缺失时 SDK 无法与 Runtime 通信，取值固定为官方服务包。
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server' # 用途：选择官方 JSON-RPC 服务包；影响：SDK 使用该包建立受控通信。
+
+# 用途：注册 DeepSeek 模型 Provider 路由；凭据只从 Sidecar 进程环境读取，不在此配置或 Run DTO 中出现。
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek' # 用途：选择官方 DeepSeek Provider；影响：模型请求只经该适配器发送。
+
+# 用途：加载真实 PixelFlow Capability Tool Plugin；只经内部 Broker 读取受绑定工作区，不授予模型数据库、文件或 Provider 权限。
+- id: pixelflow-capability-tools
+  name: '../packages/dsh-plugin-capability-tools/dist/index.js' # 用途：加载 PixelFlow Tool 插件；影响：模型仅能调用已发布 Manifest。
+
+# 用途：组装唯一原生 Agent loop；关闭动态工作区指令、Bash、通用后台任务和 Goal，避免 Sidecar 获得未授权能力。
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo' # 用途：选择唯一原生 Agent loop；影响：不会加载旧 DeerFlow 编排。
+  config:
+    # 用途：隔离 Harness Home；运行时由 Sidecar 设置为 PIXELFLOW_AGENT_HOME，避免扫描开发者默认目录。
+    dshHome: !!js process.env.DSH_HOME
+    # 用途：关闭工作区 AGENTS.md/CLAUDE.md 注入；避免模型读取 Sidecar 容器工作目录的非 Skill 指令。
+    workspaceContext: false
+    # 用途：关闭运行时环境快照；避免本地路径或进程环境进入模型上下文。
+    includeRuntimeContext: false
+    # 用途：关闭模型可见 Bash schema；即使未来误挂载 shell executor，模型也不能发现 Bash 工具。
+    toolBash: false
+    # 用途：关闭通用后台任务控制；外部异步任务必须通过 PixelFlow M06 而不是 Harness jobs。
+    toolJobs: false
+    # 用途：关闭 Harness Goal 域；PixelFlow 的权威 Plan/Step 由控制面 Repository 管理。
+    goals: false
+    skills:
+      # 用途：启用官方 Skill Registry 与 skill loader；模型只先看到名称和描述，完整正文按需加载。
+      enabled: true
+      filesystem:
+        # 用途：禁止项目根、用户默认 DSH 根和 AGENTS 兼容根；只扫描下面显式指定的受控共享根。
+        includeDefaultRoots: false
+        # 用途：指定受控共享 Skill 根；由 Sidecar DSH_HOME 派生，目录变化只影响新 Run 的 PixelFlow 快照。
+        customSkillDirs:
+          - !!js "`${process.env.DSH_HOME}/skills`"
+        # 用途：监听受控共享根的目录变化；仅使后续发现失效，PixelFlow 仍须在 Run 接受时冻结正文快照。
+        watch: true
+        # 用途：禁止跟随符号链接；防止共享 Skill 根跳转到宿主未受控路径。
+        watchFollowSymlinks: false
+
+# 用途：持久化 Harness 审计轨迹；路径由 Sidecar 设置，日志不是 PixelFlow 业务真相源。
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl' # 用途：选择 JSONL 会话持久化包；影响：审计记录仅写入隔离目录。
+  config:
+    # 用途：指定隔离的 Session JSONL 根目录；仅供诊断和短期回放，修改后需重启 Sidecar。
+    root: !!js process.env.DSH_SESSION_ROOT
+
+# 用途：启用官方 Session 持久化检查点策略；中断 Turn 只用于安全收口，PixelFlow 恢复必须创建新的 run_recovery。
+- id: session-checkpoints
+  name: '@deepseek-ai/dsh-session-checkpoint-policy' # 用途：选择官方检查点策略；影响：中断仅用于安全收口。

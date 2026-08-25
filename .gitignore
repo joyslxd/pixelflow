@@ -4,6 +4,7 @@ docs/*
 !docs/
 !docs/pixelflow-agent-skill-flow-latest-design.md
 !docs/PixelFlow完整Agent化改造方案与并行实施计划.docx
+!docs/deepseek-harness-compatibility.md
 !docs/agentization/
 !docs/agentization/**
 
@@ -13,15 +14,33 @@ docs/*
 # Local DeerFlow/Pixelflow runtime data.
 .deer-flow/
 
+# 用途：忽略 PixelFlow 本地 SQLite 运行数据；影响：生命周期验证不会把会话、事件或 Tool Ledger 提交到仓库。
+.pixelflow/
+
 # Local Codex helper logs.
 **/.codex-*.log
 
 # 用途：忽略 Python 解释器生成的字节码缓存；影响：本地测试不会污染 Git 工作区。
 **/__pycache__/
 
+# 用途：忽略独立 Sidecar 本地 Python 虚拟环境；影响：依赖必须由 uv.lock 或固定安装命令复现，运行时二进制不提交。
+services/**/.venv/
+
+# 用途：忽略独立 Sidecar 的本地 Node 依赖目录；影响：自定义 Plugin 依赖由 package-lock.json 复现，不提交平台相关二进制。
+services/**/node_modules/
+
+# 用途：忽略 Sidecar pytest 的本地测试缓存；影响：测试收集结果不提交，重新执行测试会重新生成。
+services/**/.pytest_cache/
+
+# 用途：忽略 Sidecar Ruff 的本地检查缓存；影响：静态检查加速数据不提交，规则变更后会自动失效。
+services/**/.ruff_cache/
+
 .claude/
 
 .understand-anything/
+
+# 用途：忽略 macOS Finder 自动生成的目录元数据；影响：本地浏览文件不会产生无关提交。
+**/.DS_Store
 
 # 用途：隔离 Codex 模块 worktree；影响：本地模块检出不会进入仓库暂存范围。
 .worktrees/

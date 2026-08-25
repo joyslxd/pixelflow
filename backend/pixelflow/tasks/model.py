@@ -12,7 +12,7 @@ from sqlalchemy import JSON, DateTime, Index, Integer, String, Text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
-from deerflow.persistence.base import Base
+from pixelflow.platform.persistence import Base
 
 
 def _timestamp_type() -> DateTime:

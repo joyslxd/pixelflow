@@ -1,39 +1,5 @@
-from . import (
-    artifacts,
-    assistants_compat,
-    auth,
-    mcp,
-    models,
-    pixelflow_conversations,
-    pixelflow_image,
-    pixelflow_intake,
-    pixelflow_planning,
-    pixelflow_ppt,
-    pixelflow_preferences,
-    pixelflow_tasks,
-    skills,
-    suggestions,
-    thread_runs,
-    threads,
-    uploads,
-)
+"""Gateway 已注册的 Router 清单。"""
 
-__all__ = [
-    "artifacts",
-    "assistants_compat",
-    "auth",
-    "mcp",
-    "models",
-    "pixelflow_conversations",
-    "pixelflow_image",
-    "pixelflow_intake",
-    "pixelflow_planning",
-    "pixelflow_ppt",
-    "pixelflow_preferences",
-    "pixelflow_tasks",
-    "skills",
-    "suggestions",
-    "threads",
-    "thread_runs",
-    "uploads",
-]
+from . import auth, internal_agent_tools, pixelflow_conversations
+
+__all__ = ["auth", "internal_agent_tools", "pixelflow_conversations"]

@@ -1,323 +1,36 @@
-# PixelFlow 开发/测试环境配置。
-# 启动示例：cd backend && make dev
-# 也可以显式指定：PIXELFLOW_CONFIG_ENV=dev make dev
+# PixelFlow 开发环境配置；敏感值必须通过进程环境或部署 Secret 注入。
+config_version: 2 # 用途：标识新 Harness 配置结构；影响：旧 DeerFlow 配置不再被加载。
 
-# 配置文件版本；用于后续升级配置结构时做兼容提示。
-config_version: 1  # 用途：标识配置结构版本；影响：加载器据此执行兼容性检查。
-
-# 日志级别；开发环境建议 info，需要排查问题时可改成 debug。
-log_level: info  # 用途：设置日志级别；影响：控制开发环境日志详细程度。
-
-# FastAPI 网关配置；可以类比 Spring Boot 的 server.* 配置。
 gateway:
-  # 网关监听地址；0.0.0.0 表示本机所有网卡都能访问。
-  host: "0.0.0.0"  # 用途：设置网关监听地址；影响：允许本机所有网卡接收请求。
-  # 网关监听端口；前端 Vite 代理默认转发到这个端口。
-  port: 8001  # 用途：设置网关监听端口；影响：前端代理将请求转发到该端口。
-  # 是否开启 OpenAPI/Swagger 接口文档；开发环境建议开启。
-  enable_docs: true  # 用途：控制接口文档开关；影响：开发环境可访问 OpenAPI/Swagger。
-  # 允许跨域访问的前端地址；多个地址用英文逗号分隔，空字符串表示不额外放行。
-  cors_origins: "http://localhost:5273,http://127.0.0.1:5273"  # 用途：配置跨域来源；影响：只放行列出的开发前端地址。
+  host: "0.0.0.0" # 用途：设置 Gateway 监听地址；影响：本机所有网卡可访问开发服务。
+  port: 8001 # 用途：设置 Gateway 端口；影响：前端开发代理转发到此端口。
+  enable_docs: true # 用途：控制 OpenAPI 文档；影响：true 时可访问 /agent/docs。
+  cors_origins: "http://localhost:5273,http://127.0.0.1:5273" # 用途：限定浏览器跨域来源；影响：仅列出的开发前端可携带 Authorization 调用。
 
-# PixelFlow 业务配置；对应短视频生成 Agent 自己的 Service/Client 参数。
-pixelflow:
-  # M13.2/R2 测试候选的 Agent Runtime 配置；仅开发/测试 profile 使用。
-  agent_runtime:
-    # 用途：选择新对话的 Runtime 接入层级；primary 让获批 intent 由 Supervisor 推进，
-    # 其他 intent 仍复用 R1 Turn、SSE、恢复和压缩后接力旧 v2。类型为
-    # off/shadow/assist/primary，代码默认 off；修改后需重启，只影响重启后新建对话；
-    # 测试回滚为 assist，生产 profile 不随本项变化。
-    # 用途：冻结 R2 测试候选运行模式；影响：仅 enabled_intents 中的视频可由 Supervisor 接管。
-    mode: "primary"
-    # 用途：限定 primary 可接管的 intent；数组，R2 测试候选只允许 video。
-    # 修改后需重启且只影响带对应首轮意图提示的新对话；其他 intent 保持旧业务 owner；
-    # 回滚为 []。本项不包含生产授权，也不得据此扩展图片、PPT 或视频分析。
-    # 用途：限定 R2 测试接管范围；影响：只有新视频对话冻结为 supervisor_v1。
-    enabled_intents:
-      - "video"  # 用途：允许测试环境接管视频 intent；影响：新视频对话进入 Supervisor，回滚时删除本项。
-    # 用途：设置重启后新建对话接入 Runtime 的覆盖比例；R2 测试候选取 100，确保测试环境
-    # 全部新对话继续拥有 R1 会话基础设施。类型为 0-100 的整数，代码默认 0；
-    # 修改后需重启且不改历史对话；回滚为 0。本项禁止照搬到生产 profile。
-    # 用途：设置测试候选覆盖比例；影响：100 覆盖全部新对话，业务接管仍受 enabled_intents 限制。
-    new_conversation_rollout_percent: 100
-    # 用途：开启 R1 上下文压缩、排队和恢复投影；true 会让新对话使用持久化压缩协调，
-    # false 完全停用该能力。类型为布尔值，代码默认 false；修改后需重启且只影响新对话；
-    # 回滚为 false。
-    # 用途：启用测试候选压缩能力；影响：新对话会执行预算、压缩、排队和恢复。
-    context_compaction_enabled: true
-    # 统一上下文预算；所有当前和未来 Agent 节点都读取本组配置，不再按节点区分窗口。
-    context_budget:
-      # 用途：设置统一有效上下文窗口；整数，单位 K，1K=1024 tokens，默认 896，
-      # 必须大于两项预留之和。修改后需重启，只影响新进程中的模型调用和新压缩判断；
-      # 运行中任务沿用启动快照；回滚时恢复 896。该项不是敏感值。
-      # 影响：896 对应 917504 tokens，并受模型已验证的 1000000 tokens 物理上限约束。
-      effective_context_k: 896  # 用途：配置统一有效窗口；影响：所有 Agent 按 917504 tokens 计算。
-      # 用途：预留单次模型输出空间；正整数，单位 K，1K=1024 tokens，默认 32。
-      # 修改后需重启，只影响新进程中的预算；调大将减少可用输入，回滚时恢复 32。
-      # 影响：32 对应 32768 tokens，所有 Agent 节点使用相同输出预留；该项不是敏感值。
-      output_reserve_k: 32  # 用途：配置输出预留；影响：统一为模型输出保留 32768 tokens。
-      # 用途：预留协议开销、估算误差和供应商波动空间；正整数，单位 K，默认 32。
-      # 修改后需重启，只影响新进程中的预算；调大将更早压缩，回滚时恢复 32。
-      # 影响：32 对应 32768 tokens，所有 Agent 节点使用相同安全预留；该项不是敏感值。
-      safety_reserve_k: 32  # 用途：配置安全预留；影响：统一为协议和估算误差保留 32768 tokens。
-      # 用途：要求实际模型存在当前有效且已验证的 context_profile；布尔值，默认 true。
-      # 修改后需重启并影响新进程全部调用；false 会允许底层兼容性 128K 档案，回滚应保持 true。
-      # 影响：true 时缺失、未验证或过期档案会启动失败，防止实际流程静默降级；该项不是敏感值。
-      require_verified_model_profile: true  # 用途：要求已验证模型档案；影响：缺失或失效时拒绝启动。
-    # 用途：设置压缩失败后允许再次执行的最短间隔；正整数，单位秒，默认 30。
-    # 修改后需重启，只影响之后新产生的失败租约；运行中已有租约保留持久化时间；
-    # 回滚时恢复 30。影响：退避期内 Snapshot、SSE 和轮询只读状态，不制造重试风暴；非敏感值。
-    compaction_retry_backoff_seconds: 30  # 用途：配置失败退避；影响：30 秒内读取接口不重复调度。
-  # PixelFlow 独立业务库 MySQL 连接串；留空时复用 DeerFlow 的 sqlite/内存存储。
-  mysql_url: ""  # 用途：配置 PixelFlow MySQL 连接；影响：留空时复用默认 sqlite/内存存储。
-  # 是否启用 mem0 记忆能力；当前默认关闭，避免本地缺少外部依赖时报错。
-  mem0_enabled: false  # 用途：控制 mem0 能力；影响：false 避免加载未配置的外部依赖。
-  # 语义记忆能力；当前第一版使用 PowerMem HTTP sidecar。
-  semantic_memory_enabled: true  # 用途：启用语义记忆；影响：关键阶段会读取和写入长期记忆。
-  semantic_memory_provider: "powermem"  # 用途：选择语义记忆 Provider；影响：请求通过 PowerMem Client 执行。
-  # 测试环境经 nginx /powermem/ 反向代理到测试服务器本机 127.0.0.1:18848。
-  powermem_base_url: "https://test-video.borgrise.com/powermem"  # 用途：配置 PowerMem 地址；影响：测试请求经该反向代理访问服务。
-  # PowerMem API Key；必须和 PowerMem 服务端 POWERMEM_AUTH_ENABLED/POWERMEM_API_KEYS 保持一致。
-  powermem_api_key: "Lnzw114qV0ibwmUFyKIDcW8BhBm0rxtZ7r8p72G3G6xhxn_KTaAPAHNs5pzY1tbc"  # 用途：鉴权 PowerMem；影响：错误值会使语义记忆失败；敏感值由服务管理员提供。
-  # 单次 PowerMem HTTP 超时，单位秒；只用于 search/health 等「同步在请求路径上」的调用，
-  # 失败开放、不阻塞主创作流程。record 写入不共用这个值，避免被 3s 误杀。
-  powermem_timeout_seconds: 3  # 用途：限制同步记忆请求秒数；影响：超时后按 fail-open 继续主流程。
-  # record 写入专用超时，单位秒。record 全部走后台 asyncio.create_task，不在用户请求路径上，
-  # 因此可以给得更宽松：preference 类记录会用 infer=true，服务端要做 DeepSeek LLM 抽取（实测约 36s）。
-  # 默认 60s，避免中文偏好抽取被中途打断。
-  powermem_record_timeout_seconds: 60  # 用途：限制后台记忆写入秒数；影响：允许 infer 抽取完成后再结束。
-  # 每个 Agent 阶段默认取回的语义记忆条数。
-  powermem_search_limit: 5  # 用途：限制单阶段记忆条数；影响：最多向 Agent 注入五条结果。
-  # 是否允许 PixelFlow 写入 PowerMem；排查时可临时关闭只读。
-  powermem_write_enabled: true  # 用途：控制记忆写入；影响：false 时只读不沉淀新经验。
-  # true 表示 PowerMem 不可用时主流程继续，仅记录 warning。
-  powermem_fail_open: true  # 用途：设置故障开放；影响：PowerMem 不可用时主创作流程继续。
-  # 媒体生成/理解供应商；当前仅支持 borgrise。
-  # 目前图片生成、视频生成、参考视频拆解都走 Borgrise/content-app 接口。
-  # 后续如果图片、视频、拆解需要拆成不同供应商，再新增 image_skill/video_skill/decompose_skill 等细分配置。
-  media_skill: "borgrise"  # 用途：选择媒体 Skill；影响：图片、视频和拆解请求走 Borgrise Client。
-  # 剪辑能力实现；开发环境用 ffmpeg 更容易直出 mp4，jianying 则生成剪映草稿。
-  edit_skill: "ffmpeg"  # 用途：选择剪辑实现；影响：开发环境使用 FFmpeg 输出成片。
-  # 剪映草稿输出目录；留空时使用系统临时目录下的 pixelflow_drafts。
-  draft_root: "../drafts"  # 用途：设置草稿目录；影响：草稿文件写入该相对路径。
-  # FFmpeg 成片输出目录；留空时使用系统临时目录下的 pixelflow_renders。
-  render_root: "../renders"  # 用途：设置成片目录；影响：FFmpeg 产物写入该相对路径。
-  # FFmpeg 字幕/花字字体文件路径；留空时不强制烧录字体。
-  caption_font: "../caption"  # 用途：设置字幕字体目录；影响：烧录字幕时从该路径查找字体。
-  # 第三方剪映草稿 Provider；测试与生产当前使用同一服务地址。
-  jianying_draft_enabled: true  # 用途：启用剪映草稿 Provider；影响：最终视频可创建第三方草稿任务。
-  # 用途：声明content-app已部署服务凭据代表target_user_id的幂等内部上传接口；布尔值，默认false，修改后需重启。
-  # 影响：true时R2剪映恢复Worker可把ZIP归属到原用户并允许四类live Provider就绪；接口未部署时必须保持false，回滚恢复false；非敏感值。
-  content_app_internal_upload_enabled: false
-  jianying_draft_base_url: "https://s4b29nq5dvu0jtq75uj1h.apigateway-cn-shanghai.volceapi.com"  # 用途：配置草稿服务地址；影响：创建和查询请求发送到该网关。
-  # 第三方剪映草稿接口固定鉴权 token，会写入请求 Header 的 token 字段。
-  jianying_draft_token: "79ddb1ca49342b32a1eba57057672129"  # 用途：鉴权草稿服务；影响：错误值会拒绝请求；敏感值由 Provider 管理员提供。
-  # 前端轮询建议间隔，单位秒。
-  jianying_draft_poll_interval_seconds: 2  # 用途：设置前端轮询秒数；影响：客户端每两秒查询一次任务。
-  # 单个剪映草稿任务最大等待时间，单位秒。
-  jianying_draft_timeout_seconds: 1800  # 用途：限制草稿任务总秒数；影响：超过三十分钟进入 timeout。
-  # 网络异常或 HTTP 5xx 的最大重试次数；业务 code 非 200 不自动重试。
-  jianying_draft_max_retries: 2  # 用途：设置网络重试次数；影响：可恢复异常最多额外尝试两次。
-  # 与第三方剪映草稿服务建立 HTTP 连接的超时时间，单位秒。
-  jianying_draft_connect_timeout_seconds: 5  # 用途：限制建连秒数；影响：连接超时后进入重试或失败。
-  # 调用第三方创建剪映草稿任务接口后的响应读取超时时间，单位秒。
-  jianying_draft_create_read_timeout_seconds: 30  # 用途：限制创建响应秒数；影响：慢响应超过阈值即失败。
-  # 轮询第三方剪映草稿任务结果接口时，单次响应读取超时时间，单位秒。
-  jianying_draft_query_read_timeout_seconds: 15  # 用途：限制查询响应秒数；影响：单次轮询超过阈值即重试。
-
-# Borgrise 媒体生成供应商配置；当 pixelflow.media_skill=borgrise 时生效。
-# 可以类比 Java 里某个 Feign/HTTP Client 的专属配置。
-borgrise:
-  # Borgrise/content-app API 基础地址；代码会用它调用生成接口，也会自动拼接 /auth/verify 做登录态校验。
-  base_url: "https://test-video.borgrise.com/api"  # 用途：配置 Borgrise API 地址；影响：媒体与鉴权请求发送到该服务。
-  # 是否调用 Borgrise/content-app 的 /api/auth/verify 校验 Authorization。
-  # 开启后由 content-app 校验 token 签名、过期和用户启用状态；只有本地离线调试才建议临时设为 false。
-  remote_verify_enabled: true  # 用途：启用远端登录态校验；影响：请求前调用 content-app 验证 Authorization。
-  # 登录态校验接口超时时间，单位秒；只影响 /api/auth/verify。
-  # 它只是一次短 HTTP 校验，不是生成任务轮询，所以开发环境默认 10 秒。
-  verify_timeout_seconds: 10  # 用途：限制鉴权响应秒数；影响：超时会拒绝当前受保护请求。
-  # 不配置用户 token：生成/查询接口会透传前端请求里的 content-app Authorization。
-  # 是否跳过 SSL 证书校验；开发环境遇到测试证书问题时可设 true。
-  skip_ssl_verify: false  # 用途：控制 SSL 校验；影响：false 要求测试服务证书有效。
-  # 视频生成轮询超时时间，单位秒；视频生成可能较慢，默认最多等 1 小时。
-  video_poll_timeout: 3600  # 用途：限制视频轮询秒数；影响：最长等待一小时后超时。
-  # 视频合并接口是 content-app 同步合并并上传，长视频合并可能超过普通 HTTP 读超时，默认最多等 1 小时。
-  video_merge_request_timeout: 3600  # 用途：限制视频合并秒数；影响：长合并最长等待一小时。
-  # 图片生成轮询超时时间，单位秒；图片通常比视频快，默认最多等 10 分钟。
-  image_poll_timeout: 600  # 用途：限制图片轮询秒数；影响：十分钟未完成则超时。
-  # 视频分析/参考视频拆解轮询超时时间，单位秒；默认最多等 15 分钟。
-  video_analysis_poll_timeout: 900  # 用途：限制视频分析秒数；影响：十五分钟未完成则超时。
-  # 第三方请求失败后的最大重试次数。
-  max_retries: 3  # 用途：设置供应商网络重试次数；影响：可恢复异常最多重试三次。
-
-# DeerFlow harness 运行路径配置；可以类比平台框架的基础设施配置。
-deerflow:
-  # 当前运行环境名称；会写入 DEER_FLOW_ENV，便于日志/追踪区分环境。
-  environment: "dev"  # 用途：标识 DeerFlow 环境；影响：日志和追踪按开发环境区分。
-  # DeerFlow 可写数据目录；留空时默认使用 backend/.deer-flow。
-  home: "../.deer-flow"  # 用途：设置 DeerFlow 数据目录；影响：可写运行数据落到该路径。
-  # DeerFlow 项目根目录；留空时加载器默认设为当前配置文件所在的 backend 目录。
-  project_root: ""  # 用途：覆盖项目根目录；影响：留空时使用 backend 配置目录。
-  # Docker/宿主机场景下的可见数据目录；本地开发通常留空。
-  host_base_dir: ""  # 用途：配置宿主数据目录；影响：留空时不建立额外挂载。
-  # 宿主机上的 skills 目录；本地开发通常留空。
-  host_skills_path: ""  # 用途：配置宿主 Skills 路径；影响：留空时使用项目内目录。
-  # skills 目录；相对路径会按项目根目录解析。
-  skills_path: "skills"  # 用途：设置 Skills 目录；影响：运行时从该目录发现技能。
-  # MCP/skills 扩展配置 JSON 路径；留空时自动查找 extensions_config.json/mcp_config.json。
-  extensions_config_path: ""  # 用途：指定扩展配置；影响：留空时按默认文件名自动查找。
-  # sandbox 服务绑定地址；只在 AioSandbox/Docker sandbox 场景需要。
-  sandbox_bind_host: ""  # 用途：设置 Sandbox 绑定地址；影响：留空时使用 Provider 默认值。
-  # sandbox 对外访问主机名；只在 AioSandbox/Docker sandbox 场景需要。
-  sandbox_host: ""  # 用途：设置 Sandbox 访问主机；影响：留空时不覆盖默认访问地址。
-
-# LLM 模型配置；DeerFlow Agent 使用。这里直接写明文值，不再依赖 .env。
-models:
-  # 默认聊天模型；代码未显式指定 model_name 时会使用列表中的第一个模型。
-  - name: "gemini-3.5-flash"  # 用途：命名默认模型配置；影响：未指定模型时优先选择该项。
-    # LangChain 模型 Provider；必须用可解析 reasoning_content 的补丁类，标准 ChatOpenAI 会丢掉思维链。
-    use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"  # 用途：选择模型适配器；影响：流式保留 DeepSeek reasoning_content。
-    # 实际请求给模型供应商的模型名称；需要和供应商控制台支持的名称一致。
-    model: "gemini-3.5-flash"  # 用途：指定供应商模型名；影响：实际推理请求使用该模型。
-    # 模型 API Key；开发环境可直接写明文。
-    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT" #"sk-168bc06b8049ecaf15e49519a02ac34f"  # 用途：鉴权模型供应商；影响：错误值会拒绝推理；敏感值由模型管理员提供。
-    # 模型 API Base；这里使用 AIRouter 的 OpenAI 兼容接口地址。
-    base_url: "https://yunwu.site/v1"  #"https://chaomengai.com/v1"  # 用途：配置模型 API 地址；影响：推理请求发送到该兼容端点。
-    # 用途：声明模型支持思维链；布尔值，true 时 create_chat_model(thinking_enabled=True) 才注入思考参数。
-    # 修改后需重启；影响：入场思考流能否拿到 reasoning_content；回滚改 false 并去掉 when_thinking_enabled。
-    supports_thinking: true
-    # 用途：声明支持 reasoning_effort；布尔值，true 时允许传入 low/high/max。
-    # 修改后需重启；影响：思考强度可控；回滚改 false。
-    supports_reasoning_effort: true
-    # 用途：thinking_enabled=True 时合并进模型构造参数；OpenAI 兼容网关必须放 extra_body.thinking。
-    # 修改后需重启；影响：请求是否开启 DeepSeek 思考模式；回滚删除本块。
-    when_thinking_enabled:
-      # 用途：传给供应商的扩展请求体；开启后响应会带 reasoning_content。
-      extra_body:
-        thinking:
-          type: enabled  # 用途：打开深度思考；取值 enabled/disabled；影响：有/无思维链字段。
-      # 用途：思考强度；枚举 low/high/max，默认 high；影响：推理更细但更慢更贵。
-      reasoning_effort: high
-    # 已验证模型上下文能力档案；Runtime 严格模式只接受本档案，不使用 128K 兼容兜底。
-    context_profile:
-      # 用途：声明模型物理上下文窗口；正整数，单位 tokens，默认按本档案 1000000。
-      # 修改后需重启并影响新进程全部 Agent 调用；只能填供应商已确认值，回滚恢复 1000000。
-      # 影响：统一 917504 tokens 有效窗口不得超过该上限；非敏感值，来源见 source。
-      max_context_tokens: 1000000  # 用途：声明物理上下文上限；影响：有效窗口不得超过 1000000 tokens。
-      # 用途：声明模型单次最大输出能力；正整数，单位 tokens，本档案取 32768。
-      # 修改后需重启；必须小于 max_context_tokens，回滚恢复 32768。
-      # 影响：Runtime 输出预留还会与该值取较小值；非敏感值，来源见 source。
-      max_output_tokens: 32768  # 用途：声明模型输出上限；影响：Runtime 输出预留不得超过该值。
-      # 用途：声明 Token 估算策略；字符串，当前使用 conservative_estimate。
-      # 修改后需重启并影响新预算估算；无可靠 tokenizer 前不要改，回滚恢复该值。
-      # 影响：按保守估算触发压缩以降低溢出风险；非敏感值。
-      tokenizer_strategy: "conservative_estimate"  # 用途：选择 Token 估算策略；影响：按保守值触发压缩。
-      # 用途：记录能力档案验证时间；带时区的 ISO-8601 字符串。
-      # 修改后需重启；只应在重新验证供应商能力后更新，回滚恢复本次记录。
-      # 影响：未来时间会被视为未验证并拒绝启动；非敏感值。
-      verified_at: "2026-07-26T00:00:00+08:00"  # 用途：记录档案验证时间；影响：未来时间会拒绝启动。
-      # 用途：记录模型能力证据来源；非空字符串，变更时需同步验证记录。
-      # 修改后需重启；不改变数值但用于审计，回滚恢复本次说明。
-      # 影响：空值会被视为未验证并拒绝实际流程启动；不得填写 token、密钥或账号。
-      source: "AIRouter DeepSeek V4 Pro 1M 上下文能力确认"  # 用途：记录能力证据；影响：空值会拒绝启动。
-  # 场景包结构生成用 Flash 槽位；配置名须唯一（context_profile 按 name 去重）。
-  # 当前供应商模型仍走 gemini-3.5-flash；代码里 create_chat_model("deepseek-v4-flash") 仍命中本项。
-  - name: "deepseek-v4-flash"
-    # 用途：Flash 同样走 reasoning 补丁类，避免场景包等路径丢掉思维链字段。
-    use: "deerflow.models.patched_openai_reasoning:PatchedChatOpenAIReasoning"
-    model: "gemini-3.5-flash"
-    api_key: "sk-Pr4UUr0i0DI5wfBcRy8vGair3UyNzchkHW9LW9I4UHWrTFdT" #"sk-168bc06b8049ecaf15e49519a02ac34f"  # 用途：鉴权模型供应商；影响：错误值会拒绝推理；敏感值由模型管理员提供。
-    # 模型 API Base；这里使用 AIRouter 的 OpenAI 兼容接口地址。
-    base_url: "https://yunwu.site/v1"  #"https://chaomengai.com/v1"  # 用途：配置模型 API 地址；影响：推理请求发送到该兼容端点。
-    # 用途：声明 Flash 支持思维链；true 时才允许 thinking_enabled。
-    supports_thinking: true
-    # 用途：声明 Flash 支持 reasoning_effort。
-    supports_reasoning_effort: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled  # 用途：打开深度思考；影响：响应含 reasoning_content。
-      reasoning_effort: high  # 用途：思考强度；影响：更细但更慢。
-    context_profile:
-      max_context_tokens: 1000000
-      max_output_tokens: 32768
-      tokenizer_strategy: "conservative_estimate"
-      verified_at: "2026-08-10T00:00:00+08:00"
-      source: "AIRouter DeepSeek V4 Flash 场景包结构加速"
-
-# sandbox 配置；Agent 工具执行环境，类似受控的远程执行容器/本地执行器。
-sandbox:
-  # sandbox Provider；本地开发用 LocalSandboxProvider，不依赖 Docker。
-  use: "deerflow.sandbox.local:LocalSandboxProvider"  # 用途：选择 Sandbox Provider；影响：工具在本地受控执行。
-  # 是否允许工具直接执行宿主机 bash；仅个人可信本地开发可设 true。
-  allow_host_bash: false  # 用途：控制宿主 Bash；影响：false 禁止工具直接执行宿主命令。
-  # bash 工具输出最大字符数；防止一次命令输出过大拖慢页面。
-  bash_output_max_chars: 20000  # 用途：限制 Bash 输出字符；影响：超出部分被截断以保护上下文。
-  # 读文件工具输出最大字符数；防止超大文件把上下文撑爆。
-  read_file_output_max_chars: 50000  # 用途：限制读文件字符；影响：大文件输出按阈值截断。
-  # ls 工具输出最大字符数；防止目录太大时输出失控。
-  ls_output_max_chars: 20000  # 用途：限制目录列表字符；影响：大目录输出按阈值截断。
-
-# DeerFlow 持久化配置；保存线程、运行记录、checkpointer 等平台数据。
 database:
-  # 持久化后端；开发环境使用 sqlite，简单且无需单独启动数据库。
-  backend: "sqlite"  # 用途：选择持久化后端；影响：开发环境使用本地 sqlite。
-  # sqlite 数据目录；最终文件是 .deer-flow/dev-data/deerflow.db。
-  sqlite_dir: "../.deer-flow/dev-data"  # 用途：设置 sqlite 目录；影响：数据库文件写入该路径。
-  # PostgreSQL 连接串；当 backend=postgres 时才需要填写。
-  postgres_url: ""  # 用途：配置 PostgreSQL 连接；影响：仅 backend=postgres 时生效。
-  # 是否打印 SQL；排查数据库问题时可设 true。
-  echo_sql: false  # 用途：控制 SQL 日志；影响：false 避免输出每条数据库语句。
-  # PostgreSQL 连接池大小；sqlite 模式不使用。
-  pool_size: 5  # 用途：设置 PostgreSQL 连接池；影响：postgres 模式最多保持五个基础连接。
+  backend: "sqlite" # 用途：选择 PixelFlow 持久化后端；影响：开发环境使用本地 SQLite。
+  sqlite_dir: "../.pixelflow/dev-data" # 用途：设置 SQLite 数据目录；影响：新建数据库文件落在该目录。
+  url: "" # 用途：可选覆盖完整数据库 URL；影响：留空时根据 sqlite_dir 自动生成。
+  echo_sql: false # 用途：控制 SQL 调试日志；影响：true 会输出 SQL，建议仅临时排障使用。
+  pool_size: 5 # 用途：设置非 SQLite 连接池基础大小；影响：仅 PostgreSQL 后端生效。
 
-# 自定义 Agent 管理 API 配置；保持开启，方便前端/接口文档调试。
-agents_api:
-  # 是否启用自定义 Agent 管理 API。
-  enabled: true  # 用途：启用 Agent 管理 API；影响：开发前端可调用管理接口。
+harness:
+  sidecar_base_url: "" # 用途：配置 Linux Sidecar HTTPS 地址；影响：留空时 Gateway 拒绝接收新 Harness Run。
+  gateway_instance_id: "pixelflow-dev" # 用途：标识 Gateway 服务实例；影响：写入服务 JWT 审计 claim。
+  request_timeout_seconds: 15 # 用途：限制 Gateway 调用 Sidecar 的等待秒数；影响：超时后关闭新 Run 准入。
 
-# 技能存储配置；DeerFlow skills 会从这里读取。
-skills:
-  # SkillStorage 实现类；默认本地文件存储。
-  use: "deerflow.skills.storage.local_skill_storage:LocalSkillStorage"  # 用途：选择 Skills 存储；影响：技能从本地文件系统读取。
-  # skills 目录；相对项目根目录解析。
-  path: "skills"  # 用途：设置技能存储目录；影响：本地 Skill 文件写入和读取该路径。
-  # sandbox 内挂载 skills 的路径；本地开发通常无需修改。
-  container_path: "/mnt/skills"  # 用途：设置容器挂载路径；影响：Sandbox 从该位置访问 Skills。
+pixelflow:
+  mysql_url: "" # 用途：可选兼容 MySQL 任务库 URL；影响：留空时使用 database 配置。
+  long_term_memory_enabled: true # 用途：控制长期记忆读写；影响：false 时主流程继续但不访问 Mem0。
+  volcengine_mem0_base_url: "" # 用途：配置 Mem0 HTTPS 地址；影响：留空时记忆服务 fail-open。
+  volcengine_mem0_api_key: "" # 用途：预留 Mem0 密钥字段；影响：必须由环境变量注入，YAML 永远不保存真实值。
+  long_term_memory_timeout_seconds: 3 # 用途：限制 Mem0 同步检索秒数；影响：超时返回空投影而不阻断 Run。
+  long_term_memory_search_limit: 5 # 用途：限制单次记忆条数；影响：调大增加上下文消耗。
+  jianying_draft_enabled: false # 用途：控制已下线视频交付 Provider；影响：保持 false，旧草稿能力不再启动。
+  content_app_internal_upload_enabled: false # 用途：控制内部上传兼容开关；影响：保持 false，避免旧 Provider 任务恢复。
 
-# 链路追踪配置；用于接入 LangSmith/Langfuse 观察 LLM 和工具调用。
-tracing:
-  # LangSmith 追踪配置。
-  langsmith:
-    # 是否启用 LangSmith；开发环境默认关闭。
-    enabled: false  # 用途：控制 LangSmith；影响：false 不发送链路追踪数据。
-    # LangSmith API Key；启用时填写。
-    api_key: ""  # 用途：鉴权 LangSmith；影响：启用时必须由平台管理员提供敏感值。
-    # LangSmith 项目名；用于在平台上区分项目。
-    project: "pixelflow-dev"  # 用途：设置 LangSmith 项目；影响：追踪记录归入该开发项目。
-    # LangSmith 服务地址；通常保持默认。
-    endpoint: "https://api.smith.langchain.com"  # 用途：配置 LangSmith 地址；影响：追踪数据发送到该端点。
-  # Langfuse 追踪配置。
-  langfuse:
-    # 是否启用 Langfuse；开发环境默认关闭。
-    enabled: false  # 用途：控制 Langfuse；影响：false 不发送 Langfuse 追踪数据。
-    # Langfuse Public Key；启用时填写。
-    public_key: ""  # 用途：标识 Langfuse 项目；影响：启用时须由平台管理员提供。
-    # Langfuse Secret Key；启用时填写。
-    secret_key: ""  # 用途：鉴权 Langfuse；影响：启用时须安全提供敏感值。
-    # Langfuse 服务地址；自建时改成自己的地址。
-    base_url: "https://cloud.langfuse.com"  # 用途：配置 Langfuse 地址；影响：追踪数据发送到该服务。
-
-# 常见第三方工具 Key；大模型 key 请直接写到 models.* 的 api_key/base_url。
-third_party:
-  # Serper 搜索 API Key；使用 Google 搜索工具时填写。
-  serper_api_key: ""  # 用途：鉴权 Serper 搜索；影响：留空时对应搜索工具不可用。
-  # Jina API Key；使用 Jina 读取网页/搜索能力时填写。
-  jina_api_key: ""  # 用途：鉴权 Jina；影响：留空时带鉴权的网页能力不可用。
-  # InfoQuest API Key；使用 InfoQuest 检索能力时填写。
-  infoquest_api_key: ""  # 用途：鉴权 InfoQuest；影响：留空时对应检索能力不可用。
-
-# 环境变量直通区；少量非常规 key 可以放这里，加载器会原样写入 os.environ。
-environment:
-  # 自定义环境变量字典；key 必须是环境变量名，value 会转成字符串。
-  variables: {}  # 用途：透传非常规环境变量；影响：空字典不会新增进程环境项。
+content_app:
+  base_url: "" # 用途：配置 content-app HTTPS 地址；影响：留空时用户鉴权与旧 Provider Client 均 fail-closed。
+  remote_verify_enabled: true # 用途：控制远端 Authorization 校验；影响：true 时每个受保护请求校验用户登录态。
+  verify_timeout_seconds: 10 # 用途：限制登录态校验秒数；影响：超时拒绝受保护请求。
+  skip_ssl_verify: false # 用途：控制 TLS 证书校验；影响：false 要求服务端证书可信。

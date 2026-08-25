@@ -21,7 +21,6 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.utils.time import coerce_iso
 from pixelflow.tasks.model import (
     PixelFlowAssetRow,
     PixelFlowConversationMessageRow,
@@ -97,7 +96,12 @@ def _to_datetime(value: datetime | str | None) -> datetime | None:
 
 
 def _dt(value: datetime | str | None) -> str:
-    return coerce_iso(value)
+    """把时间统一为 UTC ISO-8601 字符串，不再依赖 DeerFlow 工具函数。"""
+
+    parsed = _to_datetime(value)
+    if parsed is None:
+        return ""
+    return parsed.isoformat().replace("+00:00", "Z")
 
 
 def _conversation_context(value: dict[str, Any] | None) -> dict[str, Any]:

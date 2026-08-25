@@ -13,7 +13,7 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from pixelflow.agent_runtime.persistence import (
+from pixelflow.agent_control_plane.persistence import (
     AGENT_RUNTIME_SUPPORT_TABLES,
     AGENT_RUNTIME_TABLES,
 )

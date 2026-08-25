@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import uuid
 from typing import Any, Literal
@@ -18,34 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
-from pixelflow.agent_runtime.contracts import TurnStartRequest
-from pixelflow.agent_runtime.persistence.repositories import (
-    AgentRuntimeRecordConflictError,
-)
-from pixelflow.agent_runtime.service import (
-    AgentRuntimeContextConflictError,
-    AgentRuntimeInterruptStateError,
-    AgentRuntimeService,
-    AgentRuntimeSnapshotResponse,
-    AgentRuntimeUnavailableError,
-    AgentRuntimeVideoConfirmationConflictError,
-    AgentRuntimeVideoConfirmationUnavailableError,
-    AgentRuntimeVideoQuotaConflictError,
-    AgentRuntimeVideoQuotaUnavailableError,
-    AgentRuntimeVideoScriptConflictError,
-    AgentRuntimeVideoScriptNotReadyError,
-    AgentRuntimeVideoScriptUnavailableError,
-    AgentTurnJobResponse,
-    AgentTurnStartResponse,
-    VideoAgentConfirmScriptPlanRequest,
-    VideoAgentConfirmScriptPlanResponse,
-    VideoAgentConfirmationResponse,
-    VideoAgentConfirmationResponseRequest,
-    VideoAgentQuotaResponse,
-    VideoAgentQuotaResponseRequest,
-    VideoAgentScriptSaveRequest,
-    VideoAgentScriptSaveResponse,
-)
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
     PixelFlowConversationMessageRecord,
@@ -53,7 +27,6 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
-from pixelflow.video_agent.credentials import TransientVideoAgentCredential
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
 logger = logging.getLogger(__name__)
@@ -134,6 +107,27 @@ class ConversationMessageCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class HarnessTurnStartRequest(BaseModel):
+    """M0 公开 Harness Turn 的最小输入，工作区归属永远由 Gateway 回查。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_input_id: uuid.UUID
+    workspace_id: str = Field(min_length=1, max_length=64)
+    expected_workspace_revision: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=32_000)
+    max_output_tokens: int = Field(default=192, ge=1, le=512)
+
+
+class HarnessTurnStartResponse(BaseModel):
+    """公开返回已绑定并已激活的 M0 Sidecar Run，不暴露 Session 或服务凭据。"""
+
+    message_id: str
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["accepted"]
+    workspace_revision: int = Field(ge=1)
+
+
 class ConversationMessageUpdateRequest(BaseModel):
     content: str | None = None
     payload: dict[str, Any] | None = None
@@ -208,64 +202,188 @@ def _task_store(request: Request) -> PixelFlowTaskStore:
     return store
 
 
-def _agent_runtime_service(request: Request) -> AgentRuntimeService:
-    service = getattr(
-        request.app.state,
-        "pixelflow_agent_runtime_service",
-        None,
-    )
-    if service is None:
+
+def _harness_run_bridge(request: Request):
+    """读取启动期装配的真实 Sidecar Port；缺失时拒绝而不回退旧 Agent。"""
+
+    from pixelflow.agent_harness import AgentHarnessPort
+
+    bridge = getattr(request.app.state, "pixelflow_harness_run_bridge", None)
+    if not isinstance(bridge, AgentHarnessPort):
         raise HTTPException(
             status_code=503,
-            detail="PixelFlow Agent Runtime not available",
+            detail={"code": "harness_run_bridge_unavailable"},
+        )
+    return bridge
+
+
+def _agent_run_bridge(request: Request):
+    """读取唯一的新控制面 RunBridge，缺失时拒绝而不退回旧 Agent。"""
+
+    from pixelflow.agent_control_plane import AgentRunBridge
+
+    bridge = getattr(request.app.state, "pixelflow_agent_run_bridge", None)
+    if not isinstance(bridge, AgentRunBridge):
+        raise HTTPException(status_code=503, detail={"code": "agent_run_bridge_unavailable"})
+    return bridge
+
+
+def _harness_video_repository(request: Request) -> Any:
+    """读取与 Broker 共用的 SQL Workspace Repository，禁止 M0 使用内存业务状态。"""
+
+    repository = getattr(request.app.state, "pixelflow_harness_video_repository", None)
+    if repository is None or not hasattr(repository, "get_workspace"):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "harness_workspace_repository_unavailable"},
+        )
+    return repository
+
+
+async def _build_harness_context(
+    request: Request,
+    *,
+    user_id: str,
+    conversation: PixelFlowConversationRecord,
+    workspace: Any,
+    user_input: str,
+) -> dict[str, Any]:
+    """组装 Sidecar 可消费的安全上下文，不发送用户身份、凭据或业务原文。"""
+
+    from pixelflow.video.workspace import build_workspace_digest
+
+    preference_store = getattr(request.app.state, "pixelflow_preference_store", None)
+    preference_projection: dict[str, Any] = {}
+    if preference_store is not None and hasattr(preference_store, "get"):
+        preference = await preference_store.get(user_id)
+        preference_projection = {
+            "style_preferences": dict(preference.style_preferences),
+            "negative_rules": list(preference.negative_rules)[:20],
+            "defaults": dict(preference.defaults),
+        }
+    memory_service = getattr(request.app.state, "pixelflow_long_term_memory_service", None)
+    memory_projection: list[dict[str, Any]] = []
+    if memory_service is not None and hasattr(memory_service, "search"):
+        memories = await memory_service.search(user_id=user_id, query=user_input)
+        memory_projection = [
+            {"memory_id": item.memory_id, "content": item.content, "category": item.category}
+            for item in memories[:20]
+        ]
+    return {
+        "workspace_projection": build_workspace_digest(workspace),
+        "conversation_projection": {
+            "title": conversation.title[:256],
+            "last_phase": conversation.last_phase[:80],
+            "revision": conversation.revision,
+        },
+        "preference_projection": preference_projection,
+        "brand_profile_projection": {},
+        "long_term_memory_projection": memory_projection,
+    }
+
+
+async def _require_harness_admission(request: Request):
+    """仅在共享准入状态开放时接收新 Run，禁止降级到旧 Agent 内核。"""
+
+    from pixelflow.agent_harness.admission import (
+        HarnessAdmissionClosedError,
+        SQLHarnessAdmissionRepository,
+    )
+
+    repository = getattr(request.app.state, "pixelflow_harness_admission_repository", None)
+    if not isinstance(repository, SQLHarnessAdmissionRepository):
+        raise HTTPException(status_code=503, detail={"code": "harness_admission_unavailable"})
+    try:
+        return await repository.require_open()
+    except HarnessAdmissionClosedError as error:
+        raise HTTPException(status_code=503, detail={"code": "harness_admission_closed"}) from error
+
+
+async def _close_harness_admission_after_sidecar_failure(
+    request: Request,
+    *,
+    expected_revision: int,
+) -> None:
+    """Sidecar 不可用时尽力关闭共享准入；竞争失败表示其他实例已先处理。"""
+
+    from pixelflow.agent_harness.admission import (
+        HarnessAdmissionConflictError,
+        SQLHarnessAdmissionRepository,
+    )
+
+    repository = getattr(request.app.state, "pixelflow_harness_admission_repository", None)
+    if not isinstance(repository, SQLHarnessAdmissionRepository):
+        return
+    try:
+        await repository.update_state(
+            open_for_new_runs=False,
+            reason_code="sidecar_unavailable",
+            expected_revision=expected_revision,
+            updated_by="gateway-sidecar-failure",
+        )
+    except HarnessAdmissionConflictError:
+        return
+
+
+def _harness_run_projector(request: Request):
+    """读取启动期装配的 Outbox 投影服务，缺失时拒绝而不退回 Sidecar 直传。"""
+
+    from pixelflow.agent_harness.projector import HarnessRunProjector
+
+    projector = getattr(request.app.state, "pixelflow_harness_run_projector", None)
+    if not isinstance(projector, HarnessRunProjector):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "harness_run_projector_unavailable"},
+        )
+    return projector
+
+
+def _harness_recovery_service(request: Request):
+    """读取新的 run_recovery Application Service；缺失时拒绝而不从旧 Session 恢复。"""
+
+    from pixelflow.agent_harness.recovery import HarnessRecoveryService
+
+    service = getattr(request.app.state, "pixelflow_harness_recovery_service", None)
+    if not isinstance(service, HarnessRecoveryService):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "harness_recovery_service_unavailable"},
         )
     return service
 
 
-def _runtime_http_exception(exc: Exception) -> HTTPException:
-    """把 Service 异常稳定映射为新 Runtime API 的 HTTP 合同。"""
+def _harness_digest(payload: dict[str, Any]) -> str:
+    """生成冻结输入的 SHA-256 摘要，摘要不替代权威消息或 Workspace。"""
 
-    if isinstance(exc, AgentRuntimeUnavailableError):
-        return HTTPException(
-            status_code=409,
-            detail={"code": "agent_runtime_unavailable"},
-        )
-    if isinstance(exc, AgentRuntimeContextConflictError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "code": "agent_runtime_context_conflict",
-                "expected_context_version": exc.expected_context_version,
-                "current_context_version": exc.current_context_version,
-            },
-        )
-    if isinstance(exc, AgentRuntimeInterruptStateError):
-        return HTTPException(
-            status_code=409,
-            detail={"code": "agent_runtime_interrupt_state_invalid"},
-        )
-    if isinstance(exc, LookupError):
-        return HTTPException(status_code=404, detail="Conversation not found")
-    if isinstance(exc, AgentRuntimeRecordConflictError):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "code": "agent_runtime_record_conflict",
-                "message": "会话状态刚被并发更新，请重试",
-            },
-        )
-    return HTTPException(status_code=500, detail="Agent Runtime request failed")
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _transient_video_agent_credential(
+async def _ensure_harness_projection(
     request: Request,
-) -> TransientVideoAgentCredential | None:
-    """把当前 Authorization 限制在本次 VideoAgent 确认执行调用链内。"""
+    *,
+    user_id: str,
+    conversation_id: str,
+    run_id: str,
+):
+    """在 Gateway/Sidecar 重启后按 binding 重新拉起只读事件投影，不直接续跑模型。"""
 
-    authorization = request.headers.get("Authorization")
-    if authorization is None or not authorization.strip():
-        return None
-    return TransientVideoAgentCredential(authorization=authorization)
+    bridge = _harness_run_bridge(request)
+    binding = await bridge.get_owned_binding(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    projector = _harness_run_projector(request)
+    await projector.start(harness=bridge, binding=binding)
+    return projector
+
 
 
 def _conversation_response(record: PixelFlowConversationRecord) -> ConversationResponse:
@@ -296,22 +414,9 @@ async def _conversation_detail(
 async def create_conversation(body: ConversationCreateRequest, request: Request) -> ConversationResponse:
     user_id = await get_current_user(request)
     title = body.title.strip() or "新的对话"
-    service = getattr(
-        request.app.state,
-        "pixelflow_agent_runtime_service",
-        None,
-    )
-    if service is None:
-        context = sanitize_client_conversation_context(body.context)
-        orchestration_mode = "frontend_v2"
-        orchestration_version = 1
-    else:
-        assignment = service.assignment_for_new_conversation(
-            body.context,
-        )
-        context = assignment.context
-        orchestration_mode = assignment.orchestration_mode.value
-        orchestration_version = assignment.orchestration_version
+    context = sanitize_client_conversation_context(body.context)
+    orchestration_mode = "harness_v1"
+    orchestration_version = 1
     record = await _task_store(request).create_conversation(
         PixelFlowConversationRecord(
             conversation_id=uuid.uuid4().hex,
@@ -328,315 +433,290 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
 
 
 @router.post(
-    "/{conversation_id}/turns/start",
-    response_model=AgentTurnStartResponse,
+    "/{conversation_id}/harness-turns/start",
+    response_model=HarnessTurnStartResponse,
 )
-async def start_agent_turn(
+async def start_harness_turn(
     conversation_id: str,
-    body: TurnStartRequest,
+    body: HarnessTurnStartRequest,
     request: Request,
-) -> AgentTurnStartResponse:
-    """保存统一输入并注册可幂等恢复的 Turn。"""
+) -> HarnessTurnStartResponse:
+    """M0 真实公开 Turn：先持久化用户消息，再创建、绑定并激活 Sidecar Run。"""
 
-    user_id = await get_current_user(request)
-    service = _agent_runtime_service(request)
-    try:
-        result = await service.start_turn(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            request=body,
-        )
-    except (
-        AgentRuntimeContextConflictError,
-        AgentRuntimeUnavailableError,
-        AgentRuntimeRecordConflictError,
-        LookupError,
-    ) as exc:
-        raise _runtime_http_exception(exc) from exc
-    service.notify_registered_turn(
-        result.turn_id,
-        credential=_transient_video_agent_credential(request),
+    from pixelflow.agent_harness import (
+        GatewayHarnessSidecarError,
+        HarnessRunRequest,
     )
-    return result
-
-
-@router.get(
-    "/{conversation_id}/agent-snapshot",
-    response_model=AgentRuntimeSnapshotResponse,
-)
-async def get_agent_snapshot(
-    conversation_id: str,
-    request: Request,
-) -> AgentRuntimeSnapshotResponse:
-    """返回刷新、断网或切换对话后的唯一权威恢复快照。"""
 
     user_id = await get_current_user(request)
-    try:
-        return await _agent_runtime_service(request).snapshot(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-    except (
-        AgentRuntimeInterruptStateError,
-        AgentRuntimeUnavailableError,
-        LookupError,
-    ) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-@router.post(
-    "/{conversation_id}/video-agent/confirmations/{confirmation_id}/responses",
-    response_model=VideoAgentConfirmationResponse,
-)
-async def respond_to_video_agent_confirmation(
-    conversation_id: str,
-    confirmation_id: str,
-    body: VideoAgentConfirmationResponseRequest,
-    request: Request,
-) -> VideoAgentConfirmationResponse:
-    """确认或取消当前会话唯一等待中的 VideoAgent 计费步骤。"""
-
-    try:
-        return await _agent_runtime_service(
-            request
-        ).respond_to_video_agent_confirmation(
-            user_id=await get_current_user(request),
-            conversation_id=conversation_id,
-            confirmation_id=confirmation_id,
-            request=body,
-            credential=_transient_video_agent_credential(request),
-        )
-    except AgentRuntimeVideoConfirmationUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "video_agent_confirmation_unavailable"},
-        ) from exc
-    except AgentRuntimeVideoConfirmationConflictError as exc:
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    admission = await _require_harness_admission(request)
+    store = _task_store(request)
+    conversation = await store.get_conversation(conversation_id, user_id=user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    workspace = await _harness_video_repository(request).get_workspace(
+        user_id,
+        body.workspace_id,
+    )
+    if workspace is None or workspace.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail={"code": "harness_workspace_not_found"})
+    if workspace.revision != body.expected_workspace_revision:
         raise HTTPException(
             status_code=409,
-            detail={"code": "video_agent_confirmation_conflict"},
-        ) from exc
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-@router.put(
-    "/{conversation_id}/video-agent/script",
-    response_model=VideoAgentScriptSaveResponse,
-)
-async def save_video_agent_script(
-    conversation_id: str,
-    body: VideoAgentScriptSaveRequest,
-    request: Request,
-) -> VideoAgentScriptSaveResponse:
-    """保存右侧脚本预览中的用户编辑，并追加脚本版本。"""
-
-    try:
-        return await _agent_runtime_service(request).save_video_agent_script(
-            user_id=await get_current_user(request),
-            conversation_id=conversation_id,
-            request=body,
-        )
-    except AgentRuntimeVideoScriptUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "video_agent_script_unavailable"},
-        ) from exc
-    except AgentRuntimeVideoScriptConflictError as exc:
-        detail: dict[str, object] = {
-            "code": "video_agent_script_conflict",
-            "message": str(exc),
-        }
-        if isinstance(exc.current_revision, int) and exc.current_revision >= 1:
-            detail["current_revision"] = exc.current_revision
-        if isinstance(exc.workspace_id, str) and exc.workspace_id.strip():
-            detail["workspace_id"] = exc.workspace_id.strip()
-        raise HTTPException(status_code=409, detail=detail) from exc
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-@router.post(
-    "/{conversation_id}/video-agent/commands/confirm-script-plan",
-    response_model=VideoAgentConfirmScriptPlanResponse,
-)
-async def confirm_video_agent_script_plan(
-    conversation_id: str,
-    body: VideoAgentConfirmScriptPlanRequest,
-    request: Request,
-) -> VideoAgentConfirmScriptPlanResponse:
-    """确认脚本方案并启动 prepare_scene_packages（按钮路径，不伪造自然语言 Turn）。"""
-
-    try:
-        return await _agent_runtime_service(request).confirm_video_agent_script_plan(
-            user_id=await get_current_user(request),
-            conversation_id=conversation_id,
-            request=body,
-            credential=_transient_video_agent_credential(request),
-        )
-    except AgentRuntimeVideoScriptUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
             detail={
-                "code": "video_agent_script_unavailable",
-                "message": str(exc) or "VideoAgent脚本确认入口尚未就绪",
+                "code": "harness_workspace_revision_conflict",
+                "current_revision": workspace.revision,
             },
-        ) from exc
-    except AgentRuntimeVideoScriptConflictError as exc:
-        detail: dict[str, object] = {
-            "code": "video_agent_script_conflict",
-            "message": str(exc),
-        }
-        if isinstance(exc.current_revision, int) and exc.current_revision >= 1:
-            detail["current_revision"] = exc.current_revision
-        if isinstance(exc.workspace_id, str) and exc.workspace_id.strip():
-            detail["workspace_id"] = exc.workspace_id.strip()
-        raise HTTPException(status_code=409, detail=detail) from exc
-    except AgentRuntimeVideoScriptNotReadyError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "video_agent_script_not_ready",
-                "message": str(exc),
-                "missing_fields": list(exc.missing_fields),
-                **(
-                    {"workspace_id": exc.workspace_id}
-                    if isinstance(exc.workspace_id, str) and exc.workspace_id.strip()
-                    else {}
-                ),
-                **(
-                    {"revision": exc.revision}
-                    if isinstance(exc.revision, int) and exc.revision >= 1
-                    else {}
-                ),
-            },
-        ) from exc
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-@router.post(
-    "/{conversation_id}/video-agent/quota/{quota_interrupt_id}/responses",
-    response_model=VideoAgentQuotaResponse,
-)
-async def respond_to_video_agent_quota(
-    conversation_id: str,
-    quota_interrupt_id: str,
-    body: VideoAgentQuotaResponseRequest,
-    request: Request,
-) -> VideoAgentQuotaResponse:
-    """恢复原Provider job或原子取消额度中断对应的V2 Plan。"""
-
-    try:
-        return await _agent_runtime_service(request).respond_to_video_agent_quota(
-            user_id=await get_current_user(request),
-            conversation_id=conversation_id,
-            quota_interrupt_id=quota_interrupt_id,
-            request=body,
-            credential=_transient_video_agent_credential(request),
         )
-    except AgentRuntimeVideoQuotaUnavailableError as exc:
+    message = await _append_conversation_message(
+        store,
+        conversation_id,
+        ConversationMessageCreateRequest(
+            role="user",
+            content=body.content,
+            payload={
+                "client_message_id": str(body.client_input_id),
+                "source": "harness_turn",
+            },
+        ),
+        user_id=user_id,
+    )
+    context = await _build_harness_context(
+        request,
+        user_id=user_id,
+        conversation=conversation,
+        workspace=workspace,
+        user_input=body.content,
+    )
+    context_digest = _harness_digest({
+        "conversation_id": conversation_id,
+        "message_id": message.message_id,
+        "workspace_id": workspace.workspace_id,
+        "workspace_revision": workspace.revision,
+        "context": context,
+    })
+    try:
+        result = await _agent_run_bridge(request).start(
+            HarnessRunRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace.workspace_id,
+                workspace_revision=workspace.revision,
+                trigger_id=body.client_input_id.hex,
+                user_input=body.content,
+                system_instruction=(
+                    "你是 PixelFlow 视频 Agent。当前工作区事实必须先遵循已加载 Skill 的指令，"
+                    "并使用受控 Tool 获取证据；不得猜测、编造或绕过 Tool Broker。"
+                ),
+                context_digest=context_digest,
+                model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+                context_budget_digest=_harness_digest(
+                    {"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32},
+                ),
+                run_limits_digest=_harness_digest(
+                    {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
+                ),
+                max_output_tokens=body.max_output_tokens,
+                **context,
+            ),
+        )
+    except GatewayHarnessSidecarError as error:
+        await _close_harness_admission_after_sidecar_failure(
+            request,
+            expected_revision=admission.revision,
+        )
         raise HTTPException(
             status_code=503,
-            detail={"code": "video_agent_quota_unavailable"},
-        ) from exc
-    except AgentRuntimeVideoQuotaConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "video_agent_quota_conflict"},
-        ) from exc
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-
-
-@router.get("/{conversation_id}/agent-events")
-async def stream_agent_events(
-    conversation_id: str,
-    request: Request,
-    cursor: str | None = Query(default=None),
-) -> StreamingResponse:
-    """按持久化 cursor 提供可断点续传的 SSE；未知 cursor 要求重载快照。"""
-
-    user_id = await get_current_user(request)
-    service = _agent_runtime_service(request)
-    try:
-        initial = await service.events_after(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            cursor=cursor,
-        )
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-    if initial is None:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "agent_runtime_cursor_unknown"},
-        )
-
-    async def event_stream():
-        current_cursor = cursor
-        pending = initial
-        idle_polls = 0
-        while True:
-            for event in pending:
-                current_cursor = event.cursor
-                payload = event.model_dump_json()
-                yield f"data: {payload}\n\n"
-            if await request.is_disconnected():
-                return
-            # 轮询 80ms；约 15 秒无事件发一次心跳，避免代理掐断长连接。
-            await asyncio.sleep(0.08)
-            try:
-                next_events = await service.events_after(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    cursor=current_cursor,
-                )
-            except (AgentRuntimeUnavailableError, LookupError):
-                return
-            if next_events is None:
-                yield ('event: reload_required\ndata: {"code":"agent_runtime_cursor_unknown"}\n\n')
-                return
-            pending = next_events
-            idle_polls = 0 if pending else idle_polls + 1
-            # 约 15s / 0.08s ≈ 188
-            if idle_polls >= 188:
-                yield ": heartbeat\n\n"
-                idle_polls = 0
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
+            detail={"code": "harness_run_unavailable_retryable"},
+        ) from error
+    if result.status != "accepted":
+        raise HTTPException(status_code=503, detail={"code": "harness_run_protocol_invalid"})
+    updated_message = await store.update_conversation_message(
+        conversation_id,
+        message.message_id,
+        user_id=user_id,
+        payload={
+            **message.payload,
+            "harness_run_id": result.run_id,
         },
     )
+    if updated_message is None:
+        raise HTTPException(status_code=503, detail={"code": "harness_input_message_unavailable"})
+    try:
+        bridge = _harness_run_bridge(request)
+        binding = await bridge.get_owned_binding(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=result.run_id,
+        )
+        await _harness_run_projector(request).start(harness=bridge, binding=binding)
+    except LookupError as error:
+        raise HTTPException(status_code=503, detail={"code": "harness_run_binding_unavailable"}) from error
+    return HarnessTurnStartResponse(
+        message_id=message.message_id,
+        run_id=result.run_id,
+        status="accepted",
+        workspace_revision=workspace.revision,
+    )
 
 
-@router.get(
-    "/{conversation_id}/turns/jobs/{run_id}",
-    response_model=AgentTurnJobResponse,
-)
-async def get_agent_turn_job(
+@router.get("/{conversation_id}/harness-runs/{run_id}/events")
+async def stream_harness_run_events(
     conversation_id: str,
     run_id: str,
     request: Request,
-) -> AgentTurnJobResponse:
-    """SSE 不可用时只轮询原 run，不重新创建 Turn。"""
+    after_sequence: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    """只向 Run owner 回放 Gateway 过滤后的 Sidecar 公开 SSE，不暴露 Harness 原始轨迹。"""
 
     user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     try:
-        result = await _agent_runtime_service(request).get_run(
+        projector = await _ensure_harness_projection(
+            request,
             user_id=user_id,
             conversation_id=conversation_id,
             run_id=run_id,
         )
-    except (AgentRuntimeUnavailableError, LookupError) as exc:
-        raise _runtime_http_exception(exc) from exc
-    if result is None:
-        raise HTTPException(status_code=404, detail="Turn run not found")
-    return result
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+    try:
+        await projector.events_after(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            after_sequence=after_sequence,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+
+    async def event_stream():
+        current_sequence = after_sequence
+        while True:
+            events = await projector.events_after(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                after_sequence=current_sequence,
+            )
+            for event in events:
+                current_sequence = event.sequence
+                yield f"id: {event.cursor}\nevent: {event.type}\ndata: {event.model_dump_json()}\n\n"
+            snapshot = await projector.snapshot(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+            )
+            if snapshot.status in {"completed", "failed"}:
+                return
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.08)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/{conversation_id}/harness-runs/{run_id}/snapshot")
+async def get_harness_run_snapshot(
+    conversation_id: str,
+    run_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """返回由 Gateway Outbox 与权威消息表构成的最小可恢复 Snapshot。"""
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        projector = await _ensure_harness_projection(
+            request,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+        return await projector.snapshot(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+
+
+@router.post("/{conversation_id}/harness-runs/{run_id}/recover")
+async def recover_harness_run(
+    conversation_id: str,
+    run_id: str,
+    request: Request,
+) -> dict[str, str | None]:
+    """基于权威消息/Workspace 创建新的 run_recovery，旧 Harness Session 永不续跑。"""
+
+    from pixelflow.agent_harness import GatewayHarnessSidecarError
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        projector = await _ensure_harness_projection(
+            request,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+    snapshot = await projector.snapshot(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    failure_requires_recovery = any(
+        event.type == "run.state_changed"
+        and event.payload.get("status") == "failed"
+        and event.payload.get("code") == "harness_run_recovery_required"
+        for event in snapshot.events
+    )
+    if not failure_requires_recovery:
+        raise HTTPException(status_code=409, detail={"code": "harness_run_recovery_not_required"})
+    bridge = _harness_run_bridge(request)
+    try:
+        result = await _harness_recovery_service(request).recover(
+            bridge=bridge,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            original_run_id=run_id,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+    except GatewayHarnessSidecarError as error:
+        raise HTTPException(status_code=503, detail={"code": "harness_recovery_unavailable_retryable"}) from error
+    if result.status == "manual_review":
+        raise HTTPException(status_code=409, detail={"code": "harness_recovery_manual_review_required"})
+    if result.recovery_run_id is None:
+        raise HTTPException(status_code=503, detail={"code": "harness_recovery_incomplete"})
+    binding = await bridge.get_owned_binding(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=result.recovery_run_id,
+    )
+    await projector.start(harness=bridge, binding=binding)
+    return {
+        "recovery_event_id": result.recovery_event_id,
+        "recovery_run_id": result.recovery_run_id,
+    }
 
 
 @router.get("", response_model=ConversationListResponse)
@@ -661,45 +741,6 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
     user_id = await get_current_user(request)
     fields = body.model_dump(exclude_unset=True)
     expected_revision = fields.pop("expected_revision", None)
-    replacement_context = fields.get("context")
-    pending_message_job = (
-        replacement_context.get(
-            "pendingMessageJob",
-            replacement_context.get("pending_message_job"),
-        )
-        if isinstance(replacement_context, dict)
-        else None
-    )
-    handoff_marker = _validated_runtime_handoff_marker(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        pending_message_job=pending_message_job,
-        replacement_context=replacement_context,
-    )
-    if handoff_marker is not None:
-        marker_client_input_id = uuid.UUID(
-            handoff_marker["client_input_id"],
-        )
-        if not await _agent_runtime_service(
-            request,
-        ).legacy_handoff_is_eligible(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            client_input_id=marker_client_input_id,
-        ):
-            handoff_marker = None
-    if handoff_marker is not None:
-        # 普通 context 替换和补偿 marker 由同一 Conversation Store
-        # 临界区提交；进程在后续 ack 前退出时，刷新仍可幂等续做。
-        fields["_agent_runtime_patch"] = {
-            "legacy_handoff": handoff_marker,
-        }
-        # 接力标记只用于本次 Controller 请求，不能作为业务快照长期暴露。
-        if isinstance(replacement_context, dict):
-            sanitized_context = dict(replacement_context)
-            sanitized_context.pop("legacy_handoff", None)
-            sanitized_context.pop("legacyHandoff", None)
-            fields["context"] = sanitized_context
     try:
         updated = await _task_store(request).update_conversation(
             conversation_id,
@@ -717,27 +758,6 @@ async def update_conversation(conversation_id: str, body: ConversationUpdateRequ
         ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if handoff_marker is not None:
-        try:
-            reconciled = await _agent_runtime_service(
-                request,
-            ).reconcile_pending_legacy_handoff(
-                user_id=user_id,
-                conversation_id=conversation_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - marker 已持久化，刷新时继续补偿
-            logger.warning(
-                "Agent Runtime 旧流程接力等待恢复：异常类型=%s",
-                type(exc).__name__,
-            )
-        else:
-            if reconciled:
-                refreshed = await _task_store(request).get_conversation(
-                    conversation_id,
-                    user_id=user_id,
-                )
-                if refreshed is not None:
-                    updated = refreshed
     return _conversation_response(updated)
 
 

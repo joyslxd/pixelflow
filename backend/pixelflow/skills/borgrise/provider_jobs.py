@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from pydantic import JsonValue
 
-from pixelflow.agent_runtime.jobs import ExistingJobService
+from pixelflow.operations.jobs import ExistingJobService
 
 logger = logging.getLogger(__name__)
 

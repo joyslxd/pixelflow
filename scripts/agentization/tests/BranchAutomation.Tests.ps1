@@ -850,23 +850,6 @@ Describe "Agent 分支自动化入口" {
         { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $topology.Repository -ModuleId "M03" -GateType "Final" -PlanOnly } | Should Throw
     }
 
-    It "M00 首次集成门禁只聚合 M00 范围命令" {
-        $plan = @(& (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M00" -GateType "Final" -PlanOnly)
-        $pythonCommand = @($plan | Where-Object { ($_.Arguments -contains "pytest") -and ($_.Arguments -contains "tests/test_agent_runtime_config.py") })
-        $webCommands = @($plan | Where-Object { $_.WorkingDirectory -eq (Join-Path $RepositoryRoot "web") })
-        $allArguments = @($plan | ForEach-Object { $_.Arguments }) -join " "
-
-        $pythonCommand.Count | Should Be 1
-        ($pythonCommand[0].Arguments -contains "tests/test_openapi_operation_ids.py") | Should Be $true
-        @($webCommands | Where-Object { $_.Arguments -contains "test:agent-runtime-contracts" }).Count | Should Be 1
-        @($webCommands | Where-Object { $_.Arguments -contains "test" }).Count | Should Be 1
-        @($webCommands | Where-Object { $_.Arguments -contains "lint" }).Count | Should Be 1
-        @($webCommands | Where-Object { $_.Arguments -contains "build-prod" }).Count | Should Be 1
-        ($allArguments -match "test_gateway_runtime_cleanup") | Should Be $false
-        ($allArguments -match "M0[1-9]|M1[0-3]") | Should Be $false
-        { & (Join-Path $AgentizationRoot "Invoke-AgentModuleGate.ps1") -RepositoryPath $RepositoryRoot -ModuleId "M00" -GateType "Final" -AdditionalGateScript "outside-m00.ps1" -PlanOnly } | Should Throw
-    }
-
     It "阶段集成把触发参数绑定到远端 checkpoint 元数据" {
         $topology = New-AutomationTestTopology
         $moduleBranch = Add-PhaseModuleCommit -Topology $topology -StatusSlice "M12.4"

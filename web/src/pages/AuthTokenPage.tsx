@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { api } from "@/lib/api";
 import { AUTHORIZATION_STORAGE_KEY, clearSavedAuthorization, getBrowserAuthorization, saveAuthorization } from "@/lib/authStorage";
 
 type CheckState =
@@ -34,7 +33,11 @@ export function AuthTokenPage() {
     setChecking(true);
     try {
       saveCurrentAuthorization();
-      const user = await api.getCurrentUser();
+      const response = await fetch("/agent/auth/me", {
+        headers: { Authorization: getBrowserAuthorization() },
+      });
+      if (!response.ok) throw new Error(`校验失败（${response.status}）`);
+      const user = await response.json() as { username?: string; id?: string };
       setState({ type: "success", message: `校验通过，当前 content-app 用户：${user.username || user.id}` });
     } catch (err) {
       setState({ type: "error", message: err instanceof Error ? err.message : String(err) });

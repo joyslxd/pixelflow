@@ -10,45 +10,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.profile_config import load_profile_config
-from pixelflow.agent_runtime.config import validate_agent_runtime_startup_config
+from pixelflow.platform.config import GatewayRuntimeSettings
 
-# 在导入会触发 DeerFlow/Skill 初始化副作用的 router 之前加载 profile YAML，
-# 确保 DeerFlow 使用 DEER_FLOW_CONFIG_PATH，不再回退查找旧 config.yaml。
+# 在导入 Gateway Router 前加载 PixelFlow profile YAML，确保启动配置只来自当前环境。
 load_profile_config()
-validate_agent_runtime_startup_config()
 
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import get_configured_cors_origins
-from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
-    agents,
-    artifacts,
-    assistants_compat,
     auth,
-    feedback,
-    mcp,
-    memory,
-    models,
+    internal_agent_tools,
     pixelflow_conversations,
-    pixelflow_image,
-    pixelflow_intake,
-    pixelflow_planning,
-    pixelflow_ppt,
-    pixelflow_preferences,
-    pixelflow_tasks,
-    runs,
-    skills,
-    suggestions,
-    thread_runs,
-    threads,
-    uploads,
 )
-from deerflow.config import app_config as deerflow_app_config
-from deerflow.config.app_config import apply_logging_level
-
-AppConfig = deerflow_app_config.AppConfig
-get_app_config = deerflow_app_config.get_app_config
 
 # 默认日志配置；lifespan 会根据当前 profile YAML 的 log_level 覆盖。
 logging.basicConfig(
@@ -155,11 +129,11 @@ def _configure_content_app_provider_services(
     import httpx
 
     from app.gateway.content_app_auth import get_content_app_auth_config
-    from pixelflow.agent_runtime.jobs import ProviderJobAdapter
     from pixelflow.jianying_draft import load_jianying_draft_runtime_config
     from pixelflow.jianying_draft.provider_jobs import (
         JianyingDraftProviderJobService,
     )
+    from pixelflow.operations.jobs import ProviderJobAdapter
     from pixelflow.skills.borgrise import (
         make_merge_video_job_service,
         make_quality_review_job_service,
@@ -260,16 +234,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # lifespan 入口再调用一次，保证测试或特殊 ASGI 加载路径也已经完成 profile 初始化。
     load_profile_config()
-    agent_runtime_config = validate_agent_runtime_startup_config()
 
-    # 启动时加载配置并检查必要环境变量。startup_config 是一次性启动快照，只用于
-    # 日志级别、LangGraph runtime 引擎和 channels 等必须重启才生效的基础设施。
-    # 请求期配置读取始终走 deps.get_config() -> get_app_config()，让当前 profile YAML
-    # 的可热加载字段可以在无需重启的情况下对请求生效。因此这里刻意不把 startup_config 缓存在
-    # app.state 上，避免破坏热加载边界。
     try:
-        startup_config = get_app_config()
-        apply_logging_level(startup_config.log_level)
+        startup_config = GatewayRuntimeSettings.from_env()
+        logger.setLevel(startup_config.log_level)
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -278,30 +246,63 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
-    # 初始化 LangGraph runtime 组件：StreamBridge、RunManager、checkpointer、store。
-    async with langgraph_runtime(app, startup_config):
-        logger.info("LangGraph runtime initialised")
+    # M1：仅启动 PixelFlow 自有持久化、Tool Broker 与 Sidecar Client。
+    if True:
 
-        from deerflow.persistence.engine import get_engine, get_session_factory
-        from pixelflow.memory import PowerMemService, load_power_mem_config_from_env
+        from pixelflow.long_term_memory import (
+            LongTermMemoryService,
+            VolcengineMem0Adapter,
+            load_long_term_memory_config_from_env,
+        )
+        from pixelflow.platform.persistence import (
+            close_engine as close_pixelflow_engine,
+        )
+        from pixelflow.platform.persistence import (
+            ensure_schema,
+        )
+        from pixelflow.platform.persistence import (
+            get_engine as get_pixelflow_engine,
+        )
+        from pixelflow.platform.persistence import (
+            get_session_factory as get_pixelflow_session_factory,
+        )
+        from pixelflow.platform.persistence import (
+            init_engine as init_pixelflow_engine,
+        )
         from pixelflow.tasks import MemoryPixelFlowTaskStore, SQLPixelFlowTaskStore
 
-        # SQLite/DeerFlow 复用旧库时不会自动执行 PixelFlow 业务 Alembic 迁移。
-        # 先幂等补齐对话列，再把同一 session factory 注入 Repository，避免新旧
-        # 对话接口在 ORM 查询阶段因缺列统一返回 500。
-        persistence_engine = get_engine()
+        pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
+        database_config = startup_config
+        if pixelflow_mysql_url:
+            persistence_engine = None
+        elif database_config.database_backend == "memory":
+            persistence_engine = None
+        else:
+            await init_pixelflow_engine(
+                backend=database_config.database_backend,
+                url=database_config.database_url,
+                echo=database_config.database_echo_sql,
+                pool_size=database_config.database_pool_size,
+                sqlite_dir=(
+                    database_config.database_sqlite_dir
+                    if database_config.database_backend == "sqlite"
+                    else ""
+                ),
+            )
+            persistence_engine = get_pixelflow_engine()
+
+        # PixelFlow 自有引擎必须先创建本领域表，再注入同一会话工厂给 Repository。
         if persistence_engine is not None:
+            from pixelflow.agent_tools.repository import ensure_sql_agent_tool_schema
             from pixelflow.tasks import ensure_sql_conversation_schema
 
+            await ensure_schema(persistence_engine)
             await ensure_sql_conversation_schema(persistence_engine)
+            await ensure_sql_agent_tool_schema(persistence_engine)
 
-        app.state.pixelflow_power_mem_service = PowerMemService(load_power_mem_config_from_env())
-        logger.info("PixelFlow semantic memory initialised: %s", app.state.pixelflow_power_mem_service.status_snapshot())
-        # Provider 关闭或配置缺失时仍注入安全不可用实现。
-        _configure_jianying_draft_service(app)
-        content_app_provider_client = _configure_content_app_provider_services(app)
+        # M1 已下线旧剪映与媒体 Provider；Gateway 不再装配或轮询旧业务 Client。
+        content_app_provider_client = None
 
-        pixelflow_mysql_url = os.environ.get("PIXELFLOW_MYSQL_URL", "").strip()
         if pixelflow_mysql_url:
             from pixelflow.preferences.mysql import make_mysql_preference_store
             from pixelflow.tasks.mysql import make_mysql_task_store
@@ -310,31 +311,47 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_preference_store, app.state.pixelflow_preference_mysql_engine = await make_mysql_preference_store(pixelflow_mysql_url)
             logger.info("PixelFlow task store initialised: mysql")
         else:
-            sf = get_session_factory()
+            sf = get_pixelflow_session_factory()
             from pixelflow.preferences import MemoryUserPreferenceStore, SQLUserPreferenceStore
 
             app.state.pixelflow_task_store = SQLPixelFlowTaskStore(sf) if sf is not None else MemoryPixelFlowTaskStore()
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
 
-        from pixelflow.agent_runtime.context import ContextBudgetPolicyProvider
-        from pixelflow.agent_runtime.conversation_router import ConversationRouteService
-        from pixelflow.agent_runtime.persistence import (
+        long_term_memory_config = load_long_term_memory_config_from_env()
+        long_term_memory_adapter = VolcengineMem0Adapter(long_term_memory_config)
+        app.state.pixelflow_long_term_memory_service = LongTermMemoryService(
+            long_term_memory_adapter,
+            long_term_memory_config,
+        )
+        logger.info("PixelFlow long-term memory initialised enabled=%s", long_term_memory_config.available)
+
+        from pixelflow.agent_control_plane.persistence import (
             MemoryCompactionQueueRepository,
             SQLCompactionQueueRepository,
         )
-        from pixelflow.agent_runtime.runtime_compaction import (
-            build_agent_context_compactor,
-        )
-        from pixelflow.agent_runtime.service import AgentRuntimeService
-        from pixelflow.video_agent.entrypoint import VideoAgentEntrypoint
-        from pixelflow.video_agent.runner import VideoAgentRunner
-        from pixelflow.video_agent.workspace import (
+        from pixelflow.video.workspace import (
             MemoryVideoAgentRepository,
             SQLVideoAgentRepository,
         )
 
         task_store = app.state.pixelflow_task_store
+        memory_outbox_session_factory = getattr(task_store, "session_factory", None)
+        if memory_outbox_session_factory is not None:
+            from pixelflow.long_term_memory.outbox import (
+                MemoryWriteWorker,
+                SQLWriteOutbox,
+            )
+
+            memory_write_worker = MemoryWriteWorker(
+                SQLWriteOutbox(memory_outbox_session_factory),
+                long_term_memory_adapter,
+                worker_id=f"gateway-memory:{os.getpid()}",
+            )
+            await memory_write_worker.start()
+            app.state.pixelflow_long_term_memory_write_worker = memory_write_worker
+        else:
+            app.state.pixelflow_long_term_memory_write_worker = None
         if isinstance(task_store, SQLPixelFlowTaskStore):
             agent_runtime_repository = SQLCompactionQueueRepository(
                 task_store.session_factory,
@@ -342,214 +359,84 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             video_agent_repository = SQLVideoAgentRepository(
                 task_store.session_factory,
             )
+            app.state.pixelflow_harness_video_repository = video_agent_repository
+            from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
+
+            app.state.pixelflow_agent_tool_broker = AgentToolBroker(
+                SQLAgentToolRepository(task_store.session_factory),
+                video_agent_repository,
+            )
+            from pixelflow.platform import HarnessSidecarSettings
+
+            harness_settings = HarnessSidecarSettings.from_env()
+            if harness_settings is not None:
+                from pixelflow.agent_harness import AgentHarnessSidecarClient
+                from pixelflow.agent_harness.projector import HarnessRunProjector
+
+                binding_repository = SQLAgentToolRepository(task_store.session_factory)
+                from pixelflow.agent_harness.admission import SQLHarnessAdmissionRepository
+
+                admission_repository = SQLHarnessAdmissionRepository(
+                    task_store.session_factory,
+                )
+                await admission_repository.initialize(
+                    initial_open=True,
+                    updated_by=harness_settings.instance_id,
+                )
+                app.state.pixelflow_harness_admission_repository = admission_repository
+                app.state.pixelflow_harness_run_bridge = AgentHarnessSidecarClient(
+                    base_url=harness_settings.base_url,
+                    gateway_jwt_signing_key=harness_settings.jwt_signing_key,
+                    gateway_instance_id=harness_settings.instance_id,
+                    repository=binding_repository,
+                    timeout_seconds=harness_settings.request_timeout_seconds,
+                )
+                app.state.pixelflow_harness_run_projector = HarnessRunProjector(
+                    binding_repository=binding_repository,
+                    event_repository=agent_runtime_repository,
+                    task_store=task_store,
+                )
+                from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
+
+                app.state.pixelflow_agent_run_bridge = AgentRunBridge(
+                    harness=app.state.pixelflow_harness_run_bridge,
+                    projector=app.state.pixelflow_harness_run_projector,
+                )
+                from pixelflow.agent_harness.recovery import HarnessRecoveryService
+
+                app.state.pixelflow_harness_recovery_service = HarnessRecoveryService(
+                    binding_repository=binding_repository,
+                    task_store=task_store,
+                    video_repository=video_agent_repository,
+                )
+            else:
+                app.state.pixelflow_harness_run_bridge = None
+                app.state.pixelflow_harness_run_projector = None
+                app.state.pixelflow_harness_recovery_service = None
+                app.state.pixelflow_harness_admission_repository = None
+                app.state.pixelflow_agent_run_bridge = None
         elif isinstance(task_store, MemoryPixelFlowTaskStore):
             agent_runtime_repository = MemoryCompactionQueueRepository()
             video_agent_repository = MemoryVideoAgentRepository(
                 event_repository=agent_runtime_repository,
             )
+            app.state.pixelflow_agent_tool_broker = None
+            app.state.pixelflow_harness_run_bridge = None
+            app.state.pixelflow_harness_video_repository = None
+            app.state.pixelflow_harness_run_projector = None
+            app.state.pixelflow_harness_recovery_service = None
+            app.state.pixelflow_harness_admission_repository = None
         else:
             # MySQL 对话 Store 尚无同事务 Runtime Repository，保持 R1 压缩并固定关闭V2执行。
             agent_runtime_repository = MemoryCompactionQueueRepository()
             video_agent_repository = None
-        video_agent_entrypoint = None
-        context_compactor = (
-            build_agent_context_compactor(
-                task_store=task_store,
-                repository=agent_runtime_repository,
-                app_config=startup_config,
-                agent_runtime_config=agent_runtime_config,
-            )
-            if agent_runtime_config.context_compaction_enabled
-            else None
-        )
-        from pixelflow.agent_runtime.jobs import (
-            ExistingJobService,
-            OperationRecoveryRuntime,
-            ProviderJobAdapter,
-        )
-        from pixelflow.video_agent.operation_resume import (
-            VideoAgentOperationResumer,
-            VideoAgentQuotaResumer,
-        )
-        from pixelflow.video_agent.runtime import make_video_agent_runtime_assembly
-        from pixelflow.video_agent.adapters.domain_jobs import (
-            make_generate_scene_assets_runner,
-            make_scene_assets_workspace_progress,
-        )
-        from pixelflow.skills import get_image_skill
-        from pixelflow.skills.base import is_quota_insufficient
-
-        live_clock = _GatewayClock()
-
-        def _optional_provider_adapter(
-            service: object,
-        ) -> ProviderJobAdapter | None:
-            """只包装符合M06合同的Service，构造期不触发Provider调用。"""
-
-            return (
-                ProviderJobAdapter(service)
-                if isinstance(service, ExistingJobService)
-                else None
-            )
-
-        video_agent_runtime = make_video_agent_runtime_assembly(
-            operation_repository=(
-                agent_runtime_repository
-                if video_agent_repository is not None
-                else None
-            ),
-            video_repository=video_agent_repository,
-            reference_adapter=getattr(
-                app.state,
-                "pixelflow_reference_analysis_provider_adapter",
-                None,
-            ),
-            scene_adapter=_optional_provider_adapter(
-                getattr(
-                    app.state,
-                    "pixelflow_generate_scene_video_job_service",
-                    None,
-                )
-            ),
-            merge_adapter=_optional_provider_adapter(
-                getattr(
-                    app.state,
-                    "pixelflow_merge_video_job_service",
-                    None,
-                )
-            ),
-            jianying_adapter=_optional_provider_adapter(
-                getattr(
-                    app.state,
-                    "pixelflow_jianying_draft_job_service",
-                    None,
-                )
-            ),
-            scene_assets_runner=make_generate_scene_assets_runner(
-                image_skill_factory=get_image_skill,
-                quota_checker=is_quota_insufficient,
-                workspace_progress=(
-                    make_scene_assets_workspace_progress(
-                        video_agent_repository,
-                        clock=live_clock.now,
-                    )
-                    if video_agent_repository is not None
-                    else None
-                ),
-            ),
-            lease_owner=f"gateway-video-agent:{os.getpid()}",
-            clock=live_clock.now,
-        )
-        app.state.pixelflow_video_agent_runtime = video_agent_runtime
-        native_invoker = None
-        video_agent_entrypoint = None
-        if video_agent_repository is not None:
-            from deerflow.config.memory_config import MemoryConfig
-            from deerflow.models import create_chat_model
-            from pixelflow.video_agent.native_invoke import NativeVideoAgentInvoker
-            from pixelflow.video_agent.skills import SkillCatalog
-
-            skill_catalog = SkillCatalog()
-            if (
-                video_agent_runtime.registry is not None
-                and video_agent_runtime.executor is not None
-            ):
-                native_invoker = NativeVideoAgentInvoker(
-                    model=create_chat_model(
-                        thinking_enabled=True,
-                        app_config=startup_config,
-                    ),
-                    registry=video_agent_runtime.registry,
-                    executor=video_agent_runtime.executor,
-                    video_repository=video_agent_repository,
-                    runtime_repository=agent_runtime_repository,
-                    skill_catalog=skill_catalog,
-                    checkpointer=getattr(app.state, "checkpointer", None),
-                    app_config=startup_config,
-                    memory_config=getattr(startup_config, "memory", None)
-                    or MemoryConfig(enabled=True),
-                )
-                video_agent_entrypoint = VideoAgentEntrypoint(
-                    runtime_repository=agent_runtime_repository,
-                    video_repository=video_agent_repository,
-                    native_invoker=native_invoker,
-                    clock=live_clock.now,
-                )
-        video_agent_runner = (
-            VideoAgentRunner(
-                repository=video_agent_repository,
-                native_invoker=native_invoker,
-            )
-            if video_agent_repository is not None and native_invoker is not None
-            else None
-        )
-        native_resume_handler = None
-        if native_invoker is not None and video_agent_repository is not None:
-            from pixelflow.video_agent.native_operation_resume import (
-                NativeOperationResumeHandler as _NativeOperationResumeHandler,
-            )
-
-            native_resume_handler = _NativeOperationResumeHandler(
-                repository=video_agent_repository,
-                native_invoker=native_invoker,
-            )
-        video_agent_operation_recovery = (
-            OperationRecoveryRuntime(
-                agent_runtime_repository,
-                resolver=video_agent_runtime.operation_resolver,
-                resumer=VideoAgentOperationResumer(
-                    repository=video_agent_repository,
-                    executor=video_agent_runtime.executor,
-                    native_resume=native_resume_handler,
-                ),
-                quota_resumer=VideoAgentQuotaResumer(
-                    repository=video_agent_repository,
-                ),
-                worker_id=f"gateway-video-agent:{os.getpid()}:recovery",
-                clock=live_clock.now,
-            )
-            if video_agent_repository is not None
-            and video_agent_runtime.executor is not None
-            and video_agent_runtime.operation_resolver is not None
-            else None
-        )
-        if video_agent_operation_recovery is not None:
-            await video_agent_operation_recovery.start()
-        app.state.pixelflow_video_agent_operation_recovery = (
-            video_agent_operation_recovery
-        )
-        app.state.pixelflow_agent_runtime_service = AgentRuntimeService(
-            config=agent_runtime_config,
-            repository=agent_runtime_repository,
-            task_store=task_store,
-            context_compactor=context_compactor,
-            video_agent_repository=video_agent_repository,
-            video_agent_entrypoint=video_agent_entrypoint,
-            video_agent_executor=video_agent_runtime.executor,
-            video_agent_runner=video_agent_runner,
-            operation_repository=agent_runtime_repository,
-            video_agent_operation_recovery=video_agent_operation_recovery,
-            conversation_router=ConversationRouteService(
-                budget_policy_provider=ContextBudgetPolicyProvider(
-                    agent_runtime_config.context_budget,
-                ),
-            ),
-            # 只有完整V2核心与独立Runner同时就绪时才接管新视频对话。
-            primary_execution_intents=("video",) if video_agent_runner is not None else (),
-        )
-        logger.info(
-            "PixelFlow Agent Runtime initialised: mode=%s rollout=%s primary_execution_intents=%s video_agent_ready=%s jianying_ready=%s",
-            agent_runtime_config.mode,
-            agent_runtime_config.new_conversation_rollout_percent,
-            sorted(
-                app.state.pixelflow_agent_runtime_service.primary_execution_intents,
-            ),
-            video_agent_runtime.ready,
-            video_agent_runtime.optional_capabilities.get(
-                "jianying_package",
-                False,
-            ),
-        )
+            app.state.pixelflow_agent_tool_broker = None
+            app.state.pixelflow_harness_run_bridge = None
+            app.state.pixelflow_harness_video_repository = None
+            app.state.pixelflow_harness_run_projector = None
+            app.state.pixelflow_harness_recovery_service = None
+            app.state.pixelflow_harness_admission_repository = None
+        # M1：旧 VideoAgent、Native Invoker 与其恢复 Worker 已删除；Run 仅经 Harness Sidecar。
 
         from pixelflow.tracing import configure_trace_sink
 
@@ -563,29 +450,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
-            pixelflow_agent_runtime_service = getattr(
+            pixelflow_harness_run_projector = getattr(
                 app.state,
-                "pixelflow_agent_runtime_service",
+                "pixelflow_harness_run_projector",
                 None,
             )
-            if pixelflow_agent_runtime_service is not None:
-                await pixelflow_agent_runtime_service.aclose()
-                logger.info("PixelFlow Agent Runtime closed")
-            pixelflow_video_agent_operation_recovery = getattr(
+            if pixelflow_harness_run_projector is not None:
+                await pixelflow_harness_run_projector.aclose()
+                logger.info("PixelFlow Harness Event Projector closed")
+            pixelflow_harness_run_bridge = getattr(
                 app.state,
-                "pixelflow_video_agent_operation_recovery",
+                "pixelflow_harness_run_bridge",
                 None,
             )
-            if pixelflow_video_agent_operation_recovery is not None:
-                await pixelflow_video_agent_operation_recovery.aclose()
-                logger.info("PixelFlow VideoAgent Operation恢复Worker已关闭")
-            pixelflow_jianying_draft_service = getattr(app.state, "pixelflow_jianying_draft_service", None)
-            if pixelflow_jianying_draft_service is not None:
-                await pixelflow_jianying_draft_service.aclose()
-                logger.info("PixelFlow Jianying draft service closed")
+            if pixelflow_harness_run_bridge is not None:
+                await pixelflow_harness_run_bridge.aclose()
+                logger.info("PixelFlow Harness Sidecar Client closed")
             if content_app_provider_client is not None:
                 await content_app_provider_client.aclose()
-                logger.info("PixelFlow reference analysis Provider client closed")
+                logger.info("PixelFlow 兼容 Provider client closed")
             pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
             if pixelflow_mysql_engine is not None:
                 await pixelflow_mysql_engine.dispose()
@@ -594,10 +477,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_preference_mysql_engine is not None:
                 await pixelflow_preference_mysql_engine.dispose()
                 logger.info("PixelFlow MySQL preference store closed")
-            pixelflow_power_mem_service = getattr(app.state, "pixelflow_power_mem_service", None)
-            if pixelflow_power_mem_service is not None:
-                await pixelflow_power_mem_service.aclose()
-                logger.info("PixelFlow semantic memory closed")
+            long_term_memory_service = getattr(
+                app.state,
+                "pixelflow_long_term_memory_service",
+                None,
+            )
+            if long_term_memory_service is not None:
+                await long_term_memory_service.aclose()
+            memory_write_worker = getattr(
+                app.state,
+                "pixelflow_long_term_memory_write_worker",
+                None,
+            )
+            if memory_write_worker is not None:
+                await memory_write_worker.aclose()
+            await close_pixelflow_engine()
+            logger.info("PixelFlow persistence engine closed")
             configure_trace_sink(None)
 
     logger.info("Shutting down API Gateway")
@@ -724,70 +619,14 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
         )
 
     # 挂载各业务 router。
-    # 模型 API：/agent/models。
-    app.include_router(models.router)
-
-    # MCP API：/agent/mcp。
-    app.include_router(mcp.router)
-
-    # Memory API：/agent/memory。
-    app.include_router(memory.router)
-
-    # Skills API：/agent/skills。
-    app.include_router(skills.router)
-
-    # Artifacts API：/agent/threads/{thread_id}/artifacts。
-    app.include_router(artifacts.router)
-
-    # Uploads API：/agent/threads/{thread_id}/uploads。
-    app.include_router(uploads.router)
-
-    # Thread 管理 API：/agent/threads/{thread_id}。
-    app.include_router(threads.router)
-
-    # 自定义 Agents API：/agent/agents。
-    app.include_router(agents.router)
-
-    # Suggestions API：/agent/threads/{thread_id}/suggestions。
-    app.include_router(suggestions.router)
-
-    # Assistants 兼容 API：LangGraph Platform stub。
-    app.include_router(assistants_compat.router)
-
     # Auth API：只保留 /agent/auth/me，用于查看 content-app 当前用户。
     app.include_router(auth.router)
 
-    # Feedback API：/agent/threads/{thread_id}/runs/{run_id}/feedback。
-    app.include_router(feedback.router)
-
-    # Thread Runs API：兼容 LangGraph Platform 的 runs 生命周期。
-    app.include_router(thread_runs.router)
-
-    # Stateless Runs API：无需预先存在 thread 的 stream/wait。
-    app.include_router(runs.router)
-
-    # PixelFlow Agent 工作流 API：/agent/flows。
-    app.include_router(pixelflow_tasks.router)
-
-    # PixelFlow 采集表单和创意方向 API：/agent/flows/intake。
-    app.include_router(pixelflow_intake.router)
-
-    # PixelFlow 策划 plan.md API：/agent/flows/planning。
-    app.include_router(pixelflow_planning.router)
-
-    # PixelFlow 图片生成准备 API：/agent/flows/image。
-    app.include_router(pixelflow_image.router)
-
-    # PixelFlow 智能 PPT 生成 API：/agent/flows/ppt。
-    app.include_router(pixelflow_ppt.router)
-
-    # P0-5：旧 /agent/flows/video* 与剪映 Job HTTP 路由模块已物理删除。
-
-    # PixelFlow 对话历史 API：/agent/conversations。
+    # PixelFlow 对话与 Harness Run API：/agent/conversations。
     app.include_router(pixelflow_conversations.router)
 
-    # PixelFlow 结构化偏好 API：/agent/users/{user_id}/preferences。
-    app.include_router(pixelflow_preferences.router)
+    # 仅 Sidecar 服务身份可调用的 Capability Tool Broker：/agent/internal/agent-tools。
+    app.include_router(internal_agent_tools.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
@@ -795,7 +634,7 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
 
         返回服务健康状态。
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        return {"status": "healthy", "service": "pixelflow-gateway"}
 
     return app
 

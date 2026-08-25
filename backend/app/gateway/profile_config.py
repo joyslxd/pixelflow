@@ -44,22 +44,6 @@ class LoadedProfileConfig:
 
 _loaded_profile: LoadedProfileConfig | None = None
 _managed_env_keys: set[str] = set()
-_AGENT_RUNTIME_PROFILE_FIELDS = {
-    "mode",
-    "enabled_intents",
-    "new_conversation_rollout_percent",
-    "context_compaction_enabled",
-    "context_budget",
-    "compaction_retry_backoff_seconds",
-}
-_AGENT_RUNTIME_CONTEXT_BUDGET_FIELDS = {
-    "effective_context_k",
-    "output_reserve_k",
-    "safety_reserve_k",
-    "require_verified_model_profile",
-}
-
-
 # YAML 路径 -> 环境变量名映射表。
 #
 # 左侧是面向用户阅读的分组配置，右侧是现有 Python 代码实际读取的 env key。
@@ -70,63 +54,12 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("gateway", "port"): "GATEWAY_PORT",
     ("gateway", "enable_docs"): "GATEWAY_ENABLE_DOCS",
     ("gateway", "cors_origins"): "GATEWAY_CORS_ORIGINS",
-    ("pixelflow", "agent_runtime", "mode"): "PIXELFLOW_AGENT_RUNTIME_MODE",
-    ("pixelflow", "agent_runtime", "enabled_intents"): "PIXELFLOW_AGENT_RUNTIME_ENABLED_INTENTS",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "new_conversation_rollout_percent",
-    ): "PIXELFLOW_AGENT_RUNTIME_NEW_CONVERSATION_ROLLOUT_PERCENT",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "context_compaction_enabled",
-    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_COMPACTION_ENABLED",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "context_budget",
-        "effective_context_k",
-    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_EFFECTIVE_K",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "context_budget",
-        "output_reserve_k",
-    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_OUTPUT_RESERVE_K",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "context_budget",
-        "safety_reserve_k",
-    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_SAFETY_RESERVE_K",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "context_budget",
-        "require_verified_model_profile",
-    ): "PIXELFLOW_AGENT_RUNTIME_CONTEXT_REQUIRE_VERIFIED_MODEL_PROFILE",
-    (
-        "pixelflow",
-        "agent_runtime",
-        "compaction_retry_backoff_seconds",
-    ): "PIXELFLOW_AGENT_RUNTIME_COMPACTION_RETRY_BACKOFF_SECONDS",
     ("pixelflow", "mysql_url"): "PIXELFLOW_MYSQL_URL",
-    ("pixelflow", "mem0_enabled"): "PIXELFLOW_MEM0_ENABLED",
-    ("pixelflow", "semantic_memory_enabled"): "PIXELFLOW_SEMANTIC_MEMORY_ENABLED",
-    ("pixelflow", "semantic_memory_provider"): "PIXELFLOW_SEMANTIC_MEMORY_PROVIDER",
-    ("pixelflow", "powermem_base_url"): "PIXELFLOW_POWERMEM_BASE_URL",
-    ("pixelflow", "powermem_api_key"): "PIXELFLOW_POWERMEM_API_KEY",
-    ("pixelflow", "powermem_timeout_seconds"): "PIXELFLOW_POWERMEM_TIMEOUT_SECONDS",
-    ("pixelflow", "powermem_record_timeout_seconds"): "PIXELFLOW_POWERMEM_RECORD_TIMEOUT_SECONDS",
-    ("pixelflow", "powermem_search_limit"): "PIXELFLOW_POWERMEM_SEARCH_LIMIT",
-    ("pixelflow", "powermem_write_enabled"): "PIXELFLOW_POWERMEM_WRITE_ENABLED",
-    ("pixelflow", "powermem_fail_open"): "PIXELFLOW_POWERMEM_FAIL_OPEN",
-    ("pixelflow", "media_skill"): "PIXELFLOW_MEDIA_SKILL",
-    ("pixelflow", "edit_skill"): "PIXELFLOW_EDIT_SKILL",
-    ("pixelflow", "draft_root"): "PIXELFLOW_DRAFT_ROOT",
-    ("pixelflow", "render_root"): "PIXELFLOW_RENDER_ROOT",
-    ("pixelflow", "caption_font"): "PIXELFLOW_CAPTION_FONT",
+    ("pixelflow", "long_term_memory_enabled"): "PIXELFLOW_LONG_TERM_MEMORY_ENABLED",
+    ("pixelflow", "volcengine_mem0_base_url"): "PIXELFLOW_VOLCENGINE_MEM0_BASE_URL",
+    ("pixelflow", "volcengine_mem0_api_key"): "PIXELFLOW_VOLCENGINE_MEM0_API_KEY",
+    ("pixelflow", "long_term_memory_timeout_seconds"): "PIXELFLOW_LONG_TERM_MEMORY_TIMEOUT_SECONDS",
+    ("pixelflow", "long_term_memory_search_limit"): "PIXELFLOW_LONG_TERM_MEMORY_SEARCH_LIMIT",
     ("pixelflow", "jianying_draft_enabled"): "PIXELFLOW_JIANYING_DRAFT_ENABLED",
     ("pixelflow", "jianying_draft_base_url"): "PIXELFLOW_JIANYING_DRAFT_BASE_URL",
     ("pixelflow", "jianying_draft_token"): "PIXELFLOW_JIANYING_DRAFT_TOKEN",
@@ -137,35 +70,18 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("pixelflow", "jianying_draft_create_read_timeout_seconds"): "PIXELFLOW_JIANYING_DRAFT_CREATE_READ_TIMEOUT_SECONDS",
     ("pixelflow", "jianying_draft_query_read_timeout_seconds"): "PIXELFLOW_JIANYING_DRAFT_QUERY_READ_TIMEOUT_SECONDS",
     ("pixelflow", "content_app_internal_upload_enabled"): "PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED",
-    ("borgrise", "base_url"): "BORGRISE_BASE_URL",
-    ("borgrise", "remote_verify_enabled"): "BORGRISE_REMOTE_VERIFY_ENABLED",
-    ("borgrise", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",
-    ("borgrise", "skip_ssl_verify"): "BORGRISE_SKIP_SSL_VERIFY",
-    ("borgrise", "video_poll_timeout"): "BORGRISE_VIDEO_POLL_TIMEOUT",
-    ("borgrise", "video_merge_request_timeout"): "BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT",
-    ("borgrise", "image_poll_timeout"): "BORGRISE_IMAGE_POLL_TIMEOUT",
-    ("borgrise", "video_analysis_poll_timeout"): "BORGRISE_VIDEO_ANALYSIS_POLL_TIMEOUT",
-    ("borgrise", "max_retries"): "BORGRISE_MAX_RETRIES",
-    ("deerflow", "environment"): "DEER_FLOW_ENV",
-    ("deerflow", "home"): "DEER_FLOW_HOME",
-    ("deerflow", "project_root"): "DEER_FLOW_PROJECT_ROOT",
-    ("deerflow", "host_base_dir"): "DEER_FLOW_HOST_BASE_DIR",
-    ("deerflow", "host_skills_path"): "DEER_FLOW_HOST_SKILLS_PATH",
-    ("deerflow", "skills_path"): "DEER_FLOW_SKILLS_PATH",
-    ("deerflow", "extensions_config_path"): "DEER_FLOW_EXTENSIONS_CONFIG_PATH",
-    ("deerflow", "sandbox_bind_host"): "DEER_FLOW_SANDBOX_BIND_HOST",
-    ("deerflow", "sandbox_host"): "DEER_FLOW_SANDBOX_HOST",
-    ("tracing", "langsmith", "enabled"): "LANGSMITH_TRACING",
-    ("tracing", "langsmith", "api_key"): "LANGSMITH_API_KEY",
-    ("tracing", "langsmith", "project"): "LANGSMITH_PROJECT",
-    ("tracing", "langsmith", "endpoint"): "LANGSMITH_ENDPOINT",
-    ("tracing", "langfuse", "enabled"): "LANGFUSE_TRACING",
-    ("tracing", "langfuse", "public_key"): "LANGFUSE_PUBLIC_KEY",
-    ("tracing", "langfuse", "secret_key"): "LANGFUSE_SECRET_KEY",
-    ("tracing", "langfuse", "base_url"): "LANGFUSE_BASE_URL",
-    ("third_party", "serper_api_key"): "SERPER_API_KEY",
-    ("third_party", "jina_api_key"): "JINA_API_KEY",
-    ("third_party", "infoquest_api_key"): "INFOQUEST_API_KEY",
+    ("database", "backend"): "PIXELFLOW_DATABASE_BACKEND",
+    ("database", "sqlite_dir"): "PIXELFLOW_DATABASE_SQLITE_DIR",
+    ("database", "url"): "PIXELFLOW_DATABASE_URL",
+    ("database", "echo_sql"): "PIXELFLOW_DATABASE_ECHO_SQL",
+    ("database", "pool_size"): "PIXELFLOW_DATABASE_POOL_SIZE",
+    ("harness", "sidecar_base_url"): "PIXELFLOW_HARNESS_SIDECAR_BASE_URL",
+    ("harness", "gateway_instance_id"): "PIXELFLOW_GATEWAY_INSTANCE_ID",
+    ("harness", "request_timeout_seconds"): "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS",
+    ("content_app", "base_url"): "BORGRISE_BASE_URL",
+    ("content_app", "remote_verify_enabled"): "BORGRISE_REMOTE_VERIFY_ENABLED",
+    ("content_app", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",
+    ("content_app", "skip_ssl_verify"): "BORGRISE_SKIP_SSL_VERIFY",
 }
 
 
@@ -222,7 +138,7 @@ def _set_env(key: str, value: Any) -> None:
     在 ``_managed_env_keys``，后续测试重置或重复加载时可以识别。
     """
     # YAML 中的空字符串表示“使用代码默认值/自动推断”，不写入环境变量。
-    # 这样像 deerflow.project_root: "" 这类配置不会覆盖加载器推断出的 backend 根目录。
+    # 空字符串保持代码默认值，不覆盖启动时推断出的项目目录或运行配置。
     if value == "":
         return
     if key in os.environ and key not in _managed_env_keys:
@@ -238,49 +154,6 @@ def _apply_known_mappings(data: dict[str, Any]) -> None:
         if value is not None:
             _set_env(env_key, value)
 
-
-def _validate_agent_runtime_profile(data: dict[str, Any]) -> None:
-    """区分配置缺失与显式空值，防止 Agent Runtime 静默回退默认值。"""
-
-    pixelflow = data.get("pixelflow")
-    if not isinstance(pixelflow, dict) or "agent_runtime" not in pixelflow:
-        return
-    runtime = pixelflow["agent_runtime"]
-    if not isinstance(runtime, dict):
-        raise ValueError("pixelflow.agent_runtime 必须是 YAML 对象")
-    unknown_fields = set(runtime) - _AGENT_RUNTIME_PROFILE_FIELDS
-    if unknown_fields:
-        unknown_text = ", ".join(sorted(str(field) for field in unknown_fields))
-        raise ValueError(f"pixelflow.agent_runtime 包含不支持的配置键：{unknown_text}")
-    if "context_budget" in runtime and not isinstance(
-        runtime["context_budget"],
-        dict,
-    ):
-        raise ValueError("pixelflow.agent_runtime.context_budget 必须是 YAML 对象")
-    for field_name, value in runtime.items():
-        if value is None or value == "":
-            raise ValueError(f"pixelflow.agent_runtime.{field_name} 不能是 null 或空字符串")
-        if field_name == "enabled_intents" and not isinstance(value, list):
-            raise ValueError("pixelflow.agent_runtime.enabled_intents 必须是 YAML 数组")
-    context_budget = runtime.get("context_budget")
-    if context_budget is not None:
-        unknown_budget_fields = (
-            set(context_budget) - _AGENT_RUNTIME_CONTEXT_BUDGET_FIELDS
-        )
-        if unknown_budget_fields:
-            unknown_text = ", ".join(
-                sorted(str(field) for field in unknown_budget_fields)
-            )
-            raise ValueError(
-                "pixelflow.agent_runtime.context_budget 包含不支持的配置键："
-                f"{unknown_text}"
-            )
-        for field_name, value in context_budget.items():
-            if value is None or value == "":
-                raise ValueError(
-                    "pixelflow.agent_runtime.context_budget."
-                    f"{field_name} 不能是 null 或空字符串"
-                )
 
 
 def _apply_extra_environment(data: dict[str, Any]) -> None:
@@ -315,16 +188,6 @@ def load_profile_config() -> LoadedProfileConfig:
     path = path.resolve()
     data = _read_yaml(path)
 
-    # 让 DeerFlow harness 也读取同一份 profile YAML。这个 YAML 同时包含
-    # AppConfig 需要的 sandbox/models/database 等字段，因此不再依赖旧 config.yaml。
-    _set_env("DEER_FLOW_CONFIG_PATH", str(path))
-
-    # 如果用户没有显式指定项目根目录，则使用 profile 文件所在目录。这样从仓库根目录
-    # 或 IDE 启动时，skills、.deer-flow 等相对路径仍然落在 backend 下。
-    if "DEER_FLOW_PROJECT_ROOT" not in os.environ:
-        _set_env("DEER_FLOW_PROJECT_ROOT", str(path.parent))
-
-    _validate_agent_runtime_profile(data)
     _apply_known_mappings(data)
     _apply_extra_environment(data)
 

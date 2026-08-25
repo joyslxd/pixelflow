@@ -4,7 +4,7 @@
 content-app JWT 本地解析和远程 ``/api/auth/verify`` 校验后，会把当前用户写入
 ``request.state.user``、``request.state.auth`` 以及两个 ContextVar：
 
-- ``deerflow.runtime.user_context``：给 Repository owner 过滤使用。
+- ``pixelflow.platform.auth_context``：给 Repository owner 过滤使用。
 - ``content_app_auth_context``：给后续 Borgrise/content-app HTTP 调用透传原始 token。
 
 更细粒度的资源权限检查仍由 ``authz.py`` 装饰器负责。
@@ -20,7 +20,7 @@ from starlette.types import ASGIApp
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
 from app.gateway.content_app_auth_context import reset_current_content_app_auth, set_current_content_app_auth
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from pixelflow.platform.auth_context import reset_current_user, set_current_user
 from pixelflow.tracing import set_conversation_id_context
 
 # 永远不需要认证的路径前缀。
@@ -33,6 +33,9 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
 
 # 当前登录态完全来自 content-app；pixelflow 不再公开本地登录、注册、初始化接口。
 _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset()
+_INTERNAL_SERVICE_PATH_PREFIXES: tuple[str, ...] = (
+    "/agent/internal/agent-tools",
+)
 
 
 def _is_public(path: str) -> bool:
@@ -40,6 +43,15 @@ def _is_public(path: str) -> bool:
     if stripped in _PUBLIC_EXACT_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
+
+
+def _is_internal_service_path(path: str) -> bool:
+    """仅绕过终端用户 JWT；目标 Router 仍必须校验独立 Sidecar 服务身份。"""
+
+    return any(
+        path == prefix or path.startswith(f"{prefix}/")
+        for prefix in _INTERNAL_SERVICE_PATH_PREFIXES
+    )
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -51,7 +63,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     2. 再通过 ``get_current_user_from_request`` 严格校验 content-app JWT 和用户
        实时状态；token 伪造、过期、用户禁用都会在这里拒绝。
 
-    成功后会写 ``request.state.user`` 和 ``deerflow.runtime.user_context``，让下游
+    成功后会写 ``request.state.user`` 和 ``pixelflow.platform.auth_context``，让下游
     仓储 owner 过滤生效，不需要每个 route 都加 ``@require_auth``。需要资源级授权
     的接口，例如“用户 A 不能靠猜 URL 读取用户 B 的 thread”，仍应额外使用
     ``@require_permission(..., owner_check=True)``。
@@ -61,7 +73,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(request.url.path):
+        if _is_public(request.url.path) or _is_internal_service_path(request.url.path):
             return await call_next(request)
 
         authorization = request.headers.get("Authorization")

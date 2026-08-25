@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pixelflow.video_agent.operations.projector import (
+from pixelflow.video.adapters.operations.projector import (
     build_scene_generation_success_patch,
     count_polling_scene_generation_jobs,
 )
-
 
 NOW = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
 
@@ -165,7 +164,7 @@ def test_build_scene_generation_success_patch_is_idempotent() -> None:
 
 
 def test_build_scene_generation_failure_patch_records_error() -> None:
-    from pixelflow.video_agent.operations.projector import (
+    from pixelflow.video.adapters.operations.projector import (
         build_scene_generation_failure_patch,
     )
 
@@ -202,4 +201,3 @@ def test_build_scene_generation_failure_patch_records_error() -> None:
     assert scene["generation_jobs"][0]["error"] == "供应商任务执行失败。"
     assert patch["scene_video_progress"]["completed"] == 1
     assert patch["scene_video_progress"]["total"] == 1
-

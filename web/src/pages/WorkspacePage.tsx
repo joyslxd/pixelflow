@@ -1,5 +1,5 @@
-import { VideoAgentWorkspace } from "@/features/video-agent/VideoAgentWorkspace";
+import { AgentWorkspace } from "@/features/agent-runtime/AgentWorkspace";
 
 export function WorkspacePage() {
-  return <VideoAgentWorkspace />;
+  return <AgentWorkspace />;
 }

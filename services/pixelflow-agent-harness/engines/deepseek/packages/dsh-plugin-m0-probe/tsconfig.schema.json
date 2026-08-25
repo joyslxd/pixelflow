@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "compilerOptions": {
+      "properties": {
+        "target": { "description": "用途：指定生成 JavaScript 的目标版本；影响：改变探针可使用的语法。" },
+        "module": { "description": "用途：指定模块输出格式；影响：必须与测试 Loader 的 ESM 方式一致。" },
+        "moduleResolution": { "description": "用途：指定依赖解析规则；影响：改变测试依赖的解析结果。" },
+        "outDir": { "description": "用途：指定探针构建目录；影响：仅影响测试产物位置。" },
+        "rootDir": { "description": "用途：限定探针源码根目录；影响：根外文件不会参与构建。" },
+        "strict": { "description": "用途：开启严格类型检查；影响：取值为 true 时类型错误阻断构建。" },
+        "declaration": { "description": "用途：生成类型声明文件；影响：取值为 true 时构建产物包含 d.ts。" },
+        "skipLibCheck": { "description": "用途：跳过第三方声明检查；影响：缩短测试构建时间。" }
+      }
+    },
+    "include": {
+      "items": { "description": "用途：限定探针参与编译的源码 glob；影响：未匹配文件不进入构建。" }
+    }
+  }
+}

@@ -53,12 +53,7 @@ function Invoke-GateProcess {
 
 $root = Resolve-AgentRepositoryRoot -RepositoryPath $RepositoryPath
 if ($ModuleId -eq "M00") {
-    if ($GateType -ne "Final") {
-        throw "M00-I.1 只允许执行 Final 门禁。"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($AdditionalGateScript)) {
-        throw "M00-I.1 禁止追加范围外门禁脚本。"
-    }
+    throw "M00 已迁移到 Python 门禁，请执行 scripts/agentization/m00_local_gate.py。"
 }
 else {
     Get-AgentModuleDefinition -ModuleId $ModuleId | Out-Null
@@ -69,7 +64,7 @@ if ($GateType -eq "Phase") {
     }
 }
 
-$backendModuleIds = @("M00", "M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M11", "M13")
+$backendModuleIds = @("M00-A", "M01", "M02", "M03", "M04", "M05", "M06", "M11", "M13")
 $pythonExecutable = $null
 if ($backendModuleIds -contains $ModuleId) {
     $pythonExecutable = Resolve-AgentPythonExecutable -RepositoryPath $root
@@ -89,16 +84,7 @@ if ($pythonExecutable) {
         }
     )
 }
-if ($ModuleId -eq "M00") {
-    $commands.Add([pscustomobject]@{ WorkingDirectory = $root; FilePath = "powershell"; Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`$r=Invoke-Pester -Script 'scripts/agentization/tests' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_agent_runtime_config.py", "tests/test_gateway_app_import_profile.py", "tests/test_profile_config.py", "tests/test_openapi_operation_ids.py", "-q") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", "pixelflow/agent_runtime", "app/gateway/profile_config.py", "app/gateway/app.py", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_agent_runtime_config.py", "tests/test_gateway_app_import_profile.py", "tests/test_profile_config.py", "tests/test_openapi_operation_ids.py") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test:agent-runtime-contracts") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "test") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "lint") })
-    $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "web"); FilePath = "corepack"; Arguments = @("pnpm", "build-prod") })
-}
-elseif ($ModuleId -eq "M00-A") {
+if ($ModuleId -eq "M00-A") {
     $commands.Add([pscustomobject]@{ WorkingDirectory = $root; FilePath = "powershell"; Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "`$r=Invoke-Pester -Script 'scripts/agentization/tests' -PassThru; if (`$r.FailedCount -gt 0) { exit 1 }") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "pytest", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py", "tests/test_openapi_operation_ids.py", "-q") })
     $commands.Add([pscustomobject]@{ WorkingDirectory = (Join-Path $root "backend"); FilePath = $pythonExecutable; Arguments = @("-m", "ruff", "check", "pixelflow/agent_runtime", "tests/test_agent_runtime_contracts.py", "tests/test_agent_runtime_legacy_invariants.py") })

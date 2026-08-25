@@ -10,9 +10,7 @@ PixelFlow 运行时登录已经统一交给 content-app，网关只接收
 """
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
-from app.gateway.auth.jwt import create_access_token, decode_token
 from app.gateway.auth.models import User, UserResponse
-from app.gateway.auth.password import hash_password, verify_password
 
 __all__ = [
     # 错误响应：AuthMiddleware/deps 仍复用这些结构返回稳定 JSON。
@@ -22,9 +20,4 @@ __all__ = [
     # 用户模型：authz.AuthContext 仍把它作为类型使用。
     "User",
     "UserResponse",
-    # 与原 auth 包兼容：单测和部分历史模块仍从该入口导入认证原语。
-    "create_access_token",
-    "decode_token",
-    "hash_password",
-    "verify_password",
 ]

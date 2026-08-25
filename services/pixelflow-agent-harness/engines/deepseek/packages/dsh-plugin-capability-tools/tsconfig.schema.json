@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "compilerOptions": {
+      "properties": {
+        "target": { "description": "用途：指定生成 JavaScript 的目标版本；影响：改变可用语法与运行时兼容性。" },
+        "module": { "description": "用途：指定模块输出格式；影响：必须与 Harness 的 ESM Loader 保持一致。" },
+        "moduleResolution": { "description": "用途：指定依赖解析规则；影响：改变 npm 包导入的解析结果。" },
+        "outDir": { "description": "用途：指定编译产物目录；影响：Cordis 从该目录加载 Plugin。" },
+        "rootDir": { "description": "用途：限定 TypeScript 源码根目录；影响：根外文件不会进入构建产物。" },
+        "strict": { "description": "用途：开启严格类型检查；影响：取值为 true 时类型错误阻断构建。" },
+        "declaration": { "description": "用途：生成类型声明文件；影响：取值为 true 时发布产物包含 d.ts。" },
+        "skipLibCheck": { "description": "用途：跳过第三方声明文件检查；影响：缩短本地构建但不放宽业务源码检查。" }
+      }
+    },
+    "include": {
+      "items": { "description": "用途：限定参与编译的源码 glob；影响：未匹配文件不会被 TypeScript 检查或输出。" }
+    }
+  }
+}
