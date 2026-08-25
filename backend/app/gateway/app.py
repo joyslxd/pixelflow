@@ -41,193 +41,6 @@ class _GatewayClock:
         return datetime.now(UTC)
 
 
-def _build_jianying_draft_skill(runtime_config):
-    """按内部开关与 Provider 配置选择剪映草稿 Skill。"""
-
-    from pixelflow.jianying_draft import (
-        DisabledJianyingDraftSkill,
-        HttpJianyingDraftSkill,
-        MissingProviderJianyingDraftSkill,
-    )
-
-    if not runtime_config.enabled:
-        return DisabledJianyingDraftSkill()
-
-    if runtime_config.base_url and runtime_config.token:
-        return HttpJianyingDraftSkill(
-            base_url=runtime_config.base_url,
-            token=runtime_config.token,
-            poll_interval_seconds=runtime_config.poll_interval_seconds,
-            max_retries=runtime_config.max_retries,
-            connect_timeout_seconds=runtime_config.connect_timeout_seconds,
-            create_read_timeout_seconds=runtime_config.create_read_timeout_seconds,
-            query_read_timeout_seconds=runtime_config.query_read_timeout_seconds,
-        )
-
-    logger.warning("PixelFlow Jianying draft is enabled but Provider URL/token is incomplete; using unavailable skill")
-    return MissingProviderJianyingDraftSkill()
-
-
-def _configure_jianying_draft_service(app: FastAPI) -> None:
-    """按 profile 环境变量注入剪映草稿 Service 与轮询合同参数。"""
-
-    from pixelflow.jianying_draft import (
-        JianyingDraftService,
-        load_jianying_draft_runtime_config,
-    )
-
-    runtime_config = load_jianying_draft_runtime_config()
-    app.state.pixelflow_jianying_draft_service = JianyingDraftService(
-        skill=_build_jianying_draft_skill(runtime_config),
-        timeout_seconds=runtime_config.timeout_seconds,
-        max_retries=runtime_config.max_retries,
-        poll_interval_seconds=runtime_config.poll_interval_seconds,
-    )
-    app.state.jianying_draft_poll_interval_seconds = runtime_config.poll_interval_seconds
-
-
-def _status_service_authorization_from_env() -> str:
-    """即时读取服务状态凭据，禁止把值缓存到Gateway对象或日志。
-
-    优先读 PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION_FILE（每次轮询重读，
-    便于本地刷新 JWT 后无需重启网关）；否则读环境变量。
-    """
-
-    authorization = ""
-    file_path = os.environ.get(
-        "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION_FILE",
-        "",
-    ).strip()
-    if file_path:
-        try:
-            with open(file_path, encoding="utf-8") as handle:
-                authorization = handle.read().strip()
-        except OSError:
-            authorization = ""
-    if not authorization:
-        authorization = os.environ.get(
-            "PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION",
-            "",
-        ).strip()
-    if authorization and not authorization.startswith("Bearer "):
-        authorization = f"Bearer {authorization}"
-    if (
-        not authorization.startswith("Bearer ")
-        or len(authorization) <= len("Bearer ")
-        or "\r" in authorization
-        or "\n" in authorization
-    ):
-        raise RuntimeError("content_app_status_authorization_unavailable")
-    return authorization
-
-
-def _configure_content_app_provider_services(
-    app: FastAPI,
-):
-    """仅在独立服务Authorization存在时装配可恢复content-app Client。"""
-
-    import httpx
-
-    from app.gateway.content_app_auth import get_content_app_auth_config
-    from pixelflow.jianying_draft import load_jianying_draft_runtime_config
-    from pixelflow.jianying_draft.provider_jobs import (
-        JianyingDraftProviderJobService,
-    )
-    from pixelflow.operations.jobs import ProviderJobAdapter
-    from pixelflow.skills.borgrise import (
-        make_merge_video_job_service,
-        make_quality_review_job_service,
-        make_reference_analysis_job_service,
-        make_scene_video_job_service,
-    )
-
-    try:
-        _status_service_authorization_from_env()
-    except RuntimeError:
-        app.state.pixelflow_reference_analysis_job_service = None
-        app.state.pixelflow_reference_analysis_provider_adapter = None
-        app.state.pixelflow_generate_scene_video_job_service = None
-        app.state.pixelflow_merge_video_job_service = None
-        app.state.pixelflow_quality_review_job_service = None
-        app.state.pixelflow_jianying_draft_job_service = None
-        app.state.pixelflow_reference_analysis_provider_reason = (
-            "content_app_status_authorization_unavailable"
-        )
-        return None
-
-    config = get_content_app_auth_config()
-    client = httpx.AsyncClient(
-        timeout=config.verify_timeout_seconds,
-        verify=not config.skip_ssl_verify,
-    )
-    service = make_reference_analysis_job_service(
-        client=client,
-        base_url=config.base_url,
-        status_headers_provider=lambda: {
-            "Authorization": _status_service_authorization_from_env(),
-        },
-        status_auth_mode="service_authorization",
-    )
-    app.state.pixelflow_reference_analysis_job_service = service
-    app.state.pixelflow_reference_analysis_provider_adapter = ProviderJobAdapter(
-        service
-    )
-    app.state.pixelflow_reference_analysis_provider_reason = None
-    app.state.pixelflow_generate_scene_video_job_service = (
-        make_scene_video_job_service(
-            client=client,
-            base_url=config.base_url,
-            status_headers_provider=lambda: {
-                "Authorization": _status_service_authorization_from_env(),
-            },
-            status_auth_mode="service_authorization",
-        )
-    )
-    app.state.pixelflow_merge_video_job_service = make_merge_video_job_service(
-        client=client,
-        base_url=config.base_url,
-        request_timeout_seconds=float(
-            os.environ.get("BORGRISE_VIDEO_MERGE_REQUEST_TIMEOUT", "3600")
-        ),
-    )
-    app.state.pixelflow_quality_review_job_service = (
-        make_quality_review_job_service(
-            client=client,
-            base_url=config.base_url,
-            status_headers_provider=lambda: {
-                "Authorization": _status_service_authorization_from_env(),
-            },
-            status_auth_mode="service_authorization",
-        )
-    )
-    jianying_config = load_jianying_draft_runtime_config()
-    app.state.pixelflow_jianying_draft_job_service = (
-        JianyingDraftProviderJobService(
-            client=client,
-            provider_base_url=jianying_config.base_url,
-            provider_token=jianying_config.token,
-            content_app_base_url=config.base_url,
-            service_authorization_provider=(
-                _status_service_authorization_from_env
-            ),
-            create_timeout_seconds=jianying_config.create_read_timeout_seconds,
-            query_timeout_seconds=jianying_config.query_read_timeout_seconds,
-        )
-        if (
-            jianying_config.enabled
-            and jianying_config.base_url
-            and jianying_config.token
-            and os.environ.get(
-                "PIXELFLOW_CONTENT_APP_INTERNAL_UPLOAD_ENABLED",
-                "false",
-            ).strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
-        else None
-    )
-    return client
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """FastAPI 应用生命周期处理器。"""
@@ -299,9 +112,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await ensure_schema(persistence_engine)
             await ensure_sql_conversation_schema(persistence_engine)
             await ensure_sql_agent_tool_schema(persistence_engine)
-
-        # M1 已下线旧剪映与媒体 Provider；Gateway 不再装配或轮询旧业务 Client。
-        content_app_provider_client = None
 
         if pixelflow_mysql_url:
             from pixelflow.preferences.mysql import make_mysql_preference_store
@@ -466,9 +276,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_harness_run_bridge is not None:
                 await pixelflow_harness_run_bridge.aclose()
                 logger.info("PixelFlow Harness Sidecar Client closed")
-            if content_app_provider_client is not None:
-                await content_app_provider_client.aclose()
-                logger.info("PixelFlow 兼容 Provider client closed")
             pixelflow_mysql_engine = getattr(app.state, "pixelflow_mysql_engine", None)
             if pixelflow_mysql_engine is not None:
                 await pixelflow_mysql_engine.dispose()
@@ -521,10 +328,9 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
 
 ### 主要入口
 
-- **PixelFlow Agent Flow**: `/agent/flows`，创建生成流程、查询状态、订阅 SSE、确认 Brief/片段/剪辑/QC
-- **Auth**: 所有非公开接口使用 content-app 的 `Authorization: Bearer <token>`
-- **Agent Runtime**: `/agent/threads`、`/agent/runs`，DeerFlow/LangGraph 兼容运行时接口
-- **Tools**: `/agent/models`、`/agent/mcp`、`/agent/skills`、`/agent/memory`
+- **Conversations**: 创建对话、提交 Harness Turn、读取 Snapshot 和 SSE。
+- **Harness Tool Broker**: 只供 Sidecar 调用的受控业务 Tool 接口。
+- **Auth**: 所有非公开接口使用 content-app 的 `Authorization: Bearer <token>`。
 
 ### 访问说明
 
@@ -537,66 +343,9 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
         redoc_url=redoc_url,
         openapi_url=openapi_url,
         openapi_tags=[
-            {
-                "name": "models",
-                "description": "Operations for querying available AI models and their configurations",
-            },
-            {
-                "name": "mcp",
-                "description": "Manage Model Context Protocol (MCP) server configurations",
-            },
-            {
-                "name": "memory",
-                "description": "Access and manage global memory data for personalized conversations",
-            },
-            {
-                "name": "skills",
-                "description": "Manage skills and their configurations",
-            },
-            {
-                "name": "artifacts",
-                "description": "Access and download thread artifacts and generated files",
-            },
-            {
-                "name": "uploads",
-                "description": "Upload and manage user files for threads",
-            },
-            {
-                "name": "threads",
-                "description": "Manage DeerFlow thread-local filesystem data",
-            },
-            {
-                "name": "agents",
-                "description": "Create and manage custom agents with per-agent config and prompts",
-            },
-            {
-                "name": "suggestions",
-                "description": "Generate follow-up question suggestions for conversations",
-            },
-            {
-                "name": "assistants-compat",
-                "description": "LangGraph Platform-compatible assistants API (stub)",
-            },
-            {
-                "name": "runs",
-                "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
-            },
-            {
-                "name": "pixelflow-flows",
-                "description": "PixelFlow e-commerce video Agent flow API, progress events, and explainable timeline",
-            },
-            {
-                "name": "pixelflow-conversations",
-                "description": "PixelFlow conversation history, pagination, and workflow resume API",
-            },
-            {
-                "name": "pixelflow-preferences",
-                "description": "PixelFlow structured user preferences",
-            },
-            {
-                "name": "health",
-                "description": "Health check and system status endpoints",
-            },
+            {"name": "pixelflow-conversations", "description": "Harness 会话、Run、Snapshot 与 SSE"},
+            {"name": "internal-agent-tools", "description": "仅供 Sidecar 调用的受控 Tool Broker"},
+            {"name": "auth", "description": "当前 content-app 用户身份"},
         ],
     )
 

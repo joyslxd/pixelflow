@@ -23,7 +23,7 @@ from pydantic import (
 )
 
 from pixelflow.agent_control_plane.contracts.base import ContractModel
-from pixelflow.skills.base import is_quota_insufficient
+from pixelflow.operations.quota import is_quota_insufficient
 
 _POLLING_STATUSES = frozenset(
     {
