@@ -10,20 +10,14 @@ COPY pyproject.toml uv.lock README.md ./
 COPY wheels/ /wheels/
 # 用途：离线安装固定 uv 构建工具；影响：服务器无法访问 Python 包源时仍可进入锁文件同步步骤。
 RUN pip install --no-index --find-links /wheels "uv==0.7.20"
-# 用途：按锁文件同步通用生产依赖；影响：严格校验通用依赖，二进制依赖在下一层离线补齐。
-RUN uv sync --locked --no-dev \
-    --offline \
-    --find-links /wheels \
-    --no-install-project \
-    --no-install-package deepseek-harness-runtime-bin \
-    --no-install-package pydantic-core \
-    --no-install-package uvloop
-# 用途：在同步完成后离线覆盖 Runtime 和 Linux 二进制依赖；影响：uv 不会再将预置 wheel 作为未锁定项卸载。
-RUN uv pip install --no-index --find-links /wheels \
-    "deepseek-harness-runtime-bin==0.1.1rc1" \
-    "pydantic-core==2.46.4" \
-    "typing-extensions==4.16.0" \
-    "uvloop==0.22.1"
+# 用途：直接从受校验 wheel 目录离线解析全部生产依赖；影响：构建不读取 uv 缓存或 Python 包源。
+RUN uv venv && uv pip install --no-index --find-links /wheels \
+    "deepseek-harness-sdk==0.1.1rc1" \
+    "fastapi==0.141.1" \
+    "httpx==0.28.1" \
+    "pydantic==2.13.4" \
+    "PyJWT==2.13.0" \
+    "uvicorn[standard]==0.52.4"
 
 # 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
 COPY src ./src
