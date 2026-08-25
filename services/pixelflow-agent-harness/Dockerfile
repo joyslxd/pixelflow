@@ -7,8 +7,8 @@ WORKDIR /app
 # 用途：安装 uv 固定版本；影响：按 uv.lock 安装可复现的官方 Linux Runtime。
 RUN pip install --no-cache-dir "uv==0.7.20"
 
-# 用途：先复制依赖清单以利用 Docker 缓存；影响：仅依赖变更时才重新下载 Runtime。
-COPY pyproject.toml uv.lock ./
+# 用途：先复制依赖清单和包元数据说明以利用 Docker 缓存；影响：仅依赖或 README 元数据变更时才重新下载 Runtime。
+COPY pyproject.toml uv.lock README.md ./
 # 用途：按锁文件同步生产依赖；影响：锁文件漂移立即构建失败，避免使用宿主机二进制。
 RUN uv sync --locked --no-dev
 
