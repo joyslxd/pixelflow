@@ -1,7 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tscEntry = path.join(webRoot, "node_modules", "typescript", "bin", "tsc");
@@ -14,8 +20,20 @@ const fixture = path.resolve(
   "agent_harness",
   "contracts-v1.json",
 );
+const harnessSnapshotFixture = path.resolve(
+  webRoot,
+  "..",
+  "backend",
+  "tests",
+  "fixtures",
+  "agent_runtime",
+  "harness-snapshot-v1.json",
+);
 const contractSource = path.join(webRoot, "src", "api", "contracts.ts");
-const testFile = path.join(webRoot, "tests", "harnessRuntimeContracts.test.mjs");
+const harnessContractTest = path.join(webRoot, "tests", "harnessRuntimeContracts.test.mjs");
+const reducerTest = path.join(webRoot, "tests", "agentRuntimeReducer.test.mjs");
+const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-"));
+const moduleDirectory = path.join(temporaryRoot, "modules");
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -27,18 +45,54 @@ function run(command, args, options = {}) {
   if (result.status !== 0) throw new Error(`测试命令执行失败，退出码：${result.status ?? "未知"}`);
 }
 
-if (!existsSync(tscEntry)) {
-  throw new Error("未找到本地 TypeScript 编译器，请先执行 corepack pnpm install");
-}
-if (!existsSync(fixture) || !existsSync(contractSource)) {
-  throw new Error("Harness 跨端合同或 fixture 缺失");
+function compileAgentRuntimeModules() {
+  run(process.execPath, [
+    tscEntry,
+    "src/api/contracts.ts",
+    "src/features/agent-runtime/reducer.ts",
+    "src/features/agent-runtime/snapshotProjector.ts",
+    "src/features/agent-runtime/state.ts",
+    "--target",
+    "ES2022",
+    "--module",
+    "ES2022",
+    "--moduleResolution",
+    "bundler",
+    "--rootDir",
+    "src",
+    "--outDir",
+    moduleDirectory,
+    "--skipLibCheck",
+    "--strict",
+  ]);
 }
 
-// 先编译全部当前前端源码，再运行唯一的 Harness 跨端合同门禁。
-run(process.execPath, [tscEntry, "--noEmit"]);
-run(process.execPath, ["--test", testFile], {
-  env: {
-    AGENT_HARNESS_CONTRACT_FIXTURE: fixture,
-    AGENT_HARNESS_TYPES_SOURCE: contractSource,
-  },
-});
+try {
+  if (!existsSync(tscEntry)) {
+    throw new Error("未找到本地 TypeScript 编译器，请先执行 corepack pnpm install");
+  }
+  if (!existsSync(fixture) || !existsSync(contractSource)) {
+    throw new Error("Harness 跨端合同或 fixture 缺失");
+  }
+  if (!existsSync(harnessSnapshotFixture)) {
+    throw new Error("F0 Snapshot fixture 缺失");
+  }
+
+  writeFileSync(path.join(temporaryRoot, "package.json"), JSON.stringify({ type: "module" }));
+  compileAgentRuntimeModules();
+
+  // 先编译全部当前前端源码，再运行公开合同与 reducer 门禁。
+  run(process.execPath, [tscEntry, "--noEmit"]);
+  run(process.execPath, ["--test", harnessContractTest, reducerTest], {
+    env: {
+      AGENT_HARNESS_CONTRACT_FIXTURE: fixture,
+      AGENT_HARNESS_TYPES_SOURCE: contractSource,
+      AGENT_RUNTIME_REDUCER_TEST_MODULE: pathToFileURL(
+        path.join(moduleDirectory, "features/agent-runtime/state.js"),
+      ).href,
+      AGENT_RUNTIME_SNAPSHOT_FIXTURE: harnessSnapshotFixture,
+    },
+  });
+} finally {
+  rmSync(temporaryRoot, { recursive: true, force: true });
+}

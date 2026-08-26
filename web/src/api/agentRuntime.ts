@@ -118,7 +118,12 @@ function parseEvent(data: string): PublicAgentEventV1 | null {
       || typeof (value as { run_id?: unknown }).run_id !== "string"
       || typeof (value as { type?: unknown }).type !== "string"
     ) return null;
-    return value as PublicAgentEventV1;
+    const event = value as PublicAgentEventV1;
+    return {
+      ...event,
+      conversation_id: typeof event.conversation_id === "string" ? event.conversation_id : "",
+      cursor: typeof event.cursor === "string" ? event.cursor : "",
+    };
   } catch {
     return null;
   }

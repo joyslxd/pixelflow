@@ -11,6 +11,7 @@ from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeR
 from pixelflow.agent_control_plane.public_contracts import (
     AgentSnapshotV1,
     PublicAgentEventV1,
+    PublicMessageV1,
     VideoWorkspaceProjectionV1,
 )
 from pixelflow.agent_tools.repository import RunBinding, SQLAgentToolRepository
@@ -94,11 +95,11 @@ class HarnessRunProjector:
             user_id=user_id,
         )
         response_messages = [
-            {
-                "message_id": message.message_id,
-                "role": message.role,
-                "content": message.content,
-            }
+            PublicMessageV1(
+                message_id=message.message_id,
+                role=message.role,
+                content=message.content,
+            )
             for message in messages
             if message.payload.get("harness_run_id") == run_id
         ]
@@ -108,10 +109,14 @@ class HarnessRunProjector:
             if isinstance(state, str) and state in {"accepted", "running", "completed", "failed", "cancelled"}:
                 status = state
         workspace = await self._workspace_projection(binding)
+        last_event = events[-1] if events else None
         return AgentSnapshotV1(
             run_id=run_id,
+            conversation_id=conversation_id,
             status=status,
-            last_sequence=0 if not events else events[-1].sequence,
+            last_sequence=0 if last_event is None else last_event.sequence,
+            last_cursor="" if last_event is None else last_event.cursor,
+            context_version=0,
             events=[self._to_public_event(event) for event in events],
             messages=response_messages,
             workspace=workspace,
@@ -266,21 +271,15 @@ class HarnessRunProjector:
     def _to_public_event(event: AgentEvent) -> PublicAgentEventV1:
         """把内部 Outbox 事件映射为冻结的 Harness 浏览器合同。"""
 
-        mapping = {
-            AgentEventType.RUN_STATE_CHANGED: "run.state_changed",
-            AgentEventType.AGENT_TOOL_COMPLETED: "tool.completed",
-            AgentEventType.AGENT_RESPONSE_COMPLETED: "response.completed",
-        }
-        event_type = mapping.get(event.type)
-        if event_type is None:
-            raise HarnessEventProjectionError("内部事件不在 Harness 公开白名单")
         return PublicAgentEventV1(
             event_id=event.event_id,
             sequence=event.sequence,
             run_id=event.run_id,
-            type=event_type,
+            type=event.type,
             occurred_at=event.occurred_at.isoformat().replace("+00:00", "Z"),
             payload=dict(event.payload),
+            conversation_id=event.conversation_id,
+            cursor=event.cursor,
         )
 
     @staticmethod

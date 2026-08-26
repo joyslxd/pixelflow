@@ -10,7 +10,11 @@ from pixelflow.agent_control_plane.contracts import (
     InterruptResponseRequest,
     WorkspaceCommandRequest,
 )
-from pixelflow.agent_control_plane.public_contracts import AgentSnapshotV1, PublicAgentEventV1
+from pixelflow.agent_control_plane.public_contracts import (
+    AgentSnapshotV1,
+    HarnessTurnStartRequestV1,
+    PublicAgentEventV1,
+)
 
 
 def _typescript_contract() -> str:
@@ -65,7 +69,7 @@ def test_harness_contract_fields_do_not_drift_between_python_and_typescript() ->
     _require_fields(
         source,
         "TurnStartV1",
-        {"client_input_id", "workspace_id", "expected_workspace_revision", "content"},
+        set(HarnessTurnStartRequestV1.model_fields),
     )
     _require_fields(source, "InterruptResponseV1", {"client_response_id", "value"})
     _require_fields(
@@ -75,6 +79,4 @@ def test_harness_contract_fields_do_not_drift_between_python_and_typescript() ->
     )
     _require_fields(source, "PublicAgentEventV1", set(PublicAgentEventV1.model_fields))
     _require_fields(source, "AgentSnapshotV1", set(AgentSnapshotV1.model_fields))
-    _require_fields(source, "TurnStartV1", set(HarnessTurnStartRequest.model_fields))
-    _require_fields(source, "InterruptResponseV1", {"client_response_id", "value"})
     assert {"client_response_id", "value"}.issubset(InterruptResponseRequest.model_fields)

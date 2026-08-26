@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from pixelflow.agent_control_plane.contracts.enums import AgentEventType
 
 
 class _ControlPlaneModel(BaseModel):
@@ -19,9 +22,19 @@ class PublicAgentEventV1(_ControlPlaneModel):
     event_id: str = Field(min_length=1, max_length=128)
     sequence: int = Field(ge=1)
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
-    type: Literal["run.state_changed", "tool.completed", "response.completed"]
+    type: AgentEventType
     occurred_at: str = Field(min_length=1, max_length=64)
     payload: dict[str, Any]
+    conversation_id: str = Field(default="", max_length=64)
+    cursor: str = Field(default="", max_length=128)
+
+
+class PublicMessageV1(_ControlPlaneModel):
+    """Snapshot 内可恢复的公开消息，不含 Authorization 或内部轨迹。"""
+
+    message_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
+    content: str = Field(default="", max_length=32_000)
 
 
 class VideoWorkspaceProjectionV1(_ControlPlaneModel):
@@ -39,8 +52,46 @@ class AgentSnapshotV1(_ControlPlaneModel):
     status: Literal["accepted", "running", "completed", "failed", "cancelled"]
     last_sequence: int = Field(ge=0)
     events: list[PublicAgentEventV1] = Field(default_factory=list)
-    messages: list[dict[str, str]] = Field(default_factory=list)
+    messages: list[PublicMessageV1] = Field(default_factory=list)
     workspace: VideoWorkspaceProjectionV1 | None = None
+    conversation_id: str = Field(default="", max_length=64)
+    context_version: int = Field(default=0, ge=0)
+    last_cursor: str = Field(default="", max_length=128)
 
 
-__all__ = ["AgentSnapshotV1", "PublicAgentEventV1", "VideoWorkspaceProjectionV1"]
+class HarnessTurnStartRequestV1(_ControlPlaneModel):
+    """公开 Turn 入参：工作区归属由 Gateway 回查，浏览器不得自造业务副本。"""
+
+    client_input_id: UUID
+    workspace_id: str = Field(min_length=1, max_length=64)
+    expected_workspace_revision: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=32_000)
+    max_output_tokens: int = Field(default=192, ge=1, le=512)
+
+
+class HarnessTurnStartResponseV1(_ControlPlaneModel):
+    """公开返回已绑定并已激活的 Sidecar Run，不暴露 Session 或服务凭据。"""
+
+    message_id: str
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["accepted"]
+    workspace_revision: int = Field(ge=1)
+
+
+class HarnessRunCancelResponseV1(_ControlPlaneModel):
+    """取消结果只包含稳定 Run 终态，不暴露 Harness 运行时细节。"""
+
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["completed", "failed", "cancelled"]
+    termination_reason: str | None = Field(default=None, max_length=120)
+
+
+__all__ = [
+    "AgentSnapshotV1",
+    "HarnessRunCancelResponseV1",
+    "HarnessTurnStartRequestV1",
+    "HarnessTurnStartResponseV1",
+    "PublicAgentEventV1",
+    "PublicMessageV1",
+    "VideoWorkspaceProjectionV1",
+]

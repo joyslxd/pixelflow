@@ -1,4 +1,4 @@
-import { AgentWorkspace } from "@/features/agent-runtime/AgentWorkspace";
+import { AgentWorkspace } from "@/features/agent-workspace/AgentWorkspace";
 import { useParams } from "react-router-dom";
 
 export function WorkspacePage() {

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "snapshot": {
+    "run_id": "hrun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "conversation_id": "conv-f0-1",
+    "status": "running",
+    "last_sequence": 3,
+    "last_cursor": "cursor-3",
+    "context_version": 0,
+    "events": [
+      {
+        "event_id": "hevt_1",
+        "sequence": 1,
+        "run_id": "hrun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "run.state_changed",
+        "occurred_at": "2026-08-26T12:00:00Z",
+        "payload": {"status": "running"},
+        "conversation_id": "conv-f0-1",
+        "cursor": "cursor-1"
+      },
+      {
+        "event_id": "hevt_2",
+        "sequence": 2,
+        "run_id": "hrun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "agent.tool.completed",
+        "occurred_at": "2026-08-26T12:00:01Z",
+        "payload": {"tool_name": "inspect_video_workspace", "public_summary": "已读取当前工作区"},
+        "conversation_id": "conv-f0-1",
+        "cursor": "cursor-2"
+      },
+      {
+        "event_id": "hevt_3",
+        "sequence": 3,
+        "run_id": "hrun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "agent.response.completed",
+        "occurred_at": "2026-08-26T12:00:02Z",
+        "payload": {"response": "当前工作区可以继续创作。"},
+        "conversation_id": "conv-f0-1",
+        "cursor": "cursor-3"
+      }
+    ],
+    "messages": [
+      {
+        "message_id": "msg-user-1",
+        "role": "user",
+        "content": "看看现在的工作区"
+      },
+      {
+        "message_id": "msg-assistant-1",
+        "role": "assistant",
+        "content": "当前工作区可以继续创作。"
+      }
+    ],
+    "workspace": {
+      "workspace_id": "video_workspace_f0",
+      "revision": 2,
+      "summary": {"has_script": false, "scene_count": 0}
+    }
+  },
+  "visible": {
+    "runStatus": "running",
+    "messageTexts": ["看看现在的工作区", "当前工作区可以继续创作。"],
+    "progressLines": ["已读取当前工作区"],
+    "workspaceRevision": 2,
+    "thinkingPreview": "",
+    "responsePreview": "当前工作区可以继续创作。"
+  }
+}

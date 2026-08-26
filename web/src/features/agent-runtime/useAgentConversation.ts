@@ -11,19 +11,26 @@ import {
 } from "@/api/agentRuntime";
 import type { InterruptResponseV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
 import {
+  HARNESS_ORCHESTRATION_MODE,
   createConversation,
   getConversation,
   listConversations,
   type ConversationDetailV1,
   type ConversationV1,
 } from "@/api/conversations";
+import { AgentApiError } from "@/api/http";
+import { getOrCreateVideoWorkspace } from "@/api/workspaces";
 
 import { reconnectingEventStream } from "./eventStream";
+import { publicErrorMessage } from "./errors";
 import {
   applyPublicEvent,
   hydrateSnapshot,
   initialAgentWorkspaceState,
   isTerminalSnapshot,
+  replaceVideoWorkspace,
+  setConnection,
+  shouldReloadSnapshot,
   type AgentWorkspaceState,
 } from "./state";
 
@@ -37,6 +44,10 @@ function latestRunId(detail: ConversationDetailV1): string | null {
   return null;
 }
 
+function isHarnessConversation(detail: ConversationDetailV1 | null): boolean {
+  return detail?.conversation.orchestration_mode === HARNESS_ORCHESTRATION_MODE;
+}
+
 export function useAgentConversation(initialConversationId?: string) {
   /** 协调纯传输状态；业务事实始终由 Snapshot 和有序公开事件产生。 */
 
@@ -48,6 +59,7 @@ export function useAgentConversation(initialConversationId?: string) {
   const streamAbortRef = useRef<AbortController | null>(null);
   const requestGenerationRef = useRef(0);
   const runtimeRef = useRef(runtime);
+  const pendingTurnRef = useRef<{ client_input_id: string; content: string } | null>(null);
 
   useEffect(() => {
     runtimeRef.current = runtime;
@@ -69,12 +81,16 @@ export function useAgentConversation(initialConversationId?: string) {
     /** 读取并校验完整 Snapshot；非法 sequence 直接提示而不是局部容错。 */
 
     const snapshot = await getHarnessSnapshot(conversationId, runId);
-    setRuntime(hydrateSnapshot(snapshot));
+    setRuntime((current) => hydrateSnapshot(snapshot, {
+      videoWorkspace: snapshot.workspace ?? current.videoWorkspace,
+      messages: current.messages,
+      connection: "connected",
+    }));
     return !isTerminalSnapshot(snapshot);
   }, []);
 
   const startEventStream = useCallback(async (conversationId: string, runId: string) => {
-    /** 从已 hydrate 的 sequence 订阅，重连/gap 永远回读 Snapshot。 */
+    /** 从已 hydrate 的 sequence 订阅；仅 gap / Tool / Artifact / 终态回读 Snapshot。 */
 
     stopStream();
     const controller = new AbortController();
@@ -83,21 +99,19 @@ export function useAgentConversation(initialConversationId?: string) {
       getAfterSequence: () => runtimeRef.current.snapshot?.last_sequence ?? 0,
       shouldContinue: () => !isTerminalSnapshot(runtimeRef.current.snapshot),
       onConnecting: (reconnecting) => {
-        setRuntime((current) => ({ ...current, connection: reconnecting ? "reconnecting" : "connecting" }));
+        setRuntime((current) => setConnection(current, reconnecting ? "reconnecting" : "connecting"));
       },
       onEvent: async (event) => {
         const [next, result] = applyPublicEvent(runtimeRef.current, event);
         runtimeRef.current = next;
         setRuntime(next);
-        if (result === "gap") {
+        if (shouldReloadSnapshot(event, result)) {
           await hydrateRun(conversationId, runId);
           return "reload";
         }
-        // 事件是刷新触发器而不是浏览器轮询；完整消息与业务投影只从 Snapshot 回读。
-        await hydrateRun(conversationId, runId);
         return "continue";
       },
-      onDisconnected: () => setRuntime((current) => ({ ...current, connection: "disconnected" })),
+      onDisconnected: () => setRuntime((current) => setConnection(current, "disconnected")),
     });
   }, [hydrateRun, stopStream]);
 
@@ -107,19 +121,35 @@ export function useAgentConversation(initialConversationId?: string) {
     const generation = requestGenerationRef.current + 1;
     requestGenerationRef.current = generation;
     stopStream();
+    pendingTurnRef.current = null;
     setLoading(true);
     setError("");
     setRuntime(initialAgentWorkspaceState);
     try {
-      const next = await getConversation(conversationId);
+      const [next, workspace] = await Promise.all([
+        getConversation(conversationId),
+        getOrCreateVideoWorkspace(conversationId),
+      ]);
       if (generation !== requestGenerationRef.current) return;
       setDetail(next);
+      setRuntime((current) => replaceVideoWorkspace({
+        ...current,
+        conversationId,
+        messages: next.messages.map((message) => ({
+          message_id: message.message_id,
+          role: message.role,
+          content: message.content,
+        })),
+        connection: "idle",
+      }, workspace));
       const runId = latestRunId(next);
       if (runId !== null && await hydrateRun(conversationId, runId)) {
         if (generation === requestGenerationRef.current) void startEventStream(conversationId, runId);
       }
-    } catch {
-      if (generation === requestGenerationRef.current) setError("无法恢复对话，请稍后刷新。");
+    } catch (caught) {
+      if (generation === requestGenerationRef.current) {
+        setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
+      }
     } finally {
       if (generation === requestGenerationRef.current) setLoading(false);
     }
@@ -133,22 +163,64 @@ export function useAgentConversation(initialConversationId?: string) {
       const created = await createConversation();
       await refreshConversations();
       await openConversation(created.conversation_id);
-    } catch {
-      setError("无法创建新对话，请检查登录状态。");
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
     }
   }, [openConversation, refreshConversations]);
 
-  const submitTurn = useCallback(async (turn: TurnStartV1) => {
-    /** 提交一个冻结 Turn；重复网络重试由调用方复用同一个 client_input_id。 */
+  const submitTurn = useCallback(async (content: string) => {
+    /** 提交一个冻结 Turn；网络失败必须复用同一个 client_input_id。 */
 
     if (detail === null) throw new Error("conversation_unselected");
+    if (!isHarnessConversation(detail)) {
+      setError(publicErrorMessage("conversation_read_only"));
+      throw new Error("conversation_read_only");
+    }
+    const workspace = runtime.videoWorkspace;
+    if (workspace === null) {
+      setError(publicErrorMessage("harness_workspace_not_found"));
+      throw new Error("harness_workspace_not_found");
+    }
+    const trimmed = content.trim();
+    const pending = pendingTurnRef.current;
+    const clientInputId = pending !== null && pending.content === trimmed
+      ? pending.client_input_id
+      : crypto.randomUUID();
+    pendingTurnRef.current = { client_input_id: clientInputId, content: trimmed };
+    const turn: TurnStartV1 = {
+      client_input_id: clientInputId,
+      workspace_id: workspace.workspace_id,
+      expected_workspace_revision: workspace.revision,
+      content: trimmed,
+    };
     setError("");
-    const started = await startHarnessTurn(detail.conversation.conversation_id, turn);
-    const nextDetail = await getConversation(detail.conversation.conversation_id);
-    setDetail(nextDetail);
-    await hydrateRun(detail.conversation.conversation_id, started.run_id);
-    void startEventStream(detail.conversation.conversation_id, started.run_id);
-  }, [detail, hydrateRun, startEventStream]);
+    setRuntime((current) => ({ ...current, inputStatus: "sending" }));
+    try {
+      const started = await startHarnessTurn(detail.conversation.conversation_id, turn);
+      pendingTurnRef.current = null;
+      const nextDetail = await getConversation(detail.conversation.conversation_id);
+      setDetail(nextDetail);
+      setRuntime((current) => replaceVideoWorkspace(current, {
+        ...workspace,
+        revision: started.workspace_revision,
+      }));
+      await hydrateRun(detail.conversation.conversation_id, started.run_id);
+      void startEventStream(detail.conversation.conversation_id, started.run_id);
+    } catch (caught) {
+      const code = caught instanceof AgentApiError ? caught.code : undefined;
+      if (code === "harness_workspace_revision_conflict") {
+        try {
+          const latest = await getOrCreateVideoWorkspace(detail.conversation.conversation_id);
+          setRuntime((current) => replaceVideoWorkspace(current, latest));
+        } catch {
+          // 保留原错误提示；工作区刷新失败不覆盖 revision 冲突语义。
+        }
+      }
+      setRuntime((current) => ({ ...current, inputStatus: "idle" }));
+      setError(publicErrorMessage(code));
+      throw caught;
+    }
+  }, [detail, hydrateRun, runtime.videoWorkspace, startEventStream]);
 
   const refreshActiveRun = useCallback(async () => {
     /** 用户主动刷新可恢复事实，不创建新的 Run 或重新发送输入。 */
@@ -157,8 +229,8 @@ export function useAgentConversation(initialConversationId?: string) {
     try {
       const keepStreaming = await hydrateRun(detail.conversation.conversation_id, runtime.snapshot.run_id);
       if (keepStreaming) void startEventStream(detail.conversation.conversation_id, runtime.snapshot.run_id);
-    } catch {
-      setError("无法刷新当前运行状态。");
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
     }
   }, [detail, hydrateRun, runtime.snapshot, startEventStream]);
 
@@ -169,8 +241,8 @@ export function useAgentConversation(initialConversationId?: string) {
     try {
       await cancelHarnessRun(detail.conversation.conversation_id, runtime.snapshot.run_id);
       await refreshActiveRun();
-    } catch {
-      setError("取消请求未完成，请刷新确认当前状态。");
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
     }
   }, [detail, refreshActiveRun, runtime.snapshot]);
 
@@ -210,7 +282,9 @@ export function useAgentConversation(initialConversationId?: string) {
   }, [detail, refreshActiveRun]);
 
   useEffect(() => {
-    void refreshConversations().catch(() => setError("无法加载对话，请检查登录状态。"));
+    void refreshConversations().catch((caught) => {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
+    });
     return stopStream;
   }, [refreshConversations, stopStream]);
 
@@ -224,6 +298,7 @@ export function useAgentConversation(initialConversationId?: string) {
     runtime,
     error,
     loading,
+    canSend: isHarnessConversation(detail),
     newConversation,
     openConversation,
     submitTurn,

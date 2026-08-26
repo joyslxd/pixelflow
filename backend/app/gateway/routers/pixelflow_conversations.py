@@ -28,7 +28,12 @@ from pixelflow.agent_control_plane.contracts import (
 from pixelflow.agent_control_plane.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
-from pixelflow.agent_control_plane.public_contracts import VideoWorkspaceProjectionV1
+from pixelflow.agent_control_plane.public_contracts import (
+    HarnessRunCancelResponseV1,
+    HarnessTurnStartRequestV1,
+    HarnessTurnStartResponseV1,
+    VideoWorkspaceProjectionV1,
+)
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
     PixelFlowConversationMessageRecord,
@@ -116,33 +121,9 @@ class ConversationMessageCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class HarnessTurnStartRequest(BaseModel):
-    """M0 公开 Harness Turn 的最小输入，工作区归属永远由 Gateway 回查。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    client_input_id: uuid.UUID
-    workspace_id: str = Field(min_length=1, max_length=64)
-    expected_workspace_revision: int = Field(ge=1)
-    content: str = Field(min_length=1, max_length=32_000)
-    max_output_tokens: int = Field(default=192, ge=1, le=512)
-
-
-class HarnessTurnStartResponse(BaseModel):
-    """公开返回已绑定并已激活的 M0 Sidecar Run，不暴露 Session 或服务凭据。"""
-
-    message_id: str
-    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
-    status: Literal["accepted"]
-    workspace_revision: int = Field(ge=1)
-
-
-class HarnessRunCancelResponse(BaseModel):
-    """取消结果只包含稳定 Run 终态，不暴露 Harness 运行时细节。"""
-
-    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
-    status: Literal["completed", "failed", "cancelled"]
-    termination_reason: str | None = Field(default=None, max_length=120)
+HarnessTurnStartRequest = HarnessTurnStartRequestV1
+HarnessTurnStartResponse = HarnessTurnStartResponseV1
+HarnessRunCancelResponse = HarnessRunCancelResponseV1
 
 
 class HarnessWorkspaceCommandResponse(BaseModel):
@@ -492,6 +473,30 @@ async def create_conversation(body: ConversationCreateRequest, request: Request)
         )
     )
     return _conversation_response(record)
+
+
+@router.get(
+    "/{conversation_id}/workspaces/video",
+    response_model=VideoWorkspaceProjectionV1,
+)
+async def get_or_create_video_workspace(
+    conversation_id: str,
+    request: Request,
+) -> VideoWorkspaceProjectionV1:
+    """打开对话时读取或创建视频工作区；浏览器不得手填 workspace_id。"""
+
+    from pixelflow.video.workspace import ensure_conversation_video_workspace
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return await ensure_conversation_video_workspace(
+        _harness_video_repository(request),
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
 
 
 @router.post(

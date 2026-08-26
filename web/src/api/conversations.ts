@@ -2,11 +2,13 @@
 
 import { agentRequest } from "./http";
 
+export const HARNESS_ORCHESTRATION_MODE = "harness_v1";
+
 export type ConversationV1 = {
   conversation_id: string;
   title: string;
   revision: number;
-  orchestration_mode?: string;
+  orchestration_mode: string;
 };
 
 export type ConversationMessageV1 = {
