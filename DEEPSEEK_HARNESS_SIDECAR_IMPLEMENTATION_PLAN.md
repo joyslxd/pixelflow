@@ -1705,21 +1705,21 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 
 - [x] ✅ 新建 `agent_harness/contracts.py` 和 `agent_harness/port.py`；已由 `test_agent_harness_port.py` 覆盖稳定 Port 合同。
 - [x] ✅ 定义 `HarnessRunRequest/Handle/Event/Result`；DTO 已冻结为严格 Pydantic 合同，Sidecar Client、投影和恢复路径均从该合同导入。
-- [x] ✅ 将 M0 的真实 `AgentHarnessSidecarClient` 提升为唯一运行时 `AgentHarnessPort` 实现并纳入 Gateway 生命周期、超时和服务身份；Linux Sidecar 部署模板与 CI readiness 验收已补齐，真实服务器 Secret 环境仍需发布执行。
+- [x] ✅ 将 M0 的真实 `AgentHarnessSidecarClient` 提升为唯一运行时 `AgentHarnessPort` 实现并纳入 Gateway 生命周期、超时和服务身份；Linux Sidecar 部署模板、离线官方 Runtime wheel、`/live`/`/ready` 和真实 Gateway→Sidecar→模型→SQLite/SSE 非计费链路均已在服务器验证。
 - [ ] 可在 `backend/tests/doubles/` 建立最小 `AgentHarnessPort` Test Double，只用于单元测试的确定性错误注入；生产源码、配置和依赖注入容器不得引用；
 - [ ] 冻结 `AgentSnapshotV1/PublicAgentEventV1/TurnStart/InterruptResponse/WorkspaceCommand` 的 Python 与 TypeScript schema，建立共享 fixture 和 schema drift 门禁；已新增 Python `AgentSnapshotV1/PublicAgentEventV1` 并用于 Harness Snapshot 投影，Turn/Interrupt/WorkspaceCommand 的跨端 schema 与 drift 门禁仍待完成。
-- [ ] 新建 `web/src/api/` 与 `features/agent-runtime/` 骨架，把 Authorization、错误码、Snapshot 投影、SSE cursor/sequence 和 reducer 从单体 API/Supervisor 模块迁入通用边界；
+- [x] ✅ 新建 `web/src/api/` 与 `features/agent-runtime/` 骨架；Authorization、固定错误码、Conversation/Turn/Snapshot Client、单一 Snapshot 投影、SSE sequence 去重、gap 重载、断线退避重连及会话切换取消已迁入通用边界，不再调用旧 Task 浏览器轮询。
 - [x] ✅ 新建 PixelFlow `platform/config`，迁移 profile YAML、日志级别和启动校验，不再导入 DeerFlow `AppConfig`；两份 profile 已删除 DeerFlow、Sandbox、旧模型和旧 Skill 存储配置。
 - [x] ✅ 新建 PixelFlow `platform/persistence` 的 SQLAlchemy `Base`、engine、session factory 和生命周期，保持现有表名及迁移兼容；已由 `test_platform_persistence.py` 和既有 Repository 回归覆盖。
 - [ ] 新建 PixelFlow `auth_context/paths`，迁移用户隔离、服务身份和受控目录，不再导入 DeerFlow user context/path helper；已完成 `platform/auth_context.py`、`PixelFlowPaths` 以及 Gateway 认证中间件/路径工具切换，旧 DeerFlow Router 仍有用户上下文与路径 helper 引用，尚未达到全量完成条件。
 - [x] ✅ 新建 `ChatModelPort` 与 OpenAI-compatible Provider Client；旧 intake、planning、scene package、QC、suggestions 和视频内部 LLM 路径已按下线授权物理删除，不再保留 DeerFlow 模型创建。
 - [ ] 将 Agent Runtime compaction 的 LangChain Message DTO 和 DeerFlow summarization middleware 替换为 PixelFlow 自有 DTO/Service；
-- [ ] 新建不参与业务决策的 `AgentRunBridge`；
+- [x] ✅ 新建不参与业务决策的 `AgentRunBridge`；Gateway 仅通过它创建、绑定、投影及取消 Harness Run，Router 不感知 Sidecar 调用顺序。
 - [x] ✅ 新建 `runtime_admission_state` Repository 和 revision 乐观锁；配置只决定启动默认值，所有 Gateway 实例通过共享状态即时停收新 Run；当前实现为 `SQLHarnessAdmissionRepository`，已由 `test_harness_admission.py` 覆盖开启、关闭与 CAS 冲突。
 - [ ] 修改 `VideoAgentRunner` 只依赖 Port/RunBridge；
-- [ ] 把 `NativeOperationResumeHandler` 的完成事件恢复语义迁入统一 `operation_resume` 合同；已完成 M06 完成事件和额度恢复编排迁入 `operations/resume.py`，但 `NativeOperationResumeHandler` 仍依赖旧 Native Invoker，尚未合并和删除。
+- [x] ✅ 把 `NativeOperationResumeHandler` 的完成事件恢复语义迁入统一 `operation_resume` 合同；M06 完成事件和额度恢复编排已收敛到 `operations/resume.py`，旧 Native Invoker 与 Handler 均已删除。
 - [ ] 修改 `VideoAgentEntrypoint` 不感知具体 Harness；
-- [ ] Gateway 在 M1 直接装配真实 `AgentHarnessSidecarClient`，不再创建 LangChain Model/checkpointer/Native Invoker；Sidecar 不可用时 readiness/准入失败，不回退 Test Double 或旧内核；已停止 Gateway 生命周期装配 DeerFlow Model、Native Invoker、旧 Entrypoint 与旧 Runner，Harness 公开 Run 和 Tool Broker 可独立运行；主 `/turns/start` 与旧 Runtime 尚未物理删除，保留未完成。
+- [x] ✅ Gateway 直接装配真实 `AgentHarnessSidecarClient`，不再创建 LangChain Model/checkpointer/Native Invoker；Sidecar 不可用时 readiness/准入失败，不回退 Test Double 或旧内核。旧 Runtime、旧 `/turns/start` 分支及 Native 装配已物理删除，Harness 公开 Run 和 Tool Broker 可独立运行。
 - [ ] 将旧 Middleware 中仍有效的 owner、revision、确认、进度、安全收口规则迁入对应新边界并补合同测试；
 - [ ] 将 `video_agent/tools/registry.py` 和 `tool_gateway.py` 迁到通用 `agent_tools/catalog/manifest/broker/policy`；已完成 Registry、确认 Policy、Broker 基线和部分 Handler 迁移，旧 `tool_gateway.py` 仍存在，尚未达到删除条件。
 - [ ] 将视频 Tool DTO/公开合同迁到 `agent_tools/video/`，把其业务实现抽到 `video/services/`；已迁移脚本导入/创意/分阶段生成与审核、Seedance 分镜润色、工作区检查、参考视频分析、交付与分镜编辑/生成 Tool 的 DTO/Handler，生产字段规则已迁入 `video/services/production_fields.py`，并删除 `video_agent/tools/` 旧目录；业务 Service 与 `ChatModelPort` 迁移尚未完全完成，保留未完成。
@@ -1732,7 +1732,7 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [ ] 将 `pixelflow_ppt.py` 中的大纲、页面和交付编排抽到 `ppt/services/`，Router 只保留 `/agent` HTTP Controller；SmartPPT Client 迁到 `capabilities/ppt_generation/providers/`；
 - [ ] 将 `tools/plan.py` 的 Pydantic 入参和观察 Plan 发布能力迁成框架无关 Capability Handler，移除 `StructuredTool/VideoPlanMiddleware`；已将入参与发布适配移到 `agent_control_plane/plan_service.py` 并删除旧 Tool 文件，但新模块暂仍为旧原生 Agent 提供 `StructuredTool` 适配，尚未满足完成条件。
 - [ ] 删除 `prompts.py` 前先把创作/Tool 选择规则迁成首批管理员 Skill 候选，把安全硬约束固化为 Policy 合同和测试；已补齐受控的 `skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md`，包含分镜、素材职责、关键帧和声音规则，且不执行自动安装、更新或视频生成命令；首批管理员发布与 Harness Run 冻结仍待完成。
-- [ ] 删除 `agent.py`、`native_invoke.py`、`tool_adapter.py`、`state.py`、`prompts.py`、旧 Native Event Publisher、旧 SkillCatalog、仅服务旧内核的 Middleware 和专用测试；
+- [x] ✅ 删除 `agent.py`、`native_invoke.py`、`tool_adapter.py`、`state.py`、`prompts.py`、旧 Native Event Publisher、旧 SkillCatalog、仅服务旧内核的 Middleware 和专用测试；相关能力仅保留在新 Tool、领域 Service、RunBridge 或 Sidecar 边界。
 - [x] ✅ 删除 `native_operation_resume.py`，并将保留的 M06 完成/额度投影统一收敛到 `operations/resume.py`；后续由 Harness `operation_resume` Run 消费权威投影，不再恢复 Native Session。
 - [x] ✅ 删除 `runner.py`、`entrypoint.py`、`native_operation_resume.py`、Native Invoker、旧 Prompt、Middleware 与专用测试；`video_agent/` 已物理删除。
 - [x] ✅ 通过 `rg`、依赖锁文件、Gateway import smoke test 与全量新架构 pytest 完成 LangChain/LangGraph/DeerFlow 引用清零验证；
@@ -1752,7 +1752,7 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [x] ✅ 从 Gateway 取消注册并删除 DeerFlow `runs/thread_runs/threads/agents/memory/skills/mcp/uploads/assistants_compat` Router；
 - [x] ✅ 删除 `backend/langgraph.json`、`pixelflow/graph.py`、`nodes.py`、`state.py`、`langgraph_auth.py` 和相关测试；
 - [x] ✅ 删除 `backend/packages/harness/`、`deerflow-harness` workspace member、`langgraph-sdk`、LangChain/LangGraph 依赖并重建 lockfile；
-- [ ] 全部调用方切换后删除 `backend/pixelflow/video_agent/`、`backend/pixelflow/agent_runtime/`、`backend/pixelflow/agent_workflows/` 和旧可执行 `backend/pixelflow/skills/`，不保留 re-export、隔离候选或兼容包；
+- [x] ✅ 全部调用方已切换并删除 `backend/pixelflow/video_agent/`、`backend/pixelflow/agent_runtime/`、`backend/pixelflow/agent_workflows/` 和旧可执行 `backend/pixelflow/skills/`；不保留 re-export、隔离候选或兼容包。
 
 ### 验收
 
