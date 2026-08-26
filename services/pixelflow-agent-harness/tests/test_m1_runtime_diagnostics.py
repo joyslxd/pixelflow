@@ -12,6 +12,7 @@ from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 from pixelflow_harness_sidecar.deepseek_engine import (
     HarnessExecutionDiagnostic,
     HarnessExecutionError,
+    HarnessProjectionError,
     _execution_diagnostic,
     _project_harness_result,
 )
@@ -88,6 +89,7 @@ class _TimeoutEngine:
             HarnessExecutionDiagnostic(
                 exception_type="TimeoutError",
                 failure_phase="model_execution",
+                failure_reason=None,
                 timeout_phase="model_execution",
             )
         )
@@ -116,6 +118,7 @@ async def test_runtime_timeout_only_projects_safe_diagnostic_fields(tmp_path: Pa
             "code": "engine_execution_failed",
             "exception_type": "TimeoutError",
             "failure_phase": "model_execution",
+            "failure_reason": None,
             "timeout_phase": "model_execution",
         }
         assert "底层" not in str(events[-1].payload)
@@ -130,6 +133,7 @@ def test_non_timeout_runtime_error_also_projects_failure_phase() -> None:
 
     assert diagnostic.exception_type == "RuntimeError"
     assert diagnostic.failure_phase == "model_execution"
+    assert diagnostic.failure_reason is None
     assert diagnostic.timeout_phase is None
 
 
@@ -150,3 +154,13 @@ def test_result_projection_does_not_depend_on_harness_private_sequence() -> None
     assert projected.final_response == "已完成"
     assert projected.finish_reason == "completed"
     assert projected.tool_names == ("inspect_video_workspace",)
+
+
+def test_result_projection_failure_uses_fixed_reason_code() -> None:
+    """投影失败只能暴露固定原因码，不能包含 SDK 的异常正文。"""
+
+    with pytest.raises(HarnessProjectionError, match="Harness 结果投影失败") as captured:
+        _project_harness_result(SimpleNamespace(events=[], final_response="", finish_reason="completed"))
+
+    diagnostic = _execution_diagnostic(captured.value, "result_projection")
+    assert diagnostic.failure_reason == "final_response_missing"

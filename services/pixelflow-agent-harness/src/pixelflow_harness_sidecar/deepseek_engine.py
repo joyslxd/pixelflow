@@ -21,6 +21,7 @@ class HarnessExecutionDiagnostic:
 
     exception_type: str
     failure_phase: str
+    failure_reason: str | None
     timeout_phase: str | None
 
 
@@ -30,6 +31,14 @@ class HarnessExecutionError(RuntimeError):
     def __init__(self, diagnostic: HarnessExecutionDiagnostic) -> None:
         super().__init__("Harness Runtime 执行失败")
         self.diagnostic = diagnostic
+
+
+class HarnessProjectionError(RuntimeError):
+    """标识公开结果投影的固定失败原因，禁止携带 SDK 原始正文。"""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__("Harness 结果投影失败")
+        self.reason_code = reason_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,10 +139,11 @@ class DeepSeekHarnessEngine:
         except Exception as error:
             diagnostic = _execution_diagnostic(error, phase)
             logger.warning(
-                "harness_execution_failed run_id=%s exception_type=%s failure_phase=%s timeout_phase=%s",
+                "harness_execution_failed run_id=%s exception_type=%s failure_phase=%s failure_reason=%s timeout_phase=%s",
                 run_id,
                 diagnostic.exception_type,
                 diagnostic.failure_phase,
+                diagnostic.failure_reason or "none",
                 diagnostic.timeout_phase or "none",
             )
             raise HarnessExecutionError(diagnostic) from error
@@ -162,6 +172,7 @@ def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagn
     return HarnessExecutionDiagnostic(
         exception_type=exception_type if exception_type.isidentifier() else "RuntimeError",
         failure_phase=phase,
+        failure_reason=(error.reason_code if isinstance(error, HarnessProjectionError) else None),
         timeout_phase=phase if is_timeout else None,
     )
 
@@ -171,7 +182,7 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
 
     events = getattr(result, "events", None)
     if not isinstance(events, list):
-        raise RuntimeError("Harness 未返回事件列表")
+        raise HarnessProjectionError("events_invalid")
     tool_names = tuple(
         str(data.get("name"))
         for event in events
@@ -182,10 +193,10 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
     )
     final_response = getattr(result, "final_response", None)
     if not isinstance(final_response, str) or not (response := final_response.strip()):
-        raise RuntimeError("Harness 未返回可公开的最终回复")
+        raise HarnessProjectionError("final_response_missing")
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
-        raise RuntimeError("Harness 返回了无效的完成原因")
+        raise HarnessProjectionError("finish_reason_invalid")
     return DeepSeekEngineResult(
         final_response=response[:8_000],
         finish_reason=finish_reason,
