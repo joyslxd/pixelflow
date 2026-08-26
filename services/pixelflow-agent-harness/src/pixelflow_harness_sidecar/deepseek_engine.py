@@ -20,6 +20,7 @@ class HarnessExecutionDiagnostic:
     """保存可审计但不含请求正文、响应或凭据的 Runtime 失败摘要。"""
 
     exception_type: str
+    failure_phase: str
     timeout_phase: str | None
 
 
@@ -152,9 +153,10 @@ class DeepSeekHarnessEngine:
         except Exception as error:
             diagnostic = _execution_diagnostic(error, phase)
             logger.warning(
-                "harness_execution_failed run_id=%s exception_type=%s timeout_phase=%s",
+                "harness_execution_failed run_id=%s exception_type=%s failure_phase=%s timeout_phase=%s",
                 run_id,
                 diagnostic.exception_type,
+                diagnostic.failure_phase,
                 diagnostic.timeout_phase or "none",
             )
             raise HarnessExecutionError(diagnostic) from error
@@ -182,5 +184,6 @@ def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagn
     is_timeout = isinstance(error, TimeoutError) or exception_type in timeout_names
     return HarnessExecutionDiagnostic(
         exception_type=exception_type if exception_type.isidentifier() else "RuntimeError",
+        failure_phase=phase,
         timeout_phase=phase if is_timeout else None,
     )

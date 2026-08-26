@@ -174,10 +174,14 @@ class RunService:
                 if isinstance(error, HarnessExecutionError)
                 else None
             )
+            failure_phase = (
+                diagnostic.failure_phase if diagnostic is not None else "sidecar_execution"
+            )
             logger.warning(
-                "sidecar_run_failed run_id=%s exception_type=%s timeout_phase=%s",
+                "sidecar_run_failed run_id=%s exception_type=%s failure_phase=%s timeout_phase=%s",
                 run_id,
                 diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                failure_phase,
                 diagnostic.timeout_phase if diagnostic is not None and diagnostic.timeout_phase else "none",
             )
             current = await self._store.get(run_id)
@@ -197,6 +201,7 @@ class RunService:
                     {
                         "code": "engine_execution_failed",
                         "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                        "failure_phase": failure_phase,
                         "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
                     },
                 )

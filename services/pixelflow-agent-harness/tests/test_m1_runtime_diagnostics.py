@@ -11,6 +11,7 @@ from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 from pixelflow_harness_sidecar.deepseek_engine import (
     HarnessExecutionDiagnostic,
     HarnessExecutionError,
+    _execution_diagnostic,
 )
 from pixelflow_harness_sidecar.event_store import SqliteRunEventStore
 from pixelflow_harness_sidecar.run_service import RunService
@@ -84,6 +85,7 @@ class _TimeoutEngine:
         raise HarnessExecutionError(
             HarnessExecutionDiagnostic(
                 exception_type="TimeoutError",
+                failure_phase="model_execution",
                 timeout_phase="model_execution",
             )
         )
@@ -111,8 +113,19 @@ async def test_runtime_timeout_only_projects_safe_diagnostic_fields(tmp_path: Pa
         assert events[-1].payload == {
             "code": "engine_execution_failed",
             "exception_type": "TimeoutError",
+            "failure_phase": "model_execution",
             "timeout_phase": "model_execution",
         }
         assert "底层" not in str(events[-1].payload)
     finally:
         await service.aclose()
+
+
+def test_non_timeout_runtime_error_also_projects_failure_phase() -> None:
+    """非超时异常同样必须记录固定失败阶段，且不误标记为超时。"""
+
+    diagnostic = _execution_diagnostic(RuntimeError("不会投影的原始异常"), "model_execution")
+
+    assert diagnostic.exception_type == "RuntimeError"
+    assert diagnostic.failure_phase == "model_execution"
+    assert diagnostic.timeout_phase is None
