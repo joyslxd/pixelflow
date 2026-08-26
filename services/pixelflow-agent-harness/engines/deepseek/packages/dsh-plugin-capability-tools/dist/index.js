@@ -1,13 +1,12 @@
 /** 将模型选择的 Capability Tool 调用安全转发给 PixelFlow Tool Broker。 */
 import { createHash, createHmac } from "node:crypto";
-import { defineTool } from "@deepseek-ai/dsh-tools";
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
 export const name = "pixelflow-capability-tools";
 /** 声明 Plugin 只依赖官方 Tool Registry。 */
 export const inject = ["tools"];
 /** 注册只读工作区 Tool；真实权限由 Gateway Broker 决定。 */
 export function apply(ctx) {
-    ctx.tools.register(defineTool({
+    ctx.tools.register({
         name: "inspect_video_workspace",
         description: "读取当前 PixelFlow 视频工作区的安全摘要。用户询问项目现状、分镜、素材或生成进度时应调用此工具，不要猜测工作区内容。",
         parameters: {},
@@ -54,7 +53,7 @@ export function apply(ctx) {
             const payload = await response.json();
             return canonicalObservation(payload);
         },
-    }));
+    });
 }
 /** 从进程环境读取本次 Run 必需的最小绑定数据。 */
 function settingsFromEnvironment() {

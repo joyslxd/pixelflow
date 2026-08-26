@@ -1,10 +1,24 @@
 /** 将模型选择的 Capability Tool 调用安全转发给 PixelFlow Tool Broker。 */
 
 import { createHash, createHmac } from "node:crypto";
-import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 
 interface ToolRegistryContext {
   tools: { register(tool: ToolDefinition): void };
+}
+
+/**
+ * 用途：声明本 Plugin 使用的最小 Tool 注册合同；影响：只依赖官方 Runtime 已注入的 tools 服务，
+ * 避免离线镜像再解析 Plugin 目录下未受版本控制的 npm 依赖。
+ */
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  output: {
+    schema: Record<string, unknown>;
+    render: (args: Record<string, unknown>, value: unknown) => Array<{ type: "text"; text: string }>;
+  };
+  execute: (args: Record<string, unknown>, exec: { callId: string | number }) => Promise<BrokerObservation>;
 }
 
 interface BrokerSettings {
@@ -35,7 +49,7 @@ export const inject = ["tools"];
 /** 注册只读工作区 Tool；真实权限由 Gateway Broker 决定。 */
 export function apply(ctx: ToolRegistryContext): void {
   ctx.tools.register(
-    defineTool({
+    {
       name: "inspect_video_workspace",
       description: "读取当前 PixelFlow 视频工作区的安全摘要。用户询问项目现状、分镜、素材或生成进度时应调用此工具，不要猜测工作区内容。",
       parameters: {},
@@ -80,7 +94,7 @@ export function apply(ctx: ToolRegistryContext): void {
         const payload: unknown = await response.json();
         return canonicalObservation(payload);
       },
-    }),
+    },
   );
 }
 

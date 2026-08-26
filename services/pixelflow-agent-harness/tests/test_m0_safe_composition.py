@@ -31,6 +31,18 @@ def test_m0_safe_composition_excludes_forbidden_capabilities() -> None:
     assert "includeDefaultRoots: false" in config
 
 
+def test_capability_plugin_does_not_require_untracked_node_modules_at_runtime() -> None:
+    """Capability Plugin 必须仅使用官方 Runtime 已注入的 Tool Registry。"""
+
+    plugin = (
+        Path(__file__).parents[1]
+        / "engines/deepseek/packages/dsh-plugin-capability-tools/dist/index.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'from "@deepseek-ai/dsh-tools"' not in plugin
+    assert "ctx.tools.register({" in plugin
+
+
 @pytest.mark.m0_runtime
 def test_fixed_python_sdk_starts_safe_jsonrpc_runtime(tmp_path: Path) -> None:
     """固定 SDK 必须能以不含 Bash 的 Composition 启动 JSON-RPC Runtime。"""
