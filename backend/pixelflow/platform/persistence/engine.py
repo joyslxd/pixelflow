@@ -94,6 +94,10 @@ async def close_engine() -> None:
 async def ensure_schema(engine: AsyncEngine) -> None:
     """在既有数据库上幂等创建 PixelFlow 自有 ORM 表，不管理 DeerFlow 平台表。"""
 
+    # 用途：在建表前注册控制面 ORM；影响：Workspace、Run/Event 等模型即使尚未被
+    # Gateway 后续装配代码导入，也会进入同一 PixelFlow Base 的 metadata。
+    from pixelflow.agent_control_plane.persistence import models as _control_plane_models  # noqa: F401
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 

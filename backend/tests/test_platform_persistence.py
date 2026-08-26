@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Integer, String, select
+from sqlalchemy import Integer, String, inspect, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pixelflow.platform.persistence import Base, close_engine, ensure_schema, get_engine, get_session_factory, init_engine
@@ -43,3 +43,23 @@ async def test_platform_persistence_owns_sqlite_engine_and_metadata(tmp_path) ->
         await close_engine()
     assert get_engine() is None
     assert get_session_factory() is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_registers_control_plane_workspace_tables(tmp_path) -> None:
+    """Gateway 先建库再装配 Repository 时，VideoWorkspace 表仍必须已创建。"""
+
+    await init_engine(
+        backend="sqlite",
+        url=f"sqlite+aiosqlite:///{tmp_path / 'control-plane.db'}",
+        sqlite_dir=str(tmp_path),
+    )
+    engine = get_engine()
+    assert engine is not None
+    try:
+        await ensure_schema(engine)
+        async with engine.begin() as connection:
+            table_names = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
+        assert "pixelflow_video_agent_workspaces" in table_names
+    finally:
+        await close_engine()
