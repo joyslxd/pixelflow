@@ -25,7 +25,9 @@ def _require_fields(source: str, type_name: str, fields: set[str]) -> None:
     start = source.index(marker)
     block = source[start : source.index("};", start)]
     for field in fields:
-        assert f"{field}:" in block, f"{type_name} 缺少字段 {field}"
+        assert (
+            f"{field}:" in block or f"{field}?:" in block
+        ), f"{type_name} 缺少字段 {field}"
 
 
 def test_runtime_contract_fields_do_not_drift_between_python_and_typescript() -> None:

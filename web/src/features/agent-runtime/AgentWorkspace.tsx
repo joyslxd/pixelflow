@@ -123,7 +123,12 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
         <h2 className="mt-6 text-sm font-medium">公开进度</h2>
         <pre className="mt-2 whitespace-pre-wrap text-xs text-ink-soft">{milestones}</pre>
         <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
-        <p className="mt-2 text-xs text-ink-soft">Workspace Command 与 Interrupt 会在对应公开 Gateway 合同上线后投影在此处；当前不会回退调用旧流程或旧轮询。</p>
+        {snapshot?.workspace ? (
+          <div className="mt-2 space-y-2 text-xs text-ink-soft">
+            <p>版本：{snapshot.workspace.revision}</p>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-canvas p-2">{JSON.stringify(snapshot.workspace.summary, null, 2)}</pre>
+          </div>
+        ) : <p className="mt-2 text-xs text-ink-soft">尚无可恢复的 Workspace 投影。Workspace Command 与 Interrupt 会在对应公开 Gateway 合同上线后接入，当前不会回退旧流程或旧轮询。</p>}
       </aside>
     </main>
   );

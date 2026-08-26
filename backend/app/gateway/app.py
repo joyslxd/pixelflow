@@ -214,6 +214,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     binding_repository=binding_repository,
                     event_repository=agent_runtime_repository,
                     task_store=task_store,
+                    video_repository=video_agent_repository,
                 )
                 from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
 

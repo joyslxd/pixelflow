@@ -24,6 +24,14 @@ class PublicAgentEventV1(_ControlPlaneModel):
     payload: dict[str, Any]
 
 
+class VideoWorkspaceProjectionV1(_ControlPlaneModel):
+    """浏览器可读取的视频工作区安全摘要，不暴露内部 payload 或供应商原始结果。"""
+
+    workspace_id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(ge=1)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentSnapshotV1(_ControlPlaneModel):
     """单一 Run 的可恢复公开快照。"""
 
@@ -32,6 +40,7 @@ class AgentSnapshotV1(_ControlPlaneModel):
     last_sequence: int = Field(ge=0)
     events: list[PublicAgentEventV1] = Field(default_factory=list)
     messages: list[dict[str, str]] = Field(default_factory=list)
+    workspace: VideoWorkspaceProjectionV1 | None = None
 
 
-__all__ = ["AgentSnapshotV1", "PublicAgentEventV1"]
+__all__ = ["AgentSnapshotV1", "PublicAgentEventV1", "VideoWorkspaceProjectionV1"]

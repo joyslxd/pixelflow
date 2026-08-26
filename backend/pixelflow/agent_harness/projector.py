@@ -8,7 +8,11 @@ from typing import Any, Protocol
 
 from pixelflow.agent_control_plane.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRecordConflictError
-from pixelflow.agent_control_plane.public_contracts import AgentSnapshotV1, PublicAgentEventV1
+from pixelflow.agent_control_plane.public_contracts import (
+    AgentSnapshotV1,
+    PublicAgentEventV1,
+    VideoWorkspaceProjectionV1,
+)
 from pixelflow.agent_tools.repository import RunBinding, SQLAgentToolRepository
 from pixelflow.tasks import PixelFlowConversationMessageRecord, PixelFlowTaskStore
 
@@ -40,10 +44,12 @@ class HarnessRunProjector:
         binding_repository: SQLAgentToolRepository,
         event_repository: _EventRepository,
         task_store: PixelFlowTaskStore,
+        video_repository: object | None = None,
     ) -> None:
         self._bindings = binding_repository
         self._events = event_repository
         self._task_store = task_store
+        self._video_repository = video_repository
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
 
@@ -101,12 +107,31 @@ class HarnessRunProjector:
             state = events[-1].payload.get("status")
             if isinstance(state, str) and state in {"accepted", "running", "completed", "failed", "cancelled"}:
                 status = state
+        workspace = await self._workspace_projection(binding)
         return AgentSnapshotV1(
             run_id=run_id,
             status=status,
             last_sequence=0 if not events else events[-1].sequence,
             events=[self._to_public_event(event) for event in events],
             messages=response_messages,
+            workspace=workspace,
+        )
+
+    async def _workspace_projection(self, binding: RunBinding) -> VideoWorkspaceProjectionV1 | None:
+        """从权威 Workspace Repository 生成只读摘要；异常或归属不一致时不泄漏业务内容。"""
+
+        repository = self._video_repository
+        if repository is None or not hasattr(repository, "get_workspace"):
+            return None
+        workspace = await repository.get_workspace(binding.user_id, binding.workspace_id)
+        if workspace is None or workspace.conversation_id != binding.conversation_id:
+            return None
+        from pixelflow.video.workspace import build_workspace_digest
+
+        return VideoWorkspaceProjectionV1(
+            workspace_id=workspace.workspace_id,
+            revision=workspace.revision,
+            summary=build_workspace_digest(workspace),
         )
 
     async def events_after(

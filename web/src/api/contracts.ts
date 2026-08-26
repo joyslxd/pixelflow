@@ -39,4 +39,9 @@ export type AgentSnapshotV1 = {
   last_sequence: number;
   events: PublicAgentEventV1[];
   messages: Array<{ message_id?: string; role: string; content: string }>;
+  workspace?: {
+    workspace_id: string;
+    revision: number;
+    summary: Record<string, unknown>;
+  } | null;
 };
