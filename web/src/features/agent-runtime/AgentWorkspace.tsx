@@ -1,181 +1,130 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+/** 新 Runtime 工作台组合根：消息、公开进度与只读 Workspace 均从 Snapshot 投影。 */
 
-import { getBrowserAuthorization } from "@/lib/authStorage";
-import type { AgentSnapshotV1, TurnStartV1 } from "@/api/contracts";
+import { type FormEvent, useMemo, useState } from "react";
 
-type Conversation = {
-  conversation_id: string;
-  title: string;
-  revision: number;
+import type { TurnStartV1 } from "@/api/contracts";
+
+import { useAgentConversation } from "./useAgentConversation";
+
+type AgentWorkspaceProps = {
+  conversationId?: string;
 };
 
-type Message = {
-  message_id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-};
+function statusLabel(status: string | undefined): string {
+  /** 把固定 Run 状态映射为用户可读文本，不暴露 Harness 内部概念。 */
 
-type Snapshot = AgentSnapshotV1;
-
-const AGENT_BASE = "/agent/conversations";
-
-function headers(): HeadersInit {
-  const authorization = getBrowserAuthorization();
-  return authorization ? { Authorization: authorization } : {};
+  return ({ accepted: "已受理", running: "正在处理", completed: "已完成", failed: "处理失败", cancelled: "已取消" } as Record<string, string>)[status ?? ""] ?? "未启动";
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${AGENT_BASE}${path}`, {
-    ...init,
-    headers: { ...headers(), ...(init?.headers || {}) },
-  });
-  if (!response.ok) {
-    throw new Error(`请求失败（${response.status}）`);
-  }
-  return response.json() as Promise<T>;
-}
-
-/** 只消费 Gateway 公开 Snapshot/SSE 的新工作台，不保留旧任务轮询状态。 */
-export function AgentWorkspace() {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [conversation, setConversation] = useState<Conversation | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+/** 只消费 Gateway 公开 Snapshot/SSE 的新工作台，不保留旧任务轮询或业务状态副本。 */
+export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
+  const {
+    conversations,
+    detail,
+    runtime,
+    error,
+    loading,
+    newConversation,
+    openConversation,
+    submitTurn,
+    refreshActiveRun,
+    cancelActiveRun,
+  } = useAgentConversation(conversationId);
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspaceRevision, setWorkspaceRevision] = useState("1");
   const [input, setInput] = useState("");
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-
-  const activeRunId = snapshot?.run_id || "";
-  const eventSummary = useMemo(
-    () => snapshot?.events.map((event) => `${event.sequence}. ${event.type}`).join("\n") || "等待 Run 事件",
+  const snapshot = runtime.snapshot;
+  const milestones = useMemo(
+    () => snapshot?.events.map((event) => `${event.sequence}. ${event.type}`).join("\n") ?? "等待公开进度",
     [snapshot],
   );
 
-  const loadConversations = async () => {
-    const result = await request<{ items: Conversation[] }>("?page_size=20");
-    setConversations(result.items);
-  };
-
-  const loadConversation = async (conversationId: string) => {
-    const detail = await request<{ conversation: Conversation; messages: Message[] }>(`/${conversationId}`);
-    setConversation(detail.conversation);
-    setMessages(detail.messages);
-    setSnapshot(null);
-    abortRef.current?.abort();
-  };
-
-  useEffect(() => {
-    void loadConversations().catch(() => setError("无法加载对话，请检查登录状态。"));
-    return () => abortRef.current?.abort();
-  }, []);
-
-  const createConversation = async () => {
-    const created = await request<Conversation>("", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "新的 Harness 对话" }),
-    });
-    await loadConversations();
-    await loadConversation(created.conversation_id);
-  };
-
-  const refreshSnapshot = async (conversationId: string, runId: string) => {
-    const next = await request<Snapshot>(`/${conversationId}/harness-runs/${runId}/snapshot`);
-    setSnapshot(next);
-  };
-
-  const consumeEvents = async (conversationId: string, runId: string) => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const response = await fetch(
-      `${AGENT_BASE}/${conversationId}/harness-runs/${runId}/events?after_sequence=0`,
-      { headers: headers(), signal: controller.signal },
-    );
-    if (!response.ok || !response.body) throw new Error("无法连接 Harness 事件流。");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (!controller.signal.aborted) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const frames = buffer.split("\n\n");
-      buffer = frames.pop() || "";
-      for (const frame of frames) {
-        const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
-        if (!data) continue;
-        const event = JSON.parse(data) as { sequence: number };
-        setSnapshot((current) => current && event.sequence > current.last_sequence
-          ? { ...current, last_sequence: event.sequence }
-          : current);
-        await refreshSnapshot(conversationId, runId);
-      }
-    }
-  };
-
   const submit = async (event: FormEvent) => {
+    /** 同一提交只创建一次 UUID；请求失败后不清空输入，调用方可复用原草稿重试。 */
+
     event.preventDefault();
-    if (!conversation || !input.trim() || !workspaceId.trim()) return;
+    if (!detail || !input.trim() || !workspaceId.trim() || sending) return;
+    const revision = Number(workspaceRevision);
+    if (!Number.isSafeInteger(revision) || revision < 1) return;
+    const turn: TurnStartV1 = {
+      client_input_id: crypto.randomUUID(),
+      workspace_id: workspaceId.trim(),
+      expected_workspace_revision: revision,
+      content: input.trim(),
+    };
     setSending(true);
-    setError("");
     try {
-      const turn: TurnStartV1 = {
-        client_input_id: crypto.randomUUID(),
-        workspace_id: workspaceId.trim(),
-        expected_workspace_revision: Number(workspaceRevision),
-        content: input.trim(),
-      };
-      const started = await request<{ run_id: string }>(`/${conversation.conversation_id}/harness-turns/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(turn),
-      });
-      setMessages((current) => [...current, { message_id: crypto.randomUUID(), role: "user", content: input.trim() }]);
+      await submitTurn(turn);
       setInput("");
-      await refreshSnapshot(conversation.conversation_id, started.run_id);
-      void consumeEvents(conversation.conversation_id, started.run_id).catch((reason) => {
-        if ((reason as Error).name !== "AbortError") setError("事件流已断开，可刷新 Snapshot 恢复。");
-      });
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "启动 Harness Run 失败。");
+    } catch {
+      // Hook 已保留权威 Snapshot；草稿留在输入框供用户显式重试。
     } finally {
       setSending(false);
     }
   };
 
   return (
-    <main className="grid h-full grid-cols-[240px_minmax(0,1fr)_280px] gap-px bg-line">
-      <aside className="bg-surface p-4">
-        <button className="w-full rounded-lg bg-brand px-3 py-2 text-sm text-white" onClick={() => void createConversation()}>
+    <main className="grid h-full min-h-0 grid-cols-[220px_minmax(0,1fr)_300px] gap-px bg-line">
+      <aside className="min-h-0 overflow-y-auto bg-surface p-4">
+        <button className="w-full rounded-lg bg-brand px-3 py-2 text-sm text-white" onClick={() => void newConversation()}>
           新建对话
         </button>
         <div className="mt-4 space-y-1">
           {conversations.map((item) => (
-            <button key={item.conversation_id} onClick={() => void loadConversation(item.conversation_id)} className="block w-full rounded px-2 py-2 text-left text-sm hover:bg-accent-soft">
+            <button
+              key={item.conversation_id}
+              onClick={() => void openConversation(item.conversation_id)}
+              className={`block w-full rounded px-2 py-2 text-left text-sm hover:bg-accent-soft ${detail?.conversation.conversation_id === item.conversation_id ? "bg-accent-soft" : ""}`}
+            >
               {item.title || item.conversation_id}
             </button>
           ))}
         </div>
       </aside>
       <section className="flex min-w-0 flex-col bg-surface">
+        <header className="flex items-center justify-between border-b border-line px-5 py-3 text-sm">
+          <span className="truncate font-medium">{detail?.conversation.title || "选择或新建对话"}</span>
+          <span className="text-ink-soft">{runtime.connection === "reconnecting" ? "正在重连" : runtime.connection === "connected" ? "已连接" : runtime.connection === "disconnected" ? "连接已断开" : ""}</span>
+        </header>
         <div className="flex-1 space-y-3 overflow-y-auto p-6">
-          {messages.map((message) => <p key={message.message_id} className={message.role === "user" ? "text-right" : "text-left"}>{message.content}</p>)}
-          {snapshot?.messages.map((message, index) => <p key={`${snapshot.run_id}-${index}`} className="text-left">{message.content}</p>)}
+          {loading ? <p className="text-sm text-ink-soft">正在恢复权威状态…</p> : null}
+          {detail?.messages.map((message) => (
+            <p key={message.message_id} className={message.role === "user" ? "text-right" : "text-left"}>{message.content}</p>
+          ))}
+          {snapshot?.messages.map((message, index) => (
+            <p key={message.message_id ?? `${snapshot.run_id}-${index}`} className="text-left">{message.content}</p>
+          ))}
         </div>
-        <form onSubmit={submit} className="border-t border-line p-4">
-          <div className="mb-2 grid grid-cols-2 gap-2">
-            <input value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="工作区 ID" className="rounded border border-line px-3 py-2 text-sm" />
-            <input value={workspaceRevision} onChange={(event) => setWorkspaceRevision(event.target.value)} inputMode="numeric" placeholder="工作区 revision" className="rounded border border-line px-3 py-2 text-sm" />
+        <div className="border-t border-line p-4">
+          <div className="mb-2 rounded bg-accent-soft px-3 py-2 text-xs text-ink-soft" aria-live="polite">
+            任务看板：{statusLabel(snapshot?.status)}
           </div>
-          <div className="flex gap-2"><input value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入给 Harness Agent" className="min-w-0 flex-1 rounded border border-line px-3 py-2" /><button disabled={sending} className="rounded bg-accent px-4 text-white disabled:opacity-50">发送</button></div>
-          {error ? <p className="mt-2 text-sm text-red-600">{error}</p> : null}
-        </form>
+          <form onSubmit={submit}>
+            <div className="mb-2 grid grid-cols-2 gap-2">
+              <input value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="工作区 ID" className="rounded border border-line px-3 py-2 text-sm" />
+              <input value={workspaceRevision} onChange={(event) => setWorkspaceRevision(event.target.value)} inputMode="numeric" placeholder="工作区 revision" className="rounded border border-line px-3 py-2 text-sm" />
+            </div>
+            <div className="flex gap-2">
+              <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入给 Agent" className="min-w-0 flex-1 rounded border border-line px-3 py-2" />
+              <button disabled={!detail || sending} className="rounded bg-accent px-4 text-white disabled:opacity-50">发送</button>
+            </div>
+          </form>
+          {error ? <p className="mt-2 text-sm text-red-600" role="alert">{error}</p> : null}
+        </div>
       </section>
-      <aside className="bg-surface p-4 text-sm"><p>Run：{activeRunId || "未启动"}</p><p>状态：{snapshot?.status || "idle"}</p><pre className="mt-3 whitespace-pre-wrap text-xs text-ink-soft">{eventSummary}</pre></aside>
+      <aside className="min-h-0 overflow-y-auto bg-surface p-4 text-sm">
+        <div className="flex items-center justify-between gap-2">
+          <p>运行：{snapshot?.run_id ?? "未启动"}</p>
+          <button className="rounded border border-line px-2 py-1 text-xs" onClick={() => void refreshActiveRun()} disabled={!snapshot}>刷新</button>
+        </div>
+        <p className="mt-1">状态：{statusLabel(snapshot?.status)}</p>
+        {snapshot && snapshot.status === "running" ? <button className="mt-3 rounded border border-red-200 px-2 py-1 text-xs text-red-700" onClick={() => void cancelActiveRun()}>取消当前运行</button> : null}
+        <h2 className="mt-6 text-sm font-medium">公开进度</h2>
+        <pre className="mt-2 whitespace-pre-wrap text-xs text-ink-soft">{milestones}</pre>
+        <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
+        <p className="mt-2 text-xs text-ink-soft">Workspace Command 与 Interrupt 会在对应公开 Gateway 合同上线后投影在此处；当前不会回退调用旧流程或旧轮询。</p>
+      </aside>
     </main>
   );
 }

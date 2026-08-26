@@ -35,7 +35,7 @@ export type PublicAgentEventV1 = {
 
 export type AgentSnapshotV1 = {
   run_id: string;
-  status: "accepted" | "running" | "completed" | "failed";
+  status: "accepted" | "running" | "completed" | "failed" | "cancelled";
   last_sequence: number;
   events: PublicAgentEventV1[];
   messages: Array<{ message_id?: string; role: string; content: string }>;
