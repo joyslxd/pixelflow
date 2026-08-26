@@ -20,6 +20,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
+from pixelflow.agent_control_plane.contracts import (
+    AgentAction,
+    InterruptResponseRequest,
+    WorkspaceCommandRequest,
+)
+from pixelflow.agent_control_plane.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
+)
+from pixelflow.agent_control_plane.public_contracts import VideoWorkspaceProjectionV1
 from pixelflow.tasks import (
     ConversationRevisionConflictError,
     PixelFlowConversationMessageRecord,
@@ -136,6 +145,22 @@ class HarnessRunCancelResponse(BaseModel):
     termination_reason: str | None = Field(default=None, max_length=120)
 
 
+class HarnessWorkspaceCommandResponse(BaseModel):
+    """公开工作区命令结果；浏览器只能消费新的安全摘要和 revision。"""
+
+    client_command_id: uuid.UUID
+    workspace: VideoWorkspaceProjectionV1
+
+
+class HarnessInterruptResponseResponse(BaseModel):
+    """额度中断取消结果；不回显 Provider、计划参数或 Sidecar 私有状态。"""
+
+    client_response_id: uuid.UUID
+    interrupt_id: str = Field(min_length=1, max_length=128)
+    status: Literal["cancelled"]
+    workspace: VideoWorkspaceProjectionV1
+
+
 class ConversationMessageUpdateRequest(BaseModel):
     content: str | None = None
     payload: dict[str, Any] | None = None
@@ -246,6 +271,35 @@ def _harness_video_repository(request: Request) -> Any:
             detail={"code": "harness_workspace_repository_unavailable"},
         )
     return repository
+
+
+def _workspace_projection(workspace: Any) -> VideoWorkspaceProjectionV1:
+    """将权威工作区压缩为浏览器可见摘要，禁止返回内部 payload。"""
+
+    from pixelflow.video.workspace import build_workspace_digest
+
+    return VideoWorkspaceProjectionV1(
+        workspace_id=workspace.workspace_id,
+        revision=workspace.revision,
+        summary=build_workspace_digest(workspace),
+    )
+
+
+async def _require_conversation_workspace(
+    request: Request,
+    *,
+    user_id: str,
+    conversation_id: str,
+    workspace_id: str,
+) -> Any:
+    """校验会话归属后读取权威工作区，Router 不接受浏览器传来的业务副本。"""
+
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    workspace = await _harness_video_repository(request).get_workspace(user_id, workspace_id)
+    if workspace is None or workspace.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail={"code": "harness_workspace_not_found"})
+    return workspace
 
 
 async def _build_harness_context(
@@ -567,6 +621,164 @@ async def start_harness_turn(
         run_id=result.run_id,
         status="accepted",
         workspace_revision=workspace.revision,
+    )
+
+
+_PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEYS = frozenset(
+    {
+        "quota_interrupt",
+        "last_quota_resolution",
+        "generation_jobs",
+        "scene_asset_job",
+    }
+)
+_PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEY_FRAGMENTS = frozenset(
+    {"credential", "secret", "token", "password", "api_key", "apikey", "authorization", "provider"}
+)
+
+
+def _workspace_command_contains_forbidden_key(value: object) -> bool:
+    """递归拒绝浏览器向工作区写入凭据、Provider 与运行时控制字段。"""
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).casefold()
+            if (
+                key in _PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEYS
+                or any(fragment in normalized for fragment in _PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEY_FRAGMENTS)
+                or _workspace_command_contains_forbidden_key(child)
+            ):
+                return True
+    if isinstance(value, list):
+        return any(_workspace_command_contains_forbidden_key(item) for item in value)
+    return False
+
+
+@router.post(
+    "/{conversation_id}/workspaces/commands",
+    response_model=HarnessWorkspaceCommandResponse,
+)
+async def apply_harness_workspace_command(
+    conversation_id: str,
+    body: WorkspaceCommandRequest,
+    request: Request,
+) -> HarnessWorkspaceCommandResponse:
+    """执行带 revision 的公开 Workspace Command，所有 Provider/额度字段均拒绝浏览器直写。"""
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if _workspace_command_contains_forbidden_key(body.patch):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "harness_workspace_command_forbidden_field"},
+        )
+    await _require_conversation_workspace(
+        request,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        workspace_id=body.workspace_id,
+    )
+    try:
+        from datetime import UTC, datetime
+
+        workspace = await _harness_video_repository(request).apply_workspace_patch(
+            user_id,
+            body.workspace_id,
+            body.patch,
+            expected_revision=body.expected_workspace_revision,
+            now=datetime.now(UTC),
+        )
+    except AgentRuntimeRecordConflictError as error:
+        current = await _harness_video_repository(request).get_workspace(user_id, body.workspace_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "harness_workspace_revision_conflict",
+                "current_revision": None if current is None else current.revision,
+            },
+        ) from error
+    return HarnessWorkspaceCommandResponse(
+        client_command_id=body.client_command_id,
+        workspace=_workspace_projection(workspace),
+    )
+
+
+@router.post(
+    "/{conversation_id}/workspaces/{workspace_id}/interrupts/{interrupt_id}/responses",
+    response_model=HarnessInterruptResponseResponse,
+)
+async def respond_to_harness_interrupt(
+    conversation_id: str,
+    workspace_id: str,
+    interrupt_id: str,
+    body: InterruptResponseRequest,
+    request: Request,
+) -> HarnessInterruptResponseResponse:
+    """仅取消当前额度中断；继续/重试需由后续受控 Harness Tool 创建新的 M06 Operation。"""
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    action = body.value.explicit_action
+    if action is None or action.action is not AgentAction.CANCEL_WORKFLOW:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "harness_interrupt_action_not_supported"},
+        )
+    workspace = await _require_conversation_workspace(
+        request,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+    )
+    interrupt = workspace.payload.get("quota_interrupt")
+    resolution = workspace.payload.get("last_quota_resolution")
+    if interrupt is None and isinstance(resolution, dict) and resolution.get("event_id") == interrupt_id:
+        return HarnessInterruptResponseResponse(
+            client_response_id=body.client_response_id,
+            interrupt_id=interrupt_id,
+            status="cancelled",
+            workspace=_workspace_projection(workspace),
+        )
+    if not isinstance(interrupt, dict) or interrupt.get("quota_interrupt_id") != interrupt_id:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_not_open"})
+    plan_id = interrupt.get("plan_id")
+    step_id = interrupt.get("step_id")
+    job_id = interrupt.get("job_id")
+    quota_pause_revision = interrupt.get("quota_pause_revision")
+    if (
+        not all(isinstance(value, str) and value for value in (plan_id, step_id, job_id))
+        or not isinstance(quota_pause_revision, int)
+        or isinstance(quota_pause_revision, bool)
+        or quota_pause_revision < 0
+    ):
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_payload_invalid"})
+    try:
+        from datetime import UTC, datetime
+
+        await _harness_video_repository(request).cancel_quota_interrupted_plan(
+            user_id,
+            plan_id,
+            step_id,
+            quota_interrupt_id=interrupt_id,
+            job_id=job_id,
+            quota_pause_revision=quota_pause_revision,
+            now=datetime.now(UTC),
+        )
+    except AgentRuntimeRecordConflictError as error:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_state_conflict"}) from error
+    updated = await _require_conversation_workspace(
+        request,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+    )
+    return HarnessInterruptResponseResponse(
+        client_response_id=body.client_response_id,
+        interrupt_id=interrupt_id,
+        status="cancelled",
+        workspace=_workspace_projection(updated),
     )
 
 

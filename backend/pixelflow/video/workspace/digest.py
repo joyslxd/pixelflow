@@ -287,6 +287,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
     dirty = payload.get("dirty_scene_ids")
     dirty_ids = [str(item) for item in dirty] if isinstance(dirty, list) else []
     qc = _as_mapping(payload.get("qc")) or {}
+    quota_interrupt = _as_mapping(payload.get("quota_interrupt")) or {}
     product = _as_mapping(payload.get("product_info")) or {}
     safe_product = {
         key: value
@@ -332,6 +333,9 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "qc_status": str(qc.get("status") or qc.get("verdict") or "") or None,
             "qc_issue_count": _safe_len(qc.get("issues") or qc.get("findings")),
             "pending_confirmations": bool(payload.get("pending_confirmations")),
+            "quota_interrupt_id": str(quota_interrupt.get("quota_interrupt_id") or "") or None,
+            "quota_interrupt_state": str(quota_interrupt.get("state") or "") or None,
+            "quota_interrupt_reason_code": str(quota_interrupt.get("reason_code") or "") or None,
             "failed_scene_asset_count": _safe_len(payload.get("scene_asset_failures")),
             "has_scene_packages": bool(scenes),
             "has_scene_asset_images": workspace_has_scene_asset_images(payload),

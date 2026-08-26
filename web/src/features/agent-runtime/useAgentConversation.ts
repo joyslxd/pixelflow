@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  applyHarnessWorkspaceCommand,
   cancelHarnessRun,
   getHarnessSnapshot,
+  respondToHarnessInterrupt,
   startHarnessTurn,
 } from "@/api/agentRuntime";
-import type { TurnStartV1 } from "@/api/contracts";
+import type { InterruptResponseV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
 import {
   createConversation,
   getConversation,
@@ -172,6 +174,41 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [detail, refreshActiveRun, runtime.snapshot]);
 
+  const submitWorkspaceCommand = useCallback(async (command: WorkspaceCommandV1) => {
+    /** 命令成功后立即回读 Snapshot，浏览器不以返回体维护第二份工作区状态。 */
+
+    if (detail === null) throw new Error("conversation_unselected");
+    try {
+      await applyHarnessWorkspaceCommand(detail.conversation.conversation_id, command);
+      await refreshActiveRun();
+    } catch {
+      setError("工作区修改未完成，请刷新后确认当前版本。");
+      throw new Error("workspace_command_failed");
+    }
+  }, [detail, refreshActiveRun]);
+
+  const cancelQuotaInterrupt = useCallback(async (
+    workspaceId: string,
+    interruptId: string,
+    response: InterruptResponseV1,
+  ) => {
+    /** 额度中断取消完成后统一从 Snapshot 恢复 Workspace 与任务进度。 */
+
+    if (detail === null) throw new Error("conversation_unselected");
+    try {
+      await respondToHarnessInterrupt(
+        detail.conversation.conversation_id,
+        workspaceId,
+        interruptId,
+        response,
+      );
+      await refreshActiveRun();
+    } catch {
+      setError("额度中断取消未完成，请刷新后确认当前状态。");
+      throw new Error("interrupt_response_failed");
+    }
+  }, [detail, refreshActiveRun]);
+
   useEffect(() => {
     void refreshConversations().catch(() => setError("无法加载对话，请检查登录状态。"));
     return stopStream;
@@ -190,6 +227,8 @@ export function useAgentConversation(initialConversationId?: string) {
     newConversation,
     openConversation,
     submitTurn,
+    submitWorkspaceCommand,
+    cancelQuotaInterrupt,
     refreshActiveRun,
     cancelActiveRun,
   };

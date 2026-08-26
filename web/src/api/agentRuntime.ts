@@ -1,6 +1,12 @@
 /** Turn、Snapshot 与公开 SSE 的 Runtime Client。 */
 
-import type { AgentSnapshotV1, PublicAgentEventV1, TurnStartV1 } from "./contracts";
+import type {
+  AgentSnapshotV1,
+  InterruptResponseV1,
+  PublicAgentEventV1,
+  TurnStartV1,
+  WorkspaceCommandV1,
+} from "./contracts";
 import { agentApiUrl, agentHeaders, agentRequest } from "./http";
 
 export type StartedHarnessRunV1 = {
@@ -14,6 +20,18 @@ export type HarnessRunCancellationV1 = {
   run_id: string;
   status: "completed" | "failed" | "cancelled";
   termination_reason: string | null;
+};
+
+export type HarnessWorkspaceCommandResultV1 = {
+  client_command_id: string;
+  workspace: NonNullable<AgentSnapshotV1["workspace"]>;
+};
+
+export type HarnessInterruptResultV1 = {
+  client_response_id: string;
+  interrupt_id: string;
+  status: "cancelled";
+  workspace: NonNullable<AgentSnapshotV1["workspace"]>;
 };
 
 export function startHarnessTurn(
@@ -46,6 +64,40 @@ export function cancelHarnessRun(conversationId: string, runId: string): Promise
   return agentRequest<HarnessRunCancellationV1>(
     `/conversations/${encodeURIComponent(conversationId)}/harness-runs/${encodeURIComponent(runId)}/cancel`,
     { method: "POST" },
+  );
+}
+
+export function applyHarnessWorkspaceCommand(
+  conversationId: string,
+  body: WorkspaceCommandV1,
+): Promise<HarnessWorkspaceCommandResultV1> {
+  /** 以稳定命令 ID 与 revision 修改权威工作区；Provider/额度字段由 Gateway 拒绝直写。 */
+
+  return agentRequest<HarnessWorkspaceCommandResultV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/workspaces/commands`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function respondToHarnessInterrupt(
+  conversationId: string,
+  workspaceId: string,
+  interruptId: string,
+  body: InterruptResponseV1,
+): Promise<HarnessInterruptResultV1> {
+  /** 当前只支持取消 M06 额度中断；继续/重试必须由新的受控 Tool 创建 Operation。 */
+
+  return agentRequest<HarnessInterruptResultV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/responses`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
   );
 }
 
