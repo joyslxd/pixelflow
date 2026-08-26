@@ -38,7 +38,6 @@ class DeepSeekEngineResult:
 
     final_response: str
     finish_reason: str | None
-    session_event_sequences: tuple[int, ...]
     tool_names: tuple[str, ...]
 
 
@@ -127,29 +126,7 @@ class DeepSeekHarnessEngine:
             harness.close()
             harness = None
             phase = "result_projection"
-            sequences = tuple(
-                event["seq"]
-                for event in result.events
-                if isinstance(event.get("seq"), int)
-            )
-            if not sequences or sequences != tuple(sorted(sequences)):
-                raise RuntimeError("Harness Session 事件序号不连续或缺失")
-            tool_names = tuple(
-                str(data.get("name"))
-                for event in result.events
-                if event.get("type") == "tool/call"
-                and isinstance((data := event.get("data")), dict)
-                and isinstance(data.get("name"), str)
-            )
-            response = result.final_response.strip()
-            if not response:
-                raise RuntimeError("Harness 未返回可公开的最终回复")
-            return DeepSeekEngineResult(
-                final_response=response[:8_000],
-                finish_reason=result.finish_reason,
-                session_event_sequences=sequences,
-                tool_names=tool_names,
-            )
+            return _project_harness_result(result)
         except Exception as error:
             diagnostic = _execution_diagnostic(error, phase)
             logger.warning(
@@ -186,4 +163,31 @@ def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagn
         exception_type=exception_type if exception_type.isidentifier() else "RuntimeError",
         failure_phase=phase,
         timeout_phase=phase if is_timeout else None,
+    )
+
+
+def _project_harness_result(result: object) -> DeepSeekEngineResult:
+    """投影 SDK 公开结果，不依赖不会暴露给 PixelFlow 的 Session 内部序号。"""
+
+    events = getattr(result, "events", None)
+    if not isinstance(events, list):
+        raise RuntimeError("Harness 未返回事件列表")
+    tool_names = tuple(
+        str(data.get("name"))
+        for event in events
+        if isinstance(event, dict)
+        and event.get("type") == "tool/call"
+        and isinstance((data := event.get("data")), dict)
+        and isinstance(data.get("name"), str)
+    )
+    final_response = getattr(result, "final_response", None)
+    if not isinstance(final_response, str) or not (response := final_response.strip()):
+        raise RuntimeError("Harness 未返回可公开的最终回复")
+    finish_reason = getattr(result, "finish_reason", None)
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise RuntimeError("Harness 返回了无效的完成原因")
+    return DeepSeekEngineResult(
+        final_response=response[:8_000],
+        finish_reason=finish_reason,
+        tool_names=tool_names,
     )

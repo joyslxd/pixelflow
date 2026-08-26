@@ -81,7 +81,6 @@ class _BlockingEngine:
         return DeepSeekEngineResult(
             final_response="不会在取消后公开",
             finish_reason="completed",
-            session_event_sequences=(1,),
             tool_names=(),
         )
 

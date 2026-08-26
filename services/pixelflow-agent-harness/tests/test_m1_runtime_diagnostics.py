@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from pixelflow_harness_sidecar.deepseek_engine import (
     HarnessExecutionDiagnostic,
     HarnessExecutionError,
     _execution_diagnostic,
+    _project_harness_result,
 )
 from pixelflow_harness_sidecar.event_store import SqliteRunEventStore
 from pixelflow_harness_sidecar.run_service import RunService
@@ -129,3 +131,22 @@ def test_non_timeout_runtime_error_also_projects_failure_phase() -> None:
     assert diagnostic.exception_type == "RuntimeError"
     assert diagnostic.failure_phase == "model_execution"
     assert diagnostic.timeout_phase is None
+
+
+def test_result_projection_does_not_depend_on_harness_private_sequence() -> None:
+    """PixelFlow 公开序号由 Event Store 生成，不能依赖 SDK 内部事件序号。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {"type": "assistant/message", "data": {}},
+                {"type": "tool/call", "data": {"name": "inspect_video_workspace"}},
+            ],
+            final_response=" 已完成 ",
+            finish_reason="completed",
+        )
+    )
+
+    assert projected.final_response == "已完成"
+    assert projected.finish_reason == "completed"
+    assert projected.tool_names == ("inspect_video_workspace",)
