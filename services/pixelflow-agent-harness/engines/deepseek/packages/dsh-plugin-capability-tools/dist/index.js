@@ -9,17 +9,21 @@ export function apply(ctx) {
     ctx.tools.register({
         name: "inspect_video_workspace",
         description: "读取当前 PixelFlow 视频工作区的安全摘要。用户询问项目现状、分镜、素材或生成进度时应调用此工具，不要猜测工作区内容。",
-        parameters: {},
+        parameters: {
+            type: "object",
+            properties: {},
+        },
         output: {
             schema: {
                 type: "object",
                 additionalProperties: false,
                 properties: {
-                    code: { type: "string", required: true, const: "workspace_inspected" },
-                    public_summary: { type: "string", required: true },
-                    workspace_revision: { type: "integer", required: true },
-                    artifact_refs: { type: "array", required: true, items: { type: "string" } },
+                    code: { type: "string", const: "workspace_inspected" },
+                    public_summary: { type: "string" },
+                    workspace_revision: { type: "integer" },
+                    artifact_refs: { type: "array", items: { type: "string" } },
                 },
+                required: ["code", "public_summary", "workspace_revision", "artifact_refs"],
             },
             render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
         },
