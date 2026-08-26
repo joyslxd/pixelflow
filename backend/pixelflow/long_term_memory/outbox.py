@@ -161,7 +161,12 @@ class MemoryWriteWorker:
             return False
         try:
             if claimed.event_id:
-                stable = await self._adapter.get_event(event_id=claimed.event_id)
+                stable = await self._adapter.get_event(
+                    event_id=claimed.event_id,
+                    user_id=claimed.user_id,
+                    content=claimed.content,
+                    write_key=claimed.write_key,
+                )
                 if stable is not None:
                     await self._outbox.complete(
                         write_key=claimed.write_key,

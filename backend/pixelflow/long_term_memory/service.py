@@ -48,7 +48,14 @@ class LongTermMemoryPort(Protocol):
 
     async def get(self, *, memory_id: str) -> LongTermMemoryItem | None: ...
 
-    async def get_event(self, *, event_id: str) -> LongTermMemoryItem | None: ...
+    async def get_event(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        content: str,
+        write_key: str,
+    ) -> LongTermMemoryItem | None: ...
 
     async def delete(self, *, memory_id: str) -> bool: ...
 
@@ -135,6 +142,22 @@ class VolcengineMem0Adapter:
         anonymous_user_id = _anonymous_user_id(user_id)
         if not self._config.available or not query.strip() or not anonymous_user_id:
             return []
+        records = await self._search_records(
+            anonymous_user_id=anonymous_user_id,
+            query=query,
+            limit=limit,
+        )
+        return [item for record in records if (item := self._map_item(record)) is not None]
+
+    async def _search_records(
+        self,
+        *,
+        anonymous_user_id: str,
+        query: str,
+        limit: int,
+    ) -> list[Mapping[str, object]]:
+        """按匿名主体检索 v1 记录，供公开 Context 与事件完成确认复用。"""
+
         payload = await self._v1_request(
             "POST",
             "/v1/memories/search/",
@@ -143,15 +166,23 @@ class VolcengineMem0Adapter:
         records = payload.get("results", payload) if isinstance(payload, Mapping) else payload
         if not isinstance(records, list):
             return []
-        items: list[LongTermMemoryItem] = []
-        for record in records[:limit]:
-            if not isinstance(record, Mapping):
-                continue
-            content = str(record.get("memory") or record.get("content") or "").strip()
-            memory_id = str(record.get("id") or record.get("memory_id") or "").strip()
-            if content and memory_id:
-                items.append(LongTermMemoryItem(memory_id=memory_id, content=content[:1_000], category="preference"))
-        return items
+        return [record for record in records[:limit] if isinstance(record, Mapping)]
+
+    @staticmethod
+    def _map_item(record: Mapping[str, object]) -> LongTermMemoryItem | None:
+        """将供应商记录缩减为可公开注入的安全记忆摘要。"""
+
+        content = str(record.get("memory") or record.get("content") or "").strip()
+        memory_id = str(record.get("id") or record.get("memory_id") or "").strip()
+        if not content or not memory_id:
+            return None
+        metadata = record.get("metadata")
+        category = metadata.get("category") if isinstance(metadata, Mapping) else None
+        return LongTermMemoryItem(
+            memory_id=memory_id,
+            content=content[:1_000],
+            category=str(category or record.get("category") or "preference")[:32],
+        )
 
     async def add(self, *, user_id: str, content: str, category: str, write_key: str) -> str | None:
         anonymous_user_id = _anonymous_user_id(user_id)
@@ -195,25 +226,34 @@ class VolcengineMem0Adapter:
             category=str(payload.get("category") or "preference")[:32],
         )
 
-    async def get_event(self, *, event_id: str) -> LongTermMemoryItem | None:
-        """轮询同一远程事件身份；未稳定时返回空，绝不重新提交 add。"""
+    async def get_event(
+        self,
+        *,
+        event_id: str,
+        user_id: str,
+        content: str,
+        write_key: str,
+    ) -> LongTermMemoryItem | None:
+        """以同一 write_key 检索 PENDING event 的最终记录；永不重新提交 add。"""
 
-        if not self._config.available or not event_id.strip():
+        anonymous_user_id = _anonymous_user_id(user_id)
+        if (
+            not self._config.available
+            or not event_id.strip()
+            or not content.strip()
+            or not write_key.strip()
+            or not anonymous_user_id
+        ):
             return None
-        payload = await self._v1_request("GET", f"/v1/memories/{event_id}/")
-        if payload is None:
-            return None
-        if not isinstance(payload, Mapping):
-            return None
-        content = str(payload.get("memory") or payload.get("content") or "").strip()
-        memory_id = str(payload.get("id") or "").strip()
-        if not content or not memory_id:
-            return None
-        return LongTermMemoryItem(
-            memory_id=memory_id,
-            content=content[:1_000],
-            category=str(payload.get("category") or "preference")[:32],
-        )
+        for record in await self._search_records(
+            anonymous_user_id=anonymous_user_id,
+            query=content,
+            limit=20,
+        ):
+            metadata = record.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("memory_write_key") == write_key:
+                return self._map_item(record)
+        return None
 
     async def delete(self, *, memory_id: str) -> bool:
         """删除单条远程记忆；失败只返回 false，避免泄露供应商正文。"""

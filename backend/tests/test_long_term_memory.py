@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 
@@ -127,12 +128,28 @@ async def test_mem0_adapter_uses_anonymous_user_id_and_maps_delete(monkeypatch: 
         *,
         params: dict[str, object] | None = None,
         payload: dict[str, object] | None = None,
-    ) -> dict[str, str] | None:
-        assert payload is None
+    ) -> object | None:
+        if method == "POST":
+            assert path == "/v1/memories/search/"
+            assert payload is not None
+            assert payload["query"] == "偏好暖色调"
+            assert str(payload["user_id"]).startswith("pfu_")
+            assert payload["limit"] == 20
+            return {
+                "results": [
+                    {
+                        "id": "memory-1",
+                        "memory": "偏好暖色调",
+                        "metadata": {"category": "preference", "memory_write_key": "write-1"},
+                    }
+                ]
+            }
         if method == "GET":
             assert path == "/v1/memories/memory-1/"
+            assert payload is None
             return {"id": "memory-1", "memory": "偏好暖色调", "category": "preference"}
         if method == "DELETE" and path == "/v1/memories/memory-1/":
+            assert payload is None
             return {}
         assert method == "DELETE"
         assert path == "/v1/memories/"
@@ -144,7 +161,12 @@ async def test_mem0_adapter_uses_anonymous_user_id_and_maps_delete(monkeypatch: 
     adapter._v1_request = v1_request  # type: ignore[method-assign]
 
     assert await adapter.get(memory_id="memory-1") is not None
-    assert await adapter.get_event(event_id="memory-1") is not None
+    assert await adapter.get_event(
+        event_id="event-1",
+        user_id="user-1",
+        content="偏好暖色调",
+        write_key="write-1",
+    ) is not None
     assert await adapter.delete(memory_id="memory-1")
     assert await adapter.delete_all(user_id="user-1")
 
@@ -190,7 +212,7 @@ async def test_write_outbox_persists_event_then_polls_same_identity() -> None:
             self.add_calls += 1
             return "memory-1"
 
-        async def get_event(self, *, event_id: str):
+        async def get_event(self, *, event_id: str, **_: object):
             self.get_calls += 1
             return None if self.get_calls == 1 else object()
 
@@ -208,11 +230,11 @@ async def test_write_outbox_persists_event_then_polls_same_identity() -> None:
         await outbox.release(write_key=first.write_key, worker_id="worker")
         second = await outbox.claim(worker_id="worker", now=datetime.now(UTC))
         assert second is not None and second.event_id == "memory-1"
-        assert await adapter.get_event(event_id=second.event_id) is None
+        assert await adapter.get_event(event_id=second.event_id, user_id="user-1", content="偏好", write_key="write-poll") is None
         await outbox.release(write_key=second.write_key, worker_id="worker")
         third = await outbox.claim(worker_id="worker", now=datetime.now(UTC))
         assert third is not None and third.event_id == "memory-1"
-        assert await adapter.get_event(event_id=third.event_id) is not None
+        assert await adapter.get_event(event_id=third.event_id, user_id="user-1", content="偏好", write_key="write-poll") is not None
         await outbox.complete(write_key=third.write_key, worker_id="worker", event_id=third.event_id)
         assert adapter.add_calls == 1
     finally:
@@ -231,7 +253,7 @@ async def test_worker_persists_remote_event_then_only_polls_same_event() -> None
             self.add_calls += 1
             return "event-1"
 
-        async def get_event(self, *, event_id: str):
+        async def get_event(self, *, event_id: str, **_: object):
             assert event_id == "event-1"
             self.event_calls += 1
             return None if self.event_calls == 1 else object()
@@ -285,6 +307,18 @@ async def test_real_mem0_search_add_and_cleanup() -> None:
             write_key="m1-real-mem0-cleanup",
         )
         assert event_id
+        completed = None
+        for _ in range(10):
+            completed = await adapter.get_event(
+                event_id=event_id,
+                user_id=user_id,
+                content="M1 隔离测试偏好，请在测试结束后删除。",
+                write_key="m1-real-mem0-cleanup",
+            )
+            if completed is not None:
+                break
+            await asyncio.sleep(2)
+        assert completed is not None
         await adapter.search(user_id=user_id, query="M1 隔离测试偏好", limit=3)
     finally:
         assert await adapter.delete_all(user_id=user_id)
