@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from .contracts import (
     HarnessRunRequest,
@@ -10,9 +11,12 @@ from .contracts import (
     RunStatus,
     TerminationReason,
 )
-from .deepseek_engine import DeepSeekHarnessEngine
+from .deepseek_engine import DeepSeekHarnessEngine, HarnessExecutionError
 from .event_store import RunRequestConflictError, SqliteRunEventStore
 from .skill_snapshot import SkillCatalogSnapshot
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunService:
@@ -139,7 +143,18 @@ class RunService:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            diagnostic = (
+                error.diagnostic
+                if isinstance(error, HarnessExecutionError)
+                else None
+            )
+            logger.warning(
+                "sidecar_run_failed run_id=%s exception_type=%s timeout_phase=%s",
+                run_id,
+                diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                diagnostic.timeout_phase if diagnostic is not None and diagnostic.timeout_phase else "none",
+            )
             await self._store.transition(
                 run_id,
                 status=RunStatus.FAILED,
@@ -148,7 +163,11 @@ class RunService:
             await self._store.append_event(
                 run_id,
                 "run.failed",
-                {"code": "engine_execution_failed"},
+                {
+                    "code": "engine_execution_failed",
+                    "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                    "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
+                },
             )
         finally:
             async with self._lock:
