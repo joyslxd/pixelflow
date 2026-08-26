@@ -192,7 +192,10 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
         and isinstance(data.get("name"), str)
     )
     final_response = getattr(result, "final_response", None)
-    if not isinstance(final_response, str) or not (response := final_response.strip()):
+    response = final_response.strip() if isinstance(final_response, str) else ""
+    if not response:
+        response = _public_text_from_chunks(events).strip()
+    if not response:
         raise HarnessProjectionError("final_response_missing")
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
@@ -202,3 +205,40 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
         finish_reason=finish_reason,
         tool_names=tool_names,
     )
+
+
+def _public_text_from_chunks(events: list[object]) -> str:
+    """仅聚合 text-delta，严格忽略 reasoning、usage 和工具私有块。"""
+
+    parts: list[str] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "assistant/chunk":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        for chunk in _nested_text_delta_chunks(data):
+            delta = chunk.get("delta")
+            if isinstance(delta, str):
+                parts.append(delta)
+                continue
+            text = chunk.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _nested_text_delta_chunks(value: object) -> tuple[dict[str, object], ...]:
+    """遍历 SDK chunk 包装层，只返回明确标记为 text-delta 的字典。"""
+
+    if isinstance(value, dict):
+        current = (value,) if value.get("type") == "text-delta" else ()
+        nested = tuple(
+            chunk
+            for child in value.values()
+            for chunk in _nested_text_delta_chunks(child)
+        )
+        return current + nested
+    if isinstance(value, list):
+        return tuple(chunk for child in value for chunk in _nested_text_delta_chunks(child))
+    return ()

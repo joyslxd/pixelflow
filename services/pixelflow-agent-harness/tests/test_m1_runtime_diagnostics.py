@@ -164,3 +164,22 @@ def test_result_projection_failure_uses_fixed_reason_code() -> None:
 
     diagnostic = _execution_diagnostic(captured.value, "result_projection")
     assert diagnostic.failure_reason == "final_response_missing"
+
+
+def test_result_projection_uses_text_delta_only_when_final_message_missing() -> None:
+    """流式回退只能读取公开文本增量，不得拼入 reasoning 或工具内容。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "reasoning-delta", "delta": "机密"}}},
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "delta": "公开"}}},
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "usage", "text": "计量"}}},
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "text": "回复"}}},
+            ],
+            final_response="",
+            finish_reason="completed",
+        )
+    )
+
+    assert projected.final_response == "公开回复"
