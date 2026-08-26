@@ -137,14 +137,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_preference_store = SQLUserPreferenceStore(sf) if sf is not None else MemoryUserPreferenceStore()
             logger.info("PixelFlow task store initialised: %s", "sql" if sf is not None else "memory")
 
-        long_term_memory_config = load_long_term_memory_config_from_env()
-        long_term_memory_adapter = VolcengineMem0Adapter(long_term_memory_config)
-        app.state.pixelflow_long_term_memory_service = LongTermMemoryService(
-            long_term_memory_adapter,
-            long_term_memory_config,
-        )
-        logger.info("PixelFlow long-term memory initialised enabled=%s", long_term_memory_config.available)
-
         from pixelflow.agent_control_plane.persistence import (
             MemoryCompactionQueueRepository,
             SQLCompactionQueueRepository,
@@ -156,21 +148,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         task_store = app.state.pixelflow_task_store
         memory_outbox_session_factory = getattr(task_store, "session_factory", None)
+        long_term_memory_config = load_long_term_memory_config_from_env()
+        long_term_memory_adapter = VolcengineMem0Adapter(long_term_memory_config)
         if memory_outbox_session_factory is not None:
             from pixelflow.long_term_memory.outbox import (
                 MemoryWriteWorker,
                 SQLWriteOutbox,
             )
 
+            memory_write_outbox = SQLWriteOutbox(memory_outbox_session_factory)
             memory_write_worker = MemoryWriteWorker(
-                SQLWriteOutbox(memory_outbox_session_factory),
+                memory_write_outbox,
                 long_term_memory_adapter,
                 worker_id=f"gateway-memory:{os.getpid()}",
             )
             await memory_write_worker.start()
             app.state.pixelflow_long_term_memory_write_worker = memory_write_worker
         else:
+            memory_write_outbox = None
             app.state.pixelflow_long_term_memory_write_worker = None
+        app.state.pixelflow_long_term_memory_service = LongTermMemoryService(
+            long_term_memory_adapter,
+            long_term_memory_config,
+            outbox=memory_write_outbox,
+        )
+        logger.info("PixelFlow long-term memory initialised enabled=%s", long_term_memory_config.available)
         if isinstance(task_store, SQLPixelFlowTaskStore):
             agent_runtime_repository = SQLCompactionQueueRepository(
                 task_store.session_factory,

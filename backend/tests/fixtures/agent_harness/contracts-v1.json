@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "turn_start": {
+    "client_input_id": "11111111-1111-4111-8111-111111111111",
+    "workspace_id": "workspace_demo",
+    "expected_workspace_revision": 3,
+    "content": "请检查当前视频工作区并给出下一步建议。",
+    "max_output_tokens": 192
+  },
+  "interrupt_response": {
+    "client_response_id": "22222222-2222-4222-8222-222222222222",
+    "value": {
+      "content": "确认这个方案。",
+      "materials": [],
+      "reply_to_message_id": "message_plan_v1",
+      "artifact_refs": ["artifact:video-plan:workspace_demo:v1"],
+      "explicit_action": {
+        "action": "continue_workflow",
+        "intent": "video",
+        "workflow_id": "workflow_demo",
+        "stage": "plan_review",
+        "artifact_ref": "artifact:video-plan:workspace_demo:v1",
+        "patch": {
+          "approved": true
+        }
+      }
+    }
+  },
+  "workspace_command": {
+    "client_command_id": "33333333-3333-4333-8333-333333333333",
+    "workspace_id": "workspace_demo",
+    "expected_workspace_revision": 3,
+    "patch": {
+      "title": "夏季新品视频"
+    }
+  },
+  "event": {
+    "event_id": "event_demo_001",
+    "sequence": 1,
+    "run_id": "hrun_11111111111111111111111111111111",
+    "type": "run.state_changed",
+    "occurred_at": "2026-08-26T00:00:00Z",
+    "payload": {
+      "status": "running"
+    }
+  },
+  "snapshot": {
+    "run_id": "hrun_11111111111111111111111111111111",
+    "status": "running",
+    "last_sequence": 1,
+    "events": [
+      {
+        "event_id": "event_demo_001",
+        "sequence": 1,
+        "run_id": "hrun_11111111111111111111111111111111",
+        "type": "run.state_changed",
+        "occurred_at": "2026-08-26T00:00:00Z",
+        "payload": {
+          "status": "running"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "message_id": "message_demo_001",
+        "role": "user",
+        "content": "请检查当前视频工作区并给出下一步建议。"
+      }
+    ],
+    "workspace": {
+      "workspace_id": "workspace_demo",
+      "revision": 3,
+      "summary": {
+        "phase": "plan_review"
+      }
+    }
+  }
+}

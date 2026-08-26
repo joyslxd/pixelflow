@@ -8,7 +8,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
 
 import httpx
 
@@ -40,7 +40,7 @@ class LongTermMemoryConfig:
 
 
 class LongTermMemoryPort(Protocol):
-    """隔离 Mem0 SDK 的稳定应用 Port。"""
+    """隔离 Volcengine Mem0 HTTP 协议的稳定应用 Port。"""
 
     async def search(self, *, user_id: str, query: str, limit: int) -> list[LongTermMemoryItem]: ...
 
@@ -48,9 +48,17 @@ class LongTermMemoryPort(Protocol):
 
     async def get(self, *, memory_id: str) -> LongTermMemoryItem | None: ...
 
+    async def get_event(self, *, event_id: str) -> LongTermMemoryItem | None: ...
+
     async def delete(self, *, memory_id: str) -> bool: ...
 
     async def delete_all(self, *, user_id: str) -> bool: ...
+
+
+class MemoryWriteOutboxPort(Protocol):
+    """长期记忆写入的持久化入口；业务层不得直接调用远程 add。"""
+
+    async def enqueue(self, *, user_id: str, content: str, category: str, write_key: str) -> None: ...
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -91,28 +99,10 @@ def _anonymous_user_id(user_id: str) -> str:
 
 
 class VolcengineMem0Adapter:
-    """Mem0 SDK 防腐适配器，不把供应商响应或异常正文传播给业务层。"""
+    """Mem0 v1 HTTP 防腐适配器，不把供应商响应或异常正文传播给业务层。"""
 
     def __init__(self, config: LongTermMemoryConfig) -> None:
         self._config = config
-        self._client: Any | None = None
-
-    def _get_client(self) -> Any | None:
-        if not self._config.available:
-            return None
-        if self._client is not None:
-            return self._client
-        try:
-            from mem0 import MemoryClient
-
-            self._client = MemoryClient(
-                api_key=self._config.api_key,
-                host=self._config.base_url,
-            )
-            return self._client
-        except Exception as exc:  # noqa: BLE001 - SDK 初始化失败必须 fail-open。
-            logger.warning("Mem0 client unavailable exception_type=%s", type(exc).__name__)
-            return None
 
     async def _v1_request(
         self,
@@ -122,7 +112,7 @@ class VolcengineMem0Adapter:
         params: dict[str, object] | None = None,
         payload: dict[str, object] | None = None,
     ) -> object | None:
-        """兼容仅提供 Mem0 v1 路径的火山环境；仅在 SDK v3 明确 404 时调用。"""
+        """调用已在火山环境验证的 Mem0 v1 路径，失败只返回空安全结果。"""
 
         try:
             async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
@@ -135,29 +125,21 @@ class VolcengineMem0Adapter:
                 )
             if response.status_code >= httpx.codes.BAD_REQUEST:
                 return None
+            if response.status_code == httpx.codes.NO_CONTENT or not response.content:
+                return {}
             return response.json()
         except (httpx.HTTPError, ValueError):
             return None
+
     async def search(self, *, user_id: str, query: str, limit: int) -> list[LongTermMemoryItem]:
-        client = self._get_client()
         anonymous_user_id = _anonymous_user_id(user_id)
-        if client is None or not query.strip() or not anonymous_user_id:
+        if not self._config.available or not query.strip() or not anonymous_user_id:
             return []
-        try:
-            payload = await asyncio.wait_for(
-                asyncio.to_thread(client.search, query, user_id=anonymous_user_id, limit=limit),
-                timeout=self._config.timeout_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001 - 检索不能阻断 Harness Run。
-            if _is_not_found_error(exc):
-                payload = await self._v1_request(
-                    "POST",
-                    "/v1/memories/search/",
-                    payload={"query": query, "user_id": anonymous_user_id, "limit": limit},
-                )
-            else:
-                logger.warning("Mem0 search failed exception_type=%s", type(exc).__name__)
-                return []
+        payload = await self._v1_request(
+            "POST",
+            "/v1/memories/search/",
+            payload={"query": query, "user_id": anonymous_user_id, "limit": limit},
+        )
         records = payload.get("results", payload) if isinstance(payload, Mapping) else payload
         if not isinstance(records, list):
             return []
@@ -172,49 +154,34 @@ class VolcengineMem0Adapter:
         return items
 
     async def add(self, *, user_id: str, content: str, category: str, write_key: str) -> str | None:
-        client = self._get_client()
         anonymous_user_id = _anonymous_user_id(user_id)
-        if client is None or not content.strip() or not anonymous_user_id:
+        if not self._config.available or not content.strip() or not anonymous_user_id:
             return None
-        try:
-            payload = await asyncio.to_thread(
-                client.add,
-                [{"role": "user", "content": content}],
-                user_id=anonymous_user_id,
-                metadata={"category": category, "memory_write_key": write_key},
-            )
-        except Exception as exc:  # noqa: BLE001 - 后台写入失败只能记录安全元数据。
-            if _is_not_found_error(exc):
-                payload = await self._v1_request(
-                    "POST",
-                    "/v1/memories/",
-                    payload={
-                        "messages": [{"role": "user", "content": content}],
-                        "user_id": anonymous_user_id,
-                        "metadata": {"category": category, "memory_write_key": write_key},
-                    },
-                )
-            else:
-                logger.warning("Mem0 add failed exception_type=%s", type(exc).__name__)
-                return None
+        payload = await self._v1_request(
+            "POST",
+            "/v1/memories/",
+            payload={
+                "messages": [{"role": "user", "content": content}],
+                "user_id": anonymous_user_id,
+                "metadata": {"category": category, "memory_write_key": write_key},
+            },
+        )
         if isinstance(payload, Mapping):
             event_id = payload.get("event_id") or payload.get("id")
+            if not event_id:
+                results = payload.get("results")
+                if isinstance(results, list) and results and isinstance(results[0], Mapping):
+                    event_id = results[0].get("event_id") or results[0].get("id")
             return str(event_id).strip() or None
         return None
 
     async def get(self, *, memory_id: str) -> LongTermMemoryItem | None:
         """按 Mem0 memory ID 查询已稳定记录，只映射安全字段。"""
 
-        client = self._get_client()
-        if client is None or not memory_id.strip():
+        if not self._config.available or not memory_id.strip():
             return None
-        try:
-            payload = await asyncio.wait_for(
-                asyncio.to_thread(client.get, memory_id),
-                timeout=self._config.timeout_seconds,
-            )
-        except Exception as exc:  # noqa: BLE001 - 远程读取不得阻断主流程。
-            logger.warning("Mem0 get failed exception_type=%s", type(exc).__name__)
+        payload = await self._v1_request("GET", f"/v1/memories/{memory_id}/")
+        if payload is None:
             return None
         if not isinstance(payload, Mapping):
             return None
@@ -228,58 +195,63 @@ class VolcengineMem0Adapter:
             category=str(payload.get("category") or "preference")[:32],
         )
 
+    async def get_event(self, *, event_id: str) -> LongTermMemoryItem | None:
+        """轮询同一远程事件身份；未稳定时返回空，绝不重新提交 add。"""
+
+        if not self._config.available or not event_id.strip():
+            return None
+        payload = await self._v1_request("GET", f"/v1/memories/{event_id}/")
+        if payload is None:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        content = str(payload.get("memory") or payload.get("content") or "").strip()
+        memory_id = str(payload.get("id") or "").strip()
+        if not content or not memory_id:
+            return None
+        return LongTermMemoryItem(
+            memory_id=memory_id,
+            content=content[:1_000],
+            category=str(payload.get("category") or "preference")[:32],
+        )
+
     async def delete(self, *, memory_id: str) -> bool:
         """删除单条远程记忆；失败只返回 false，避免泄露供应商正文。"""
 
-        client = self._get_client()
-        if client is None or not memory_id.strip():
+        if not self._config.available or not memory_id.strip():
             return False
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(client.delete, memory_id),
-                timeout=self._config.timeout_seconds,
-            )
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Mem0 delete failed exception_type=%s", type(exc).__name__)
-            return False
+        return await self._v1_request("DELETE", f"/v1/memories/{memory_id}/") is not None
 
     async def delete_all(self, *, user_id: str) -> bool:
         """按匿名主体删除远程记忆，绝不把原始 owner 发送给 Mem0。"""
 
-        client = self._get_client()
         anonymous_user_id = _anonymous_user_id(user_id)
-        if client is None or not anonymous_user_id:
+        if not self._config.available or not anonymous_user_id:
             return False
-        try:
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(client.delete_all, user_id=anonymous_user_id),
-                    timeout=self._config.timeout_seconds,
-                )
-            except Exception as exc:
-                if not _is_not_found_error(exc):
-                    raise
-                payload = await self._v1_request(
-                    "DELETE",
-                    "/v1/memories/",
-                    params={"user_id": anonymous_user_id},
-                )
-                if payload is None:
-                    return False
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Mem0 delete_all failed exception_type=%s", type(exc).__name__)
-            return False
+        return (
+            await self._v1_request(
+                "DELETE",
+                "/v1/memories/",
+                params={"user_id": anonymous_user_id},
+            )
+        ) is not None
 
 
 class LongTermMemoryService:
     """为 Harness Context Builder 提供读和受控后台写入。"""
 
-    def __init__(self, adapter: LongTermMemoryPort, config: LongTermMemoryConfig) -> None:
+    def __init__(
+        self,
+        adapter: LongTermMemoryPort,
+        config: LongTermMemoryConfig,
+        *,
+        outbox: MemoryWriteOutboxPort | None = None,
+    ) -> None:
         self._adapter = adapter
         self._config = config
+        self._outbox = outbox
         self._tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
 
     async def search(self, *, user_id: str, query: str) -> list[LongTermMemoryItem]:
         return await self._adapter.search(user_id=user_id, query=query, limit=self._config.search_limit)
@@ -300,26 +272,28 @@ class LongTermMemoryService:
         return await self._adapter.delete_all(user_id=user_id)
 
     def write_background(self, *, user_id: str, content: str, category: str, write_key: str) -> None:
-        """异步写入不会阻塞当前 Run；退出时会等待已接收任务。"""
+        """异步持久化写入意图；远程投递只能由 Outbox Worker 执行。"""
+
+        if self._closing or self._outbox is None:
+            logger.warning("Mem0 write skipped reason=outbox_unavailable")
+            return
 
         async def _write() -> None:
-            await self._adapter.add(user_id=user_id, content=content, category=category, write_key=write_key)
+            try:
+                await self._outbox.enqueue(
+                    user_id=user_id,
+                    content=content,
+                    category=category,
+                    write_key=write_key,
+                )
+            except ValueError:
+                logger.warning("Mem0 write skipped reason=write_key_conflict")
 
         task = asyncio.create_task(_write())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
     async def aclose(self) -> None:
+        self._closing = True
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
-
-
-def _is_not_found_error(error: Exception) -> bool:
-    """仅识别供应商明确的 HTTP 404，避免把鉴权或协议错误错误降级为 v1。"""
-
-    response = getattr(error, "response", None)
-    return (
-        getattr(response, "status_code", None) == httpx.codes.NOT_FOUND
-        or "404" in str(error)
-        or error.__class__.__name__ == "MemoryNotFoundError"
-    )

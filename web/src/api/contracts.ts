@@ -13,7 +13,16 @@ export type InterruptResponseV1 = {
   value: {
     content: string;
     materials?: Array<Record<string, unknown>>;
+    reply_to_message_id?: string;
     artifact_refs?: string[];
+    explicit_action?: {
+      action: string;
+      intent?: string | null;
+      workflow_id?: string | null;
+      stage?: string | null;
+      artifact_ref?: string | null;
+      patch: Record<string, unknown>;
+    } | null;
   };
 };
 
