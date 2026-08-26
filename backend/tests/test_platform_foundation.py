@@ -29,6 +29,15 @@ def test_harness_sidecar_settings_validates_url_key_and_timeout(monkeypatch: pyt
     monkeypatch.setenv("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "12")
     assert HarnessSidecarSettings.from_env().base_url == "http://harness-sidecar:8090"
 
+    monkeypatch.setenv("PIXELFLOW_HARNESS_SIDECAR_BASE_URL", "http://harness-sidecar:8091")
+    with pytest.raises(ValueError, match="地址"):
+        HarnessSidecarSettings.from_env()
+
+    monkeypatch.setenv("PIXELFLOW_HARNESS_SIDECAR_BASE_URL", "http://harness-sidecar.internal:8090")
+    with pytest.raises(ValueError, match="地址"):
+        HarnessSidecarSettings.from_env()
+
+    monkeypatch.setenv("PIXELFLOW_HARNESS_SIDECAR_BASE_URL", "https://sidecar.internal/")
     monkeypatch.setenv("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValueError, match="超时"):
         HarnessSidecarSettings.from_env()

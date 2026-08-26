@@ -66,6 +66,16 @@ class AgentHarnessSidecarClient:
         assert response is not None
         return self._parse_state(response)
 
+    async def cancel_run(self, run_id: str) -> HarnessRunState | None:
+        """请求 Sidecar 停止当前模型循环；404 表示该 Run 不存在。"""
+
+        response = await self._request(
+            "POST",
+            f"/internal/v1/runs/{run_id}/cancel",
+            allow_not_found=True,
+        )
+        return None if response is None else self._parse_state(response)
+
     async def stream_events(
         self,
         run_id: str,

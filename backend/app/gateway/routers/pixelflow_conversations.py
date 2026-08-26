@@ -128,6 +128,14 @@ class HarnessTurnStartResponse(BaseModel):
     workspace_revision: int = Field(ge=1)
 
 
+class HarnessRunCancelResponse(BaseModel):
+    """取消结果只包含稳定 Run 终态，不暴露 Harness 运行时细节。"""
+
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["completed", "failed", "cancelled"]
+    termination_reason: str | None = Field(default=None, max_length=120)
+
+
 class ConversationMessageUpdateRequest(BaseModel):
     content: str | None = None
     payload: dict[str, Any] | None = None
@@ -612,7 +620,7 @@ async def stream_harness_run_events(
                 conversation_id=conversation_id,
                 run_id=run_id,
             )
-            if snapshot.status in {"completed", "failed"}:
+            if snapshot.status in {"completed", "failed", "cancelled"}:
                 return
             if await request.is_disconnected():
                 return
@@ -645,13 +653,58 @@ async def get_harness_run_snapshot(
             conversation_id=conversation_id,
             run_id=run_id,
         )
-        return await projector.snapshot(
+        return (
+            await projector.snapshot(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+            )
+        ).model_dump()
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+
+
+@router.post(
+    "/{conversation_id}/harness-runs/{run_id}/cancel",
+    response_model=HarnessRunCancelResponse,
+)
+async def cancel_harness_run(
+    conversation_id: str,
+    run_id: str,
+    request: Request,
+) -> HarnessRunCancelResponse:
+    """取消当前 Harness 模型循环；外部 Provider Operation 的取消不在 M2 边界内。"""
+
+    from pixelflow.agent_harness import GatewayHarnessSidecarError
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    if await _task_store(request).get_conversation(conversation_id, user_id=user_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        await _ensure_harness_projection(
+            request,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+        result = await _agent_run_bridge(request).cancel(
             user_id=user_id,
             conversation_id=conversation_id,
             run_id=run_id,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail={"code": "harness_run_not_found"}) from error
+    except GatewayHarnessSidecarError as error:
+        raise HTTPException(status_code=503, detail={"code": "harness_run_cancel_unavailable_retryable"}) from error
+    if result.status not in {"completed", "failed", "cancelled"}:
+        raise HTTPException(status_code=503, detail={"code": "harness_run_cancel_protocol_invalid"})
+    return HarnessRunCancelResponse(
+        run_id=result.run_id,
+        status=result.status,
+        termination_reason=result.termination_reason,
+    )
 
 
 @router.post("/{conversation_id}/harness-runs/{run_id}/recover")

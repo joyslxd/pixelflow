@@ -130,6 +130,16 @@ def create_app(settings: SidecarSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "run_not_found"})
         return result
 
+    @app.post("/internal/v1/runs/{run_id}/cancel", response_model=HarnessRunState)
+    async def cancel_run(run_id: str, authorization: str | None = Header(default=None)) -> HarnessRunState:
+        """取消当前 Harness 模型循环；不会取消已提交给外部 Provider 的业务操作。"""
+
+        require_service(authorization)
+        result = await service.cancel_run(run_id)
+        if result is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "run_not_found"})
+        return result
+
     @app.get("/internal/v1/runs/{run_id}/events")
     async def stream_events(
         run_id: str,
@@ -144,6 +154,8 @@ def create_app(settings: SidecarSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "after_sequence_invalid"})
         if await service.get_run(run_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "run_not_found"})
+        if not await service.has_event_cursor(run_id, after_sequence):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "after_sequence_unknown"})
 
         async def events() -> AsyncIterator[str]:
             cursor = after_sequence

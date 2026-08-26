@@ -28,7 +28,7 @@ class AgentSnapshotV1(_ControlPlaneModel):
     """单一 Run 的可恢复公开快照。"""
 
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
-    status: Literal["accepted", "running", "completed", "failed"]
+    status: Literal["accepted", "running", "completed", "failed", "cancelled"]
     last_sequence: int = Field(ge=0)
     events: list[PublicAgentEventV1] = Field(default_factory=list)
     messages: list[dict[str, str]] = Field(default_factory=list)

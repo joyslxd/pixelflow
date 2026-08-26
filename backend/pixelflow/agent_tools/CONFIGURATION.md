@@ -7,7 +7,7 @@
 | `PIXELFLOW_TOOL_BROKER_JWT_VERIFY_KEY` | Gateway 校验 Sidecar→Tool Broker 服务 JWT 签名的验证密钥。 | 必填 Secret/公钥；缺失或签名无效时返回 `401 agent_tool_service_authentication_failed`。本地隔离测试可使用短期 HS256 测试密钥，生产必须由 Secret Manager 提供轮换验证材料。 |
 | `PIXELFLOW_TOOL_BROKER_JWT_ISSUER` | Gateway 接受的 Sidecar 服务 JWT 签发方。 | 默认 `pixelflow-harness-sidecar`；不匹配即 401。变更后需重启，只影响新请求。 |
 | `PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE` | Gateway 接受的 Sidecar 服务 JWT 受众。 | 默认 `pixelflow-tool-broker`；不匹配即 401。变更后需重启，只影响新请求。 |
-| `PIXELFLOW_HARNESS_SIDECAR_BASE_URL` | Gateway 调用 Sidecar 的内部地址。 | 必填时装配真实 `GatewayHarnessRunBridge`；生产必须 HTTPS，M0 仅允许 `http://127.0.0.1:<port>`。缺失时不装配新 Run Bridge，不会回退为 Fake。 |
+| `PIXELFLOW_HARNESS_SIDECAR_BASE_URL` | Gateway 调用 Sidecar 的内部地址。 | 必填时装配真实 `GatewayHarnessRunBridge`；生产默认必须 HTTPS，仅允许本机 `http://127.0.0.1:<port>` 或同一受控 Docker Compose 网络中的固定值 `http://harness-sidecar:8090`。缺失时不装配新 Run Bridge，不会回退为 Fake。 |
 | `PIXELFLOW_GATEWAY_JWT_SIGNING_KEY` | Gateway 签发 Gateway→Sidecar 短期 JWT 的 HS256 密钥。 | 仅由 Secret Manager 注入；长度不足或缺失时不装配 Run Bridge。变更后需重启且只影响新请求。 |
 | `PIXELFLOW_GATEWAY_INSTANCE_ID` | Gateway 实例身份。 | 写入 Gateway→Sidecar JWT 的 `service_instance_id`；为空时不装配 Run Bridge，避免跨实例调用不可审计。 |
 

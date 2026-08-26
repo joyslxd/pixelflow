@@ -232,6 +232,68 @@ class SqliteRunEventStore:
             assert row is not None
             return self._state(row)
 
+    async def start_if_accepted(self, run_id: str) -> HarnessRunState | None:
+        """仅把已接受 Run 原子切换为运行中，避免取消竞争后重新启动。"""
+
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM harness_runs WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if RunStatus(row["status"]) is not RunStatus.ACCEPTED:
+                return self._state(row)
+            self._connection.execute(
+                "UPDATE harness_runs SET status = ? WHERE run_id = ? AND status = ?",
+                (RunStatus.RUNNING.value, run_id, RunStatus.ACCEPTED.value),
+            )
+            self._append_locked(run_id, "run.started", {"status": RunStatus.RUNNING.value})
+            self._connection.commit()
+            updated = self._connection.execute(
+                "SELECT * FROM harness_runs WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._state(updated)
+
+    async def cancel(self, run_id: str) -> HarnessRunState | None:
+        """幂等地收口本 Sidecar Run；不声明取消任何外部 Provider。"""
+
+        terminal_statuses = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+        async with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM harness_runs WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = RunStatus(row["status"])
+            if current in terminal_statuses:
+                return self._state(row)
+            completed_at = _utc_now()
+            self._connection.execute(
+                """
+                UPDATE harness_runs
+                SET status = ?, termination_reason = ?, completed_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    RunStatus.CANCELLED.value,
+                    TerminationReason.CANCELLED.value,
+                    completed_at,
+                    run_id,
+                ),
+            )
+            self._append_locked(
+                run_id,
+                "run.cancelled",
+                {"status": RunStatus.CANCELLED.value},
+            )
+            self._connection.commit()
+            updated = self._connection.execute(
+                "SELECT * FROM harness_runs WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._state(updated)
+
     async def append_event(
         self,
         run_id: str,
@@ -272,6 +334,19 @@ class SqliteRunEventStore:
             )
             for row in rows
         ]
+
+    async def has_cursor(self, run_id: str, after_sequence: int) -> bool:
+        """确认 SSE 断点未超过该 Run 已持久化序列，未知 cursor 必须失败关闭。"""
+
+        async with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT COALESCE(MAX(sequence), 0) AS max_sequence
+                FROM harness_run_events WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            return row is not None and after_sequence <= int(row["max_sequence"])
 
     async def fail_unfinished_runs_after_restart(self) -> tuple[str, ...]:
         """将进程中断的非终态 Run 安全收口，禁止依据旧 Harness Session 原位续跑。"""

@@ -99,7 +99,7 @@ class HarnessRunProjector:
         status = "accepted"
         if events:
             state = events[-1].payload.get("status")
-            if isinstance(state, str) and state in {"accepted", "running", "completed", "failed"}:
+            if isinstance(state, str) and state in {"accepted", "running", "completed", "failed", "cancelled"}:
                 status = state
         return AgentSnapshotV1(
             run_id=run_id,
@@ -148,7 +148,7 @@ class HarnessRunProjector:
                 event = await self._append_source_event(binding, source_event)
                 if source_event.type == "response.completed":
                     await self._append_response_message(binding, source_event)
-                if event.type is AgentEventType.RUN_STATE_CHANGED and event.payload.get("status") in {"completed", "failed"}:
+                if event.type is AgentEventType.RUN_STATE_CHANGED and event.payload.get("status") in {"completed", "failed", "cancelled"}:
                     return
         except GatewayHarnessSidecarError as error:
             raise HarnessEventProjectionError("Sidecar 事件投影失败") from error
@@ -254,12 +254,13 @@ class HarnessRunProjector:
     def _public_event(source_event: HarnessRunEvent) -> tuple[AgentEventType, dict[str, Any]]:
         """把有限 Sidecar 事件映射到既有公开枚举，拒绝 reasoning、参数和未知类型。"""
 
-        if source_event.type in {"run.accepted", "run.started", "run.completed", "run.failed"}:
+        if source_event.type in {"run.accepted", "run.started", "run.completed", "run.failed", "run.cancelled"}:
             status_by_type = {
                 "run.accepted": "accepted",
                 "run.started": "running",
                 "run.completed": "completed",
                 "run.failed": "failed",
+                "run.cancelled": "cancelled",
             }
             payload: dict[str, Any] = {"status": status_by_type[source_event.type]}
             if source_event.type == "run.failed":

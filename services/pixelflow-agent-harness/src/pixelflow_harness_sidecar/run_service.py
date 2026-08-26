@@ -73,6 +73,19 @@ class RunService:
 
         return await self._store.get(run_id)
 
+    async def cancel_run(self, run_id: str) -> HarnessRunState | None:
+        """取消当前模型循环；已创建的外部 Provider Operation 不在此边界内。"""
+
+        async with self._lock:
+            state = await self._store.cancel(run_id)
+            if state is None:
+                return None
+            self._pending_requests.pop(run_id, None)
+            task = self._tasks.get(run_id)
+            if task is not None and not task.done():
+                task.cancel()
+        return state
+
     async def reconcile_interrupted_runs(self) -> tuple[str, ...]:
         """启动期安全收口上个进程遗留的 Run，恢复必须由 Gateway 创建新的 Run。"""
 
@@ -82,6 +95,11 @@ class RunService:
         """回放公开事件；调用方负责 SSE 编码。"""
 
         return await self._store.events_after(run_id, after_sequence)
+
+    async def has_event_cursor(self, run_id: str, after_sequence: int) -> bool:
+        """校验客户端请求的断点游标属于当前 Run 的已持久化事件范围。"""
+
+        return await self._store.has_cursor(run_id, after_sequence)
 
     async def aclose(self) -> None:
         """只取消本进程尚未开始或可中止的任务，不伪造业务终态。"""
@@ -105,9 +123,13 @@ class RunService:
         """执行真实模型并将原始 Harness 轨迹收敛为稳定公开事件。"""
 
         try:
-            await self._store.transition(run_id, status=RunStatus.RUNNING)
-            await self._store.append_event(run_id, "run.started", {"status": "running"})
+            started = await self._store.start_if_accepted(run_id)
+            if started is None or started.status is not RunStatus.RUNNING:
+                return
             result = await self._engine.execute(run_id, request, skill_snapshot)
+            current = await self._store.get(run_id)
+            if current is None or current.status is not RunStatus.RUNNING:
+                return
             if result.finish_reason != "completed":
                 await self._store.transition(
                     run_id,
@@ -142,7 +164,10 @@ class RunService:
                 {"status": "completed"},
             )
         except asyncio.CancelledError:
-            raise
+            # asyncio.to_thread 无法强杀底层 SDK 线程；取消后忽略其结果并由
+            # 持久化 Run 状态阻止后续公开事件。外部 Operation 取消归 M5。
+            await self._store.cancel(run_id)
+            return
         except Exception as error:
             diagnostic = (
                 error.diagnostic
@@ -155,20 +180,26 @@ class RunService:
                 diagnostic.exception_type if diagnostic is not None else type(error).__name__,
                 diagnostic.timeout_phase if diagnostic is not None and diagnostic.timeout_phase else "none",
             )
-            await self._store.transition(
-                run_id,
-                status=RunStatus.FAILED,
-                termination_reason=TerminationReason.ENGINE_ERROR,
-            )
-            await self._store.append_event(
-                run_id,
-                "run.failed",
-                {
-                    "code": "engine_execution_failed",
-                    "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
-                    "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
-                },
-            )
+            current = await self._store.get(run_id)
+            if current is not None and current.status not in {
+                RunStatus.CANCELLED,
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+            }:
+                await self._store.transition(
+                    run_id,
+                    status=RunStatus.FAILED,
+                    termination_reason=TerminationReason.ENGINE_ERROR,
+                )
+                await self._store.append_event(
+                    run_id,
+                    "run.failed",
+                    {
+                        "code": "engine_execution_failed",
+                        "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                        "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
+                    },
+                )
         finally:
             async with self._lock:
                 self._tasks.pop(run_id, None)

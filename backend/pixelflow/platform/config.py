@@ -26,8 +26,9 @@ class HarnessSidecarSettings:
         if not base_url or not signing_key or not instance_id:
             return None
         # Docker Compose 内的固定服务名只在受控私有网络解析；其余明文 HTTP 仍拒绝。
-        is_loopback = base_url.startswith("http://127.0.0.1:")
-        is_compose_sidecar = base_url.startswith("http://harness-sidecar:")
+        normalized_base_url = base_url.rstrip("/")
+        is_loopback = normalized_base_url.startswith("http://127.0.0.1:")
+        is_compose_sidecar = normalized_base_url == "http://harness-sidecar:8090"
         if not base_url.startswith("https://") and not is_loopback and not is_compose_sidecar:
             raise ValueError("Sidecar 地址必须使用 HTTPS，M0 loopback 或受控 Compose 服务例外")
         if len(signing_key) < 32:
@@ -40,7 +41,7 @@ class HarnessSidecarSettings:
         if timeout <= 0 or timeout > 300:
             raise ValueError("Sidecar 请求超时必须在 0 到 300 秒之间")
         return cls(
-            base_url=base_url.rstrip("/"),
+            base_url=normalized_base_url,
             jwt_signing_key=signing_key,
             instance_id=instance_id,
             request_timeout_seconds=timeout,

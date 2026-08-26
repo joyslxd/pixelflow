@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pixelflow.agent_harness import AgentHarnessPort, HarnessRunHandle, HarnessRunRequest
+from pixelflow.agent_harness import AgentHarnessPort, HarnessRunHandle, HarnessRunRequest, HarnessRunResult
 from pixelflow.agent_harness.projector import HarnessRunProjector
 
 
@@ -29,6 +29,21 @@ class AgentRunBridge:
         )
         await self._projector.start(harness=self._harness, binding=binding)
         return handle
+
+    async def cancel(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> HarnessRunResult:
+        """委派已绑定 Run 的取消，业务 Controller 不直接调用 Sidecar Client。"""
+
+        return await self._harness.cancel_run(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
 
 
 __all__ = ["AgentRunBridge"]

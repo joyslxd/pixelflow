@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from pixelflow.agent_tools.repository import RunBinding
 
-from .contracts import HarnessRunEvent, HarnessRunHandle, HarnessRunRequest
+from .contracts import HarnessRunEvent, HarnessRunHandle, HarnessRunRequest, HarnessRunResult
 
 
 @runtime_checkable
@@ -35,6 +35,15 @@ class AgentHarnessPort(Protocol):
         run_id: str,
     ) -> RunBinding:
         """回读 Gateway 权威 binding，并校验用户和会话归属。"""
+
+    async def cancel_run(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> HarnessRunResult:
+        """取消当前 Harness 模型 Run；不取消独立的外部 Provider Operation。"""
 
     async def aclose(self) -> None:
         """关闭 Port 自己持有的网络资源。"""

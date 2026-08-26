@@ -2,6 +2,8 @@
 
 本目录是 PixelFlow 的独立 Agent Harness Sidecar。M0 阶段只提供框架无关的稳定 DTO、`AgentEngine` Port、隔离 Skill 快照和无副作用 Fake Tool；它不连接真实模型、不持有用户 Authorization，也不访问 PixelFlow 数据库或 Provider。
 
+M2 正在将最小 Run API 加固为稳定协议。当前内部 `POST /internal/v1/runs/{run_id}/cancel` 只允许持有 Gateway 服务 JWT 的调用方取消 Harness 模型循环：它会持久化 `cancelled` 终态并追加唯一 `run.cancelled` 事件，重复请求幂等。该接口绝不声明取消已经提交给外部 Provider 的 Operation；Provider、确认、额度和恢复语义仍由后续 M5 与 PixelFlow 控制面负责。
+
 真实 DeepSeek Harness SDK/Runtime 已固定为 `0.1.1rc1`。当前 M0 只验证安全 Composition 的 JSON-RPC 启动；Cordis Profile、外部 TypeScript Plugin、Tool Broker 回调与真实模型请求仍须按实施方案继续完成。兼容性结论以 [兼容性报告](../../docs/deepseek-harness-compatibility.md) 为准。
 
 本地验证：

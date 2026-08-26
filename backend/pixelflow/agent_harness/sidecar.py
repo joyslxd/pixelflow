@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import RunBinding, SQLAgentToolRepository
 
-from .contracts import HarnessRunEvent, HarnessRunHandle, HarnessRunRequest
+from .contracts import HarnessRunEvent, HarnessRunHandle, HarnessRunRequest, HarnessRunResult
 
 
 class _StrictModel(BaseModel):
@@ -49,6 +49,20 @@ class _SidecarRunEventEnvelope(_StrictModel):
     payload: dict[str, Any]
 
 
+class _SidecarRunStateEnvelope(_StrictModel):
+    """识别 Sidecar Run 状态响应，避免把未声明字段带入 Gateway。"""
+
+    protocol_version: Literal["v1"]
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: str = Field(min_length=1, max_length=64)
+    termination_reason: str | None = Field(default=None, max_length=120)
+    engine_id: str = Field(min_length=1, max_length=120)
+    engine_version: str = Field(min_length=1, max_length=120)
+    skill_catalog_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    accepted_at: str = Field(min_length=1, max_length=64)
+    completed_at: str | None = Field(default=None, max_length=64)
+
+
 class AgentHarnessSidecarClient:
     """类似 Application Service：创建 Sidecar Run 后持久化 Gateway 权威 binding。"""
 
@@ -68,7 +82,7 @@ class AgentHarnessSidecarClient:
         if (
             not normalized.startswith("https://")
             and not normalized.startswith("http://127.0.0.1:")
-            and not normalized.startswith("http://harness-sidecar:")
+            and normalized != "http://harness-sidecar:8090"
         ):
             raise ValueError("Sidecar 地址必须使用 HTTPS，M0 仅允许 loopback 或受控 Compose HTTP")
         if len(gateway_jwt_signing_key) < 32 or not gateway_instance_id:
@@ -155,6 +169,39 @@ class AgentHarnessSidecarClient:
                 type=source_event.type,
                 payload=source_event.payload,
             )
+
+    async def cancel_run(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> HarnessRunResult:
+        """按 Gateway 权威 binding 取消本次模型 Run，不暴露 Sidecar 私有状态。"""
+
+        await self.ensure_run_owner(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+        try:
+            response = await self._client.post(
+                f"{self._base_url}/internal/v1/runs/{run_id}/cancel",
+                headers={"Authorization": f"Bearer {self._service_jwt()}"},
+            )
+        except httpx.HTTPError as error:
+            raise GatewayHarnessSidecarError("Sidecar Run 取消请求失败") from error
+        if response.status_code != httpx.codes.OK:
+            raise GatewayHarnessSidecarError("Sidecar 拒绝取消 Run")
+        try:
+            state = _SidecarRunStateEnvelope.model_validate(response.json())
+        except ValueError as error:
+            raise GatewayHarnessSidecarError("Sidecar Run 取消响应协议无效") from error
+        return HarnessRunResult(
+            run_id=state.run_id,
+            status=state.status,
+            termination_reason=state.termination_reason,
+        )
 
     async def stream_sidecar_events(
         self,
