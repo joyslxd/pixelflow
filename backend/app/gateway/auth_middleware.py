@@ -26,6 +26,9 @@ from pixelflow.tracing import set_conversation_id_context
 # 永远不需要认证的路径前缀。
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
+    # 用途：允许容器编排探测进程存活与 Harness 装配状态；影响：仅返回固定状态码，不暴露用户或配置。
+    "/live",
+    "/ready",
     "/agent/docs",
     "/agent/redoc",
     "/agent/openapi.json",

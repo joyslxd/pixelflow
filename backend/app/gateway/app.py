@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.profile_config import load_profile_config
@@ -393,13 +393,28 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
     # 仅 Sidecar 服务身份可调用的 Capability Tool Broker：/agent/internal/agent-tools。
     app.include_router(internal_agent_tools.router)
 
+    @app.get("/live", tags=["health"])
+    async def liveness_check() -> dict[str, str]:
+        """返回 Gateway 进程存活状态，不读取数据库、Sidecar 或用户身份。"""
+
+        return {"status": "live", "service": "pixelflow-gateway"}
+
+    @app.get("/ready", tags=["health"])
+    async def readiness_check() -> dict[str, str]:
+        """确认 Harness Run Bridge 已在生命周期中装配，未就绪时禁止流量进入。"""
+
+        if getattr(app.state, "pixelflow_harness_run_bridge", None) is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "harness_bridge_unavailable"},
+            )
+        return {"status": "ready", "service": "pixelflow-gateway"}
+
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
-        """健康检查端点。
+        """保留既有兼容健康检查端点；新编排应使用 /live 与 /ready。"""
 
-        返回服务健康状态。
-        """
-        return {"status": "healthy", "service": "pixelflow-gateway"}
+        return await liveness_check()
 
     return app
 
