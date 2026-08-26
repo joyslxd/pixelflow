@@ -12,6 +12,28 @@
 - id: pixelflow-capability-tools
   name: '../packages/dsh-plugin-capability-tools/dist/index.js' # 用途：加载 PixelFlow Tool 插件；影响：模型仅能调用已发布 Manifest。
 
+# 用途：限制单个 Run 的模型、Tool 与截止时间；影响：达到预算或取消状态时仅产生固定终止原因。
+- id: pixelflow-run-policy
+  name: '../packages/dsh-plugin-run-policy/dist/index.js' # 用途：加载 Run 资源策略；影响：不提供任何业务 Tool。
+  config:
+    # 用途：限制单 Run 模型步骤；影响：超过后拒绝继续模型调用。
+    maxModelSteps: 8
+    # 用途：限制单 Run 业务 Tool 次数；影响：超过后拒绝继续 Tool 调用。
+    maxBusinessTools: 3
+    # 用途：限制单 Run 墙钟时长（秒）；影响：超时后拒绝继续执行。
+    deadlineSeconds: 90
+
+# 用途：校验 Gateway 输入的安全上下文投影；影响：凭据类字段或超长字符串会使 Run 失败关闭。
+- id: pixelflow-context-policy
+  name: '../packages/dsh-plugin-context-policy/dist/index.js' # 用途：加载上下文安全策略；影响：不负责业务上下文拼装。
+  config:
+    # 用途：限制单个上下文字段长度；影响：超限内容不得进入 Harness。
+    maxStringLength: 32000
+
+# 用途：提供公开事件的过滤服务；影响：reasoning、Prompt 和不安全文本不能进入稳定事件流。
+- id: pixelflow-event-bridge
+  name: '../packages/dsh-plugin-event-bridge/dist/index.js' # 用途：加载公开事件桥；影响：不直接连接 Gateway SSE 或数据库。
+
 # 用途：组装唯一原生 Agent loop；关闭动态工作区指令、Bash、通用后台任务和 Goal，避免 Sidecar 获得未授权能力。
 - id: agent-spine
   name: '@deepseek-ai/dsh-agent-spine-demo' # 用途：选择唯一原生 Agent loop；影响：不会加载旧 DeerFlow 编排。

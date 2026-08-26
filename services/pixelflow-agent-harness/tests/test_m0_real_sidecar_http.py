@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
-import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-import pytest
 import jwt
+import pytest
 
 from pixelflow_harness_sidecar.client import AgentHarnessSidecarClient
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
@@ -68,6 +70,32 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _start_manifest_broker(manifest: dict[str, object]) -> tuple[str, ThreadingHTTPServer, threading.Thread]:
+    """为不调用 Tool 的真实模型 Case 提供最小受控 Manifest HTTP 边界。"""
+
+    encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - HTTP 标准回调名称。
+            if self.path != "/agent/internal/agent-tools/manifest":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            """测试 Broker 禁止输出请求头，避免服务 JWT 进入测试日志。"""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    return f"http://{host}:{port}", server, thread
 
 
 def _gateway_service_jwt(signing_key: str) -> str:
@@ -187,6 +215,14 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
     )
     jwt_signing_key = "m0-loopback-jwt-signing-key-at-least-32-bytes"
     service_jwt = _gateway_service_jwt(jwt_signing_key)
+    broker_base_url, broker_server, broker_thread = _start_manifest_broker(
+        {
+            "protocol_version": "v1",
+            "version": "agent-tools-v1",
+            "digest": "sha256:m0-real-manifest",
+            "tools": [],
+        },
+    )
     port = _free_port()
     source_root = str(Path(__file__).parents[1] / "src")
     environment = os.environ.copy()
@@ -197,7 +233,7 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
             "PIXELFLOW_GATEWAY_JWT_VERIFY_KEY": jwt_signing_key,
             "PIXELFLOW_GATEWAY_JWT_ISSUER": "pixelflow-gateway",
             "PIXELFLOW_GATEWAY_JWT_AUDIENCE": "pixelflow-harness-sidecar",
-            "PIXELFLOW_TOOL_BROKER_BASE_URL": "http://127.0.0.1:19999",
+            "PIXELFLOW_TOOL_BROKER_BASE_URL": broker_base_url,
             "PIXELFLOW_TOOL_BROKER_JWT_SIGNING_KEY": "m0-tool-broker-signing-key-at-least-32-bytes",
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
@@ -297,6 +333,8 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        broker_server.shutdown()
+        broker_thread.join(timeout=5)
 
 
 @pytest.mark.m0_real

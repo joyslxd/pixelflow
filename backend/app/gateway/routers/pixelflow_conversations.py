@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -41,6 +42,7 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
+from pixelflow.video.services.workspace_mutation import VideoWorkspaceMutationService
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
 logger = logging.getLogger(__name__)
@@ -685,12 +687,10 @@ async def apply_harness_workspace_command(
         workspace_id=body.workspace_id,
     )
     try:
-        from datetime import UTC, datetime
-
-        workspace = await _harness_video_repository(request).apply_workspace_patch(
-            user_id,
-            body.workspace_id,
-            body.patch,
+        workspace = await VideoWorkspaceMutationService(_harness_video_repository(request)).apply_patch(
+            user_id=user_id,
+            workspace_id=body.workspace_id,
+            patch=body.patch,
             expected_revision=body.expected_workspace_revision,
             now=datetime.now(UTC),
         )

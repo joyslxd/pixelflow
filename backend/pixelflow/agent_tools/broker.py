@@ -6,9 +6,14 @@ from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.registry import VideoToolRegistry
 from pixelflow.video.services.tool_executor import VideoToolExecutor
 
+from .catalog import runtime_video_tool_registry
 from .contracts import ToolCallRequest, ToolCallResponse
-from .manifest import manifest, runtime_video_tool_registry
-from .repository import AgentToolBindingConflictError, SQLAgentToolRepository
+from .manifest import manifest
+from .repository import (
+    AgentToolBindingConflictError,
+    SQLAgentToolRepository,
+    ToolCallClaimState,
+)
 
 
 class AgentToolBroker:
@@ -63,12 +68,22 @@ class AgentToolBroker:
             arguments=request.arguments,
             expected_revision=request.expected_workspace_revision,
         )
-        saved = await self._repository.get_tool_response(
+        claim = await self._repository.claim_tool_call(
             tool_call_key=tool_call_key,
+            run_id=request.run_id,
+            tool_call_id=request.tool_call_id,
             request_digest=digest,
         )
-        if saved is not None:
-            return ToolCallResponse.model_validate(saved)
+        if claim.state is ToolCallClaimState.COMPLETED:
+            assert claim.response is not None
+            return ToolCallResponse.model_validate(claim.response)
+        if claim.state is ToolCallClaimState.EXECUTING:
+            return ToolCallResponse(
+                protocol_version="v1",
+                status="failed",
+                public_summary="该 Tool 调用正在执行，请使用同一调用标识重试",
+                model_observation={"code": "tool_call_in_progress"},
+            )
         tool = self._video_tools.resolve(request.tool_name)
         if tool is None:
             return self._rejected("当前 Run 未授权该 Tool")
@@ -82,34 +97,40 @@ class AgentToolBroker:
             return self._rejected("工作区不存在或不属于当前 Run")
         if workspace.revision != request.expected_workspace_revision:
             return self._rejected("工作区 revision 已变化")
-        result = await self._executor.execute_tool_call(
-            context=VideoToolContext(user_id=binding.user_id, workspace=workspace),
-            tool_name=request.tool_name,
-            arguments=request.arguments,
-        )
-        current_workspace = await self._video_repository.get_workspace(
-            binding.user_id,
-            binding.workspace_id,
-        )
-        workspace_revision = (
-            current_workspace.revision if current_workspace is not None else workspace.revision
-        )
-        response = ToolCallResponse(
-            protocol_version="v1",
-            status="completed",
-            public_summary=result.public_summary,
-            model_observation={
-                "code": "video_tool_completed",
-                "tool_name": result.tool_name,
-                "workspace_revision": workspace_revision,
-                "artifact_refs": list(result.artifact_refs),
-                "pending_operation_job_ids": list(result.pending_operation_job_ids),
-            },
-        )
-        persisted = await self._repository.get_or_save_tool_response(
+        try:
+            result = await self._executor.execute_tool_call(
+                context=VideoToolContext(user_id=binding.user_id, workspace=workspace),
+                tool_name=request.tool_name,
+                arguments=request.arguments,
+            )
+            current_workspace = await self._video_repository.get_workspace(
+                binding.user_id,
+                binding.workspace_id,
+            )
+            workspace_revision = (
+                current_workspace.revision if current_workspace is not None else workspace.revision
+            )
+            response = ToolCallResponse(
+                protocol_version="v1",
+                status="completed",
+                public_summary=result.public_summary,
+                model_observation={
+                    "code": "video_tool_completed",
+                    "tool_name": result.tool_name,
+                    "workspace_revision": workspace_revision,
+                    "artifact_refs": list(result.artifact_refs),
+                    "pending_operation_job_ids": list(result.pending_operation_job_ids),
+                },
+            )
+        except Exception:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
+            response = ToolCallResponse(
+                protocol_version="v1",
+                status="failed",
+                public_summary="该 Tool 调用未完成，请基于当前工作区继续",
+                model_observation={"code": "tool_call_failed"},
+            )
+        persisted = await self._repository.complete_tool_call(
             tool_call_key=tool_call_key,
-            run_id=request.run_id,
-            tool_call_id=request.tool_call_id,
             request_digest=digest,
             response=response.model_dump(mode="json"),
         )

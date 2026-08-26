@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import select
@@ -42,6 +43,22 @@ class HarnessRecoveryRecord:
     recovery_event_id: str
     status: str
     recovery_run_id: str | None
+
+
+class ToolCallClaimState(StrEnum):
+    """Tool Call 的执行权状态；必须先领取再触碰业务副作用。"""
+
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+    EXECUTING = "executing"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallClaim:
+    """Tool Call ledger 的领取结果，不把执行中的占位记录暴露给模型。"""
+
+    state: ToolCallClaimState
+    response: dict[str, Any] | None = None
 
 
 class AgentToolBindingConflictError(RuntimeError):
@@ -134,16 +151,15 @@ class SQLAgentToolRepository:
                 row.recovery_run_id = recovery_run_id
                 return self._recovery_from_row(row)
 
-    async def get_or_save_tool_response(
+    async def claim_tool_call(
         self,
         *,
         tool_call_key: str,
         run_id: str,
         tool_call_id: str,
         request_digest: str,
-        response: dict[str, Any],
-    ) -> dict[str, Any]:
-        """按稳定 Tool Call 身份保存或回放 Observation，摘要漂移必须失败关闭。"""
+    ) -> ToolCallClaim:
+        """原子领取 Tool Call 执行权，避免并发请求重复产生业务副作用。"""
 
         async with self._session_factory() as session:
             try:
@@ -152,24 +168,55 @@ class SQLAgentToolRepository:
                     if row is not None:
                         if row.request_digest != request_digest:
                             raise AgentToolBindingConflictError("同一 Tool Call 的请求摘要不一致")
-                        return dict(row.response_json)
+                        if row.execution_state == "completed":
+                            return ToolCallClaim(
+                                state=ToolCallClaimState.COMPLETED,
+                                response=dict(row.response_json),
+                            )
+                        return ToolCallClaim(state=ToolCallClaimState.EXECUTING)
                     session.add(
                         PixelFlowAgentHarnessToolCallRow(
                             tool_call_key=tool_call_key,
                             run_id=run_id,
                             tool_call_id=tool_call_id,
                             request_digest=request_digest,
-                            response_json=dict(response),
+                            execution_state="executing",
+                            response_json={},
                         )
                     )
-                    return dict(response)
+                    return ToolCallClaim(state=ToolCallClaimState.CLAIMED)
             except IntegrityError:
                 await session.rollback()
         async with self._session_factory() as session:
             row = await session.get(PixelFlowAgentHarnessToolCallRow, tool_call_key)
             if row is None or row.request_digest != request_digest:
                 raise AgentToolBindingConflictError("并发 Tool Call 未能获得一致 Observation")
-            return dict(row.response_json)
+            if row.execution_state == "completed":
+                return ToolCallClaim(
+                    state=ToolCallClaimState.COMPLETED,
+                    response=dict(row.response_json),
+                )
+            return ToolCallClaim(state=ToolCallClaimState.EXECUTING)
+
+    async def complete_tool_call(
+        self,
+        *,
+        tool_call_key: str,
+        request_digest: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """完成已领取的 Tool Call；未知或摘要漂移均不允许写入结果。"""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowAgentHarnessToolCallRow, tool_call_key)
+                if row is None or row.request_digest != request_digest:
+                    raise AgentToolBindingConflictError("Tool Call 领取记录不存在或请求摘要不一致")
+                if row.execution_state == "completed":
+                    return dict(row.response_json)
+                row.execution_state = "completed"
+                row.response_json = dict(response)
+                return dict(row.response_json)
 
     async def get_tool_response(
         self,
@@ -185,6 +232,8 @@ class SQLAgentToolRepository:
                 return None
             if row.request_digest != request_digest:
                 raise AgentToolBindingConflictError("同一 Tool Call 的请求摘要不一致")
+            if row.execution_state != "completed":
+                return None
             return dict(row.response_json)
 
     async def has_tool_calls(self, run_id: str) -> bool:
@@ -256,5 +305,22 @@ async def ensure_sql_agent_tool_schema(engine: object) -> None:
                     PixelFlowAgentHarnessToolCallRow.__table__,
                     PixelFlowAgentHarnessRecoveryRow.__table__,
                 ],
+            ),
+        )
+        await connection.run_sync(_ensure_tool_call_execution_state_column)
+
+
+def _ensure_tool_call_execution_state_column(sync_connection: object) -> None:
+    """为既有 SQLite/MySQL 表补齐执行状态，create_all 不会变更历史表结构。"""
+
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(sync_connection)
+    columns = {column["name"] for column in inspector.get_columns("pixelflow_agent_harness_tool_calls")}
+    if "execution_state" not in columns:
+        sync_connection.execute(
+            text(
+                "ALTER TABLE pixelflow_agent_harness_tool_calls "
+                "ADD COLUMN execution_state VARCHAR(16) NOT NULL DEFAULT 'completed'",
             ),
         )

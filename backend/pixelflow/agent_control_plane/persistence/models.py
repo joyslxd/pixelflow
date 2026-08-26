@@ -551,7 +551,7 @@ class PixelFlowAgentHarnessAdmissionRow(Base):
 
 
 class PixelFlowAgentHarnessToolCallRow(Base):
-    """保存 Tool Call 幂等身份及已过滤 Observation，禁止存 Provider 原始内容。"""
+    """保存 Tool Call 领取状态及已过滤 Observation，禁止存 Provider 原始内容。"""
 
     __tablename__ = "pixelflow_agent_harness_tool_calls"
 
@@ -559,12 +559,17 @@ class PixelFlowAgentHarnessToolCallRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), nullable=False)
     tool_call_id: Mapped[str] = mapped_column(String(128), nullable=False)
     request_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    execution_state: Mapped[str] = mapped_column(String(16), nullable=False, default="executing")
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
 
     __table_args__ = (
         CheckConstraint(_payload_sha256_check_expression("tool_call_key"), name="ck_pf_harness_tool_call_key"),
         CheckConstraint(_payload_sha256_check_expression("request_digest"), name="ck_pf_harness_tool_call_digest"),
+        CheckConstraint(
+            "execution_state IN ('executing', 'completed')",
+            name="ck_pf_harness_tool_call_execution_state",
+        ),
         UniqueConstraint("run_id", "tool_call_id", name="uq_pf_harness_tool_call_identity"),
         Index("ix_pf_harness_tool_calls_run", "run_id", "created_at"),
     )

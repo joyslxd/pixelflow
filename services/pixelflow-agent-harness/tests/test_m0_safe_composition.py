@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+
+
+def _m0_tool_manifest() -> dict[str, object]:
+    """提供只用于 Runtime 启动测试的最小冻结 Manifest，不实际调用 Broker。"""
+
+    return {
+        "protocol_version": "v1",
+        "version": "agent-tools-v1",
+        "digest": "sha256:" + "0" * 64,
+        "tools": [],
+    }
 
 
 def test_m0_safe_composition_excludes_forbidden_capabilities() -> None:
@@ -71,6 +83,8 @@ def test_fixed_python_sdk_starts_safe_jsonrpc_runtime(tmp_path: Path) -> None:
                 "DSH_AGENTS_HOME": str(root / "agents-home"),
                 "DSH_SESSION_ROOT": str(root / "sessions"),
                 "DSH_CORDIS_CONFIG": str(cordis),
+                "PIXELFLOW_HARNESS_TOOLSET_VERSION": "agent-tools-v1",
+                "PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON": json.dumps(_m0_tool_manifest()),
             },
             request_timeout_seconds=15,
         )
@@ -126,6 +140,8 @@ def test_fixed_sdk_performs_real_ark_deepseek_turn(tmp_path: Path) -> None:
                 "DSH_SESSION_ROOT": str(root / "sessions"),
                 "DEEPSEEK_API_KEY": api_key,
                 "DEEPSEEK_BASE_URL": base_url,
+                "PIXELFLOW_HARNESS_TOOLSET_VERSION": "agent-tools-v1",
+                "PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON": json.dumps(_m0_tool_manifest()),
             },
             request_timeout_seconds=90,
         )

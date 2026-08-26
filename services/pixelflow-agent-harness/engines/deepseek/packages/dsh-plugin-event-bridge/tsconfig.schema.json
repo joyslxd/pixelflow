@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "compilerOptions": { "properties": {
+      "target": { "description": "用途：指定 JavaScript 目标版本；影响：决定可用语法。" }, "module": { "description": "用途：指定模块格式；影响：必须兼容 Harness ESM Loader。" }, "moduleResolution": { "description": "用途：指定依赖解析规则；影响：改变导入定位方式。" }, "outDir": { "description": "用途：指定构建输出目录；影响：Cordis 从该路径加载 Plugin。" }, "rootDir": { "description": "用途：限定源码根目录；影响：根外文件不参与输出。" }, "strict": { "description": "用途：开启严格类型检查；影响：类型错误阻断构建。" }, "declaration": { "description": "用途：生成类型声明；影响：产物包含 d.ts。" }, "skipLibCheck": { "description": "用途：跳过第三方声明检查；影响：缩短构建时间。" }
+    } },
+    "include": { "items": { "description": "用途：限定编译源码 glob；影响：不匹配文件不会参与构建。" } }
+  }
+}

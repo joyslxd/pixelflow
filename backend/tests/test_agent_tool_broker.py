@@ -190,6 +190,81 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
 
 
 @pytest.mark.asyncio
+async def test_concurrent_tool_call_is_claimed_before_workspace_mutation(tmp_path) -> None:
+    """同一 Tool Call 并发抵达时，后到请求只能看到执行中状态，绝不能再次写 Workspace。"""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-tools-concurrent.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    video_repository = SQLVideoAgentRepository(session_factory)
+    repository = SQLAgentToolRepository(session_factory)
+    now = datetime.now(UTC)
+    workspace = await video_repository.create_workspace(
+        "m3-tool-user",
+        VideoWorkspace(
+            workspace_id="m3-tool-workspace",
+            conversation_id="m3-tool-conversation",
+            revision=1,
+            payload={"scenes": [{"scene_id": "scene-1", "title": "旧镜头"}]},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    binding = RunBinding(
+        run_id="hrun_m3_concurrent",
+        session_id="pfh_m3_concurrent",
+        user_id="m3-tool-user",
+        conversation_id=workspace.conversation_id,
+        workspace_id=workspace.workspace_id,
+        workspace_revision=1,
+        context_digest="sha256:" + "7" * 64,
+        toolset_version="agent-tools-v1",
+        tool_manifest_digest=manifest().digest,
+        request_digest="sha256:" + "8" * 64,
+    )
+    await repository.register_run_binding(binding)
+    request = ToolCallRequest(
+        protocol_version="v1",
+        run_id=binding.run_id,
+        session_id=binding.session_id,
+        tool_call_id="m3-concurrent-patch",
+        tool_name="patch_scene",
+        arguments={"scene_id": "scene-1", "patch": {"title": "新镜头"}},
+        expected_workspace_revision=1,
+        context_digest=binding.context_digest,
+        toolset_version=binding.toolset_version,
+    )
+    broker = AgentToolBroker(repository, video_repository)
+    original_execute = broker._executor.execute_tool_call  # noqa: SLF001 - 固定并发领取边界。
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_execute(**kwargs):
+        entered.set()
+        await release.wait()
+        return await original_execute(**kwargs)
+
+    broker._executor.execute_tool_call = delayed_execute  # type: ignore[method-assign]  # noqa: SLF001
+    idempotency_key = repository.tool_call_key(run_id=request.run_id, tool_call_id=request.tool_call_id)
+    try:
+        first_task = asyncio.create_task(broker.call(request, idempotency_key=idempotency_key))
+        await entered.wait()
+        second = await broker.call(request, idempotency_key=idempotency_key)
+        release.set()
+        first = await first_task
+        current = await video_repository.get_workspace(binding.user_id, binding.workspace_id)
+    finally:
+        await engine.dispose()
+
+    assert first.status == "completed"
+    assert second.status == "failed"
+    assert second.model_observation == {"code": "tool_call_in_progress"}
+    assert current is not None
+    assert current.revision == 2
+
+
+@pytest.mark.asyncio
 async def test_recovery_event_is_persisted_once_and_recovery_run_cannot_drift(tmp_path) -> None:
     """同一原 Run 的恢复事件与后继 Run 必须在真实 SQLite 中保持唯一且不可漂移。"""
 

@@ -101,7 +101,15 @@ def build_m00_commands(root: Path, *, require_environment: bool) -> list[GateCom
         _sidecar_python(root)
     backend = root / "backend"
     web = root / "web"
-    sidecar_plugin = root / "services/pixelflow-agent-harness/engines/deepseek/packages/dsh-plugin-capability-tools"
+    sidecar_plugins = tuple(
+        root / "services/pixelflow-agent-harness/engines/deepseek/packages" / name
+        for name in (
+            "dsh-plugin-capability-tools",
+            "dsh-plugin-run-policy",
+            "dsh-plugin-context-policy",
+            "dsh-plugin-event-bridge",
+        )
+    )
     commands = [
         GateCommand(str(root), "git", ("diff", "--check")),
         GateCommand(
@@ -135,8 +143,9 @@ def build_m00_commands(root: Path, *, require_environment: bool) -> list[GateCom
         GateCommand(str(web), "corepack", ("pnpm", "build-prod")),
         _sidecar_python_command(root, "-m", "ruff", "check", "src", "tests"),
         _sidecar_python_command(root, "-m", "pytest", "tests", "-m", "not m0_real", "-q"),
-        GateCommand(str(sidecar_plugin), "npm", ("run", "build")),
     ]
+    for plugin in sidecar_plugins:
+        commands.append(GateCommand(str(plugin), "npm", ("run", "build")))
     return commands
 
 

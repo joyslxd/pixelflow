@@ -45,10 +45,28 @@ jobs:
       - name: 安装 uv
         # 用途：固定安装 uv 的官方 Action；影响：升级 Action 版本需重新检查锁文件兼容性。
         uses: astral-sh/setup-uv@v6
+      # 用途：安装受控 Node 构建环境；影响：只用于构建和验证 Cordis Plugin。
+      - name: 安装 Node
+        # 用途：固定官方 Node 安装 Action；影响：升级主版本需重新验证 Plugin 构建产物。
+        uses: actions/setup-node@v4
+        with:
+          # 用途：固定 LTS 主版本；影响：保证 TypeScript 与 node:test 可复现。
+          node-version: "22"
       # 用途：同步被锁定的运行依赖；影响：依赖漂移会失败关闭。
       - name: 同步锁定依赖
         # 用途：严格按锁文件安装 Linux Runtime；锁文件漂移会立即失败，避免使用本机 macOS 二进制。
         run: uv sync --locked --all-groups
+      # 用途：构建并验证四类 Cordis Plugin；影响：源码、dist 与生命周期测试漂移会阻断 Linux 合同验收。
+      - name: 构建并验证 Sidecar Plugin
+        # 用途：依次安装、构建并运行每个 Plugin 测试；影响：任一 Plugin 失败即终止合同 Job。
+        run: |
+          for package in dsh-plugin-capability-tools dsh-plugin-run-policy dsh-plugin-context-policy dsh-plugin-event-bridge; do
+            cd "engines/deepseek/packages/$package"
+            npm ci
+            npm run build
+            if [ -d tests ]; then node --test tests/*.test.mjs; fi
+            cd ../../../..
+          done
       # 用途：执行默认质量门禁；影响：真实模型用例仍被排除。
       - name: 执行静态检查和非计费合同链路
         # 用途：验证 HTTP、SQLite、SSE、重放和安全组合；排除真实模型标记，默认不消耗测试额度。
@@ -95,10 +113,28 @@ jobs:
       - name: 安装 uv
         # 用途：固定安装 uv 的官方 Action；影响：升级 Action 版本需重新检查锁文件兼容性。
         uses: astral-sh/setup-uv@v6
+      # 用途：安装与合同 Job 相同的 Node 环境；影响：真实验收不会使用 Runner 预装旧 Node。
+      - name: 安装 Node
+        # 用途：固定 LTS 主版本；影响：保证 Plugin 运行产物一致。
+        uses: actions/setup-node@v4
+        with:
+          # 用途：与合同 Job 保持一致；影响：避免跨 Job 的 Node ABI 漂移。
+          node-version: "22"
       # 用途：同步真实验收依赖；影响：依赖漂移会失败关闭。
       - name: 同步锁定依赖
         # 用途：按锁文件安装官方 Linux Runtime；任何依赖漂移均失败关闭。
         run: uv sync --locked --all-groups
+      # 用途：重建并执行 Plugin 生命周期测试；影响：真实模型 Run 只使用当前提交的安全 Plugin。
+      - name: 构建并验证 Sidecar Plugin
+        # 用途：依次安装、构建并运行每个 Plugin 测试；影响：任一 Plugin 失败即禁止真实模型调用。
+        run: |
+          for package in dsh-plugin-capability-tools dsh-plugin-run-policy dsh-plugin-context-policy dsh-plugin-event-bridge; do
+            cd "engines/deepseek/packages/$package"
+            npm ci
+            npm run build
+            if [ -d tests ]; then node --test tests/*.test.mjs; fi
+            cd ../../../..
+          done
       # 用途：校验真实模型 Secret；影响：缺失时立即失败而不执行 pytest。
       - name: 校验受保护测试凭据
         # 用途：缺少 Secret 时失败关闭，不允许 pytest 把真实用例静默跳过而错误报告为已验证。

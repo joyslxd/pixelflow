@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+import jwt
 
 from .config import SidecarSettings
 from .contracts import HarnessRunRequest
@@ -103,6 +109,7 @@ class DeepSeekHarnessEngine:
                 f"【PixelFlow 安全指令】\n{request.context.system_instruction}\n\n"
                 f"【用户请求】\n{request.context.user_input}"
             )
+            manifest_json = self._load_frozen_tool_manifest(request)
             harness = DeepSeekHarness(
                 DeepSeekHarnessConfig(
                     provider="deepseek-official",
@@ -124,6 +131,7 @@ class DeepSeekHarnessEngine:
                         "PIXELFLOW_HARNESS_SESSION_ID": request.session_id,
                         "PIXELFLOW_HARNESS_CONTEXT_DIGEST": request.binding.context_digest,
                         "PIXELFLOW_HARNESS_TOOLSET_VERSION": request.toolset.version,
+                        "PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON": manifest_json,
                         "PIXELFLOW_HARNESS_WORKSPACE_REVISION": str(request.binding.workspace_revision),
                     },
                     request_timeout_seconds=self._settings.request_timeout_seconds,
@@ -154,6 +162,41 @@ class DeepSeekHarnessEngine:
                 except Exception:
                     # 已有主异常时清理失败不覆盖原始阶段；日志只保留固定类型，不输出底层文本。
                     logger.warning("harness_cleanup_failed run_id=%s", run_id)
+
+    def _load_frozen_tool_manifest(self, request: HarnessRunRequest) -> str:
+        """从受服务 JWT 保护的 Broker 获取 Manifest，并在启动 Session 前校验冻结摘要。"""
+
+        now = int(time.time())
+        token = jwt.encode(
+            {
+                "sub": "pixelflow-harness-sidecar",
+                "iss": self._settings.tool_broker_jwt_issuer,
+                "aud": self._settings.tool_broker_jwt_audience,
+                "service_instance_id": self._settings.sidecar_instance_id,
+                "iat": now,
+                "exp": now + 60,
+            },
+            self._settings.tool_broker_jwt_signing_key,
+            algorithm="HS256",
+        )
+        request_url = f"{self._settings.tool_broker_base_url}/agent/internal/agent-tools/manifest"
+        try:
+            with urlopen(  # noqa: S310 - URL 已由 Sidecar 启动配置的内部地址校验。
+                Request(request_url, headers={"Authorization": f"Bearer {token}"}),
+                timeout=10,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, URLError, ValueError, UnicodeDecodeError) as error:
+            raise HarnessProjectionError("tool_manifest_unavailable") from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("protocol_version") != "v1"
+            or payload.get("version") != request.toolset.version
+            or payload.get("digest") != request.toolset.manifest_digest
+            or not isinstance(payload.get("tools"), list)
+        ):
+            raise HarnessProjectionError("tool_manifest_drift")
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagnostic:

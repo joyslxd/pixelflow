@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -22,16 +21,12 @@ from pixelflow.video.contracts import (
     AgentPlanStatus,
     PlanStepStatus,
     VideoToolResult,
-    VideoWorkspace,
 )
+
+from .workspace_mutation import VideoWorkspaceMutationService
 
 if TYPE_CHECKING:
     from pixelflow.video.workspace.repository import VideoWorkspaceRepository as VideoWorkspaceRepository
-
-logger = logging.getLogger(__name__)
-
-# 长耗时 Tool 执行期间其它 Turn 可能 bump revision；写回冲突时重读重试。
-_WORKSPACE_PATCH_MAX_ATTEMPTS = 3
 
 
 class VideoToolExecutor:
@@ -49,6 +44,7 @@ class VideoToolExecutor:
         self._registry = registry
         self._event_repository = event_repository
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._workspace_mutations = VideoWorkspaceMutationService(repository)
 
     async def execute_tool_call(
         self,
@@ -73,51 +69,13 @@ class VideoToolExecutor:
         if not isinstance(result, VideoToolResult):
             raise VideoToolExecutionError("工具结果无效，请稍后重试")
         if result.workspace_patch:
-            await self._apply_workspace_patch_resilient(
+            await self._workspace_mutations.apply_tool_patch(
                 user_id=context.user_id,
                 workspace=context.workspace,
                 patch=result.workspace_patch,
                 now=self._clock(),
             )
         return result
-
-    async def _apply_workspace_patch_resilient(
-        self,
-        *,
-        user_id: str,
-        workspace: VideoWorkspace,
-        patch: Mapping[str, object],
-        now: datetime,
-    ) -> VideoWorkspace:
-        """按最新 revision 写入 workspace；冲突则重读后重试。"""
-
-        current = workspace
-        last_error: AgentRuntimeRecordConflictError | None = None
-        for attempt in range(_WORKSPACE_PATCH_MAX_ATTEMPTS):
-            try:
-                return await self._repository.apply_workspace_patch(
-                    user_id,
-                    current.workspace_id,
-                    dict(patch),
-                    expected_revision=current.revision,
-                    now=now,
-                )
-            except AgentRuntimeRecordConflictError as exc:
-                last_error = exc
-                logger.warning(
-                    "executor workspace patch 冲突，重读后重试 workspace_id=%s attempt=%s",
-                    current.workspace_id,
-                    attempt + 1,
-                )
-                refreshed = await self._repository.get_workspace(
-                    user_id,
-                    current.workspace_id,
-                )
-                if refreshed is None:
-                    raise
-                current = refreshed
-        assert last_error is not None
-        raise last_error
 
     async def run_plan(
         self,

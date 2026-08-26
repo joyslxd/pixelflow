@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "description": "用途：声明 Event Bridge Plugin 的 npm 包身份；影响：Cordis Loader 按该名称解析构建产物。" },
+    "version": { "description": "用途：冻结 Plugin 内部版本；影响：升级后必须重跑 Linux 验收。" },
+    "private": { "description": "用途：禁止发布内部 Plugin；影响：true 时 npm publish 被拒绝。" },
+    "type": { "description": "用途：指定 ESM 模块格式；影响：Harness 按 module 方式加载。" },
+    "scripts": { "properties": { "build": { "description": "用途：编译 TypeScript；影响：失败时 M00 门禁拒绝通过。" } } },
+    "devDependencies": { "properties": { "typescript": { "description": "用途：固定 TypeScript 编译器；影响：升级需重验 Plugin 产物。" } } }
+  }
+}

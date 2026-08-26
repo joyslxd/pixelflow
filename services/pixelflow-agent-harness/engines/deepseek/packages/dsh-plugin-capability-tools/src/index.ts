@@ -1,4 +1,4 @@
-/** 将模型选择的 Capability Tool 调用安全转发给 PixelFlow Tool Broker。 */
+/** 将冻结 Manifest 中的 Capability Tool 调用安全转发给 PixelFlow Tool Broker。 */
 
 import { createHash, createHmac } from "node:crypto";
 
@@ -6,10 +6,6 @@ interface ToolRegistryContext {
   tools: { register(tool: ToolDefinition): void };
 }
 
-/**
- * 用途：声明本 Plugin 使用的最小 Tool 注册合同；影响：只依赖官方 Runtime 已注入的 tools 服务，
- * 避免离线镜像再解析 Plugin 目录下未受版本控制的 npm 依赖。
- */
 interface ToolDefinition {
   name: string;
   description: string;
@@ -34,10 +30,24 @@ interface BrokerSettings {
   workspaceRevision: number;
 }
 
+interface ManifestTool {
+  name: string;
+  description: string;
+  parameters_schema: Record<string, unknown>;
+  cost_level: string;
+  confirmation_required: boolean;
+}
+
+interface FrozenManifest {
+  protocol_version: "v1";
+  version: string;
+  digest: string;
+  tools: ManifestTool[];
+}
+
 interface BrokerObservation {
-  code: "workspace_inspected";
-  workspace_revision: number;
-  artifact_refs: string[];
+  public_summary: string;
+  model_observation: Record<string, unknown>;
 }
 
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
@@ -46,60 +56,31 @@ export const name = "pixelflow-capability-tools";
 /** 声明 Plugin 只依赖官方 Tool Registry。 */
 export const inject = ["tools"];
 
-/** 注册只读工作区 Tool；真实权限由 Gateway Broker 决定。 */
+/** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
 export function apply(ctx: ToolRegistryContext): void {
-  ctx.tools.register(
-    {
-      name: "inspect_video_workspace",
-      description: "读取当前 PixelFlow 视频工作区的安全摘要。用户询问项目现状、分镜、素材或生成进度时应调用此工具，不要猜测工作区内容。",
-      parameters: {
-        type: "object",
-        properties: {},
-      },
+  const manifest = frozenManifestFromEnvironment();
+  for (const tool of manifest.tools) {
+    ctx.tools.register({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters_schema,
       output: {
         schema: {
           type: "object",
           additionalProperties: false,
           properties: {
-            code: { type: "string", const: "workspace_inspected" },
             public_summary: { type: "string" },
-            workspace_revision: { type: "integer" },
-            artifact_refs: { type: "array", items: { type: "string" } },
+            model_observation: { type: "object" },
           },
-          required: ["code", "public_summary", "workspace_revision", "artifact_refs"],
+          required: ["public_summary", "model_observation"],
         },
         render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
-        if (Object.keys(args).length !== 0) throw new Error("inspect_video_workspace 不接受参数");
-        const settings = settingsFromEnvironment();
-        const toolCallId = String(exec.callId);
-        const response = await fetch(`${settings.baseUrl}/agent/internal/agent-tools/calls`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${serviceJwt(settings)}`,
-            "Idempotency-Key": sha256(`${settings.runId}:${toolCallId}`),
-          },
-          body: JSON.stringify({
-            protocol_version: "v1",
-            run_id: settings.runId,
-            session_id: settings.sessionId,
-            tool_call_id: toolCallId,
-            tool_name: "inspect_video_workspace",
-            arguments: {},
-            expected_workspace_revision: settings.workspaceRevision,
-            context_digest: settings.contextDigest,
-            toolset_version: settings.toolsetVersion,
-          }),
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!response.ok) throw new Error("PixelFlow Tool Broker 拒绝了工作区读取请求");
-        const payload: unknown = await response.json();
-        return canonicalObservation(payload);
+        return callBroker(tool.name, args, String(exec.callId));
       },
-    },
-  );
+    });
+  }
 }
 
 /** 从进程环境读取本次 Run 必需的最小绑定数据。 */
@@ -127,64 +108,104 @@ function settingsFromEnvironment(): BrokerSettings {
   return value;
 }
 
+/** 读取经 Sidecar 校验 digest 的 Manifest JSON，拒绝意外扩展或计费 Tool。 */
+function frozenManifestFromEnvironment(): FrozenManifest {
+  const raw = process.env.PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON ?? "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("冻结 Tool Manifest 无效");
+  }
+  if (!isRecord(parsed) || parsed.protocol_version !== "v1" || typeof parsed.version !== "string"
+    || typeof parsed.digest !== "string" || !Array.isArray(parsed.tools)
+    || parsed.version !== (process.env.PIXELFLOW_HARNESS_TOOLSET_VERSION ?? "")) {
+    throw new Error("冻结 Tool Manifest 合同不匹配");
+  }
+  const tools = parsed.tools.map(validateManifestTool);
+  if (new Set(tools.map((tool) => tool.name)).size !== tools.length) {
+    throw new Error("冻结 Tool Manifest 存在重复 Tool");
+  }
+  return { protocol_version: "v1", version: parsed.version, digest: parsed.digest, tools };
+}
+
+/** Manifest 只允许 Sidecar 可安全调用的非计费、无需确认 Tool。 */
+function validateManifestTool(value: unknown): ManifestTool {
+  if (!isRecord(value) || typeof value.name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(value.name)
+    || typeof value.description !== "string" || value.description.length === 0 || value.description.length > 2_000
+    || !isRecord(value.parameters_schema) || value.cost_level !== "none" || value.confirmation_required !== false) {
+    throw new Error("冻结 Tool Manifest 包含未授权能力");
+  }
+  return {
+    name: value.name,
+    description: value.description,
+    parameters_schema: value.parameters_schema,
+    cost_level: value.cost_level,
+    confirmation_required: value.confirmation_required,
+  };
+}
+
+/** 通过唯一 Gateway Broker 执行调用，Sidecar 不直连 Repository、Provider 或文件系统。 */
+async function callBroker(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<BrokerObservation> {
+  const settings = settingsFromEnvironment();
+  const response = await fetch(`${settings.baseUrl}/agent/internal/agent-tools/calls`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${serviceJwt(settings)}`,
+      "Idempotency-Key": sha256(`${settings.runId}:${toolCallId}`),
+    },
+    body: JSON.stringify({
+      protocol_version: "v1",
+      run_id: settings.runId,
+      session_id: settings.sessionId,
+      tool_call_id: toolCallId,
+      tool_name: toolName,
+      arguments: args,
+      expected_workspace_revision: settings.workspaceRevision,
+      context_digest: settings.contextDigest,
+      toolset_version: settings.toolsetVersion,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error("PixelFlow Tool Broker 拒绝了 Tool 调用");
+  return canonicalObservation(await response.json());
+}
+
 /** 生成仅用于 Sidecar→Broker 的五分钟 HS256 服务 JWT。 */
 function serviceJwt(settings: BrokerSettings): string {
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const claims = base64Url(JSON.stringify({
-    sub: "pixelflow-harness-sidecar",
-    iss: settings.issuer,
-    aud: settings.audience,
-    service_instance_id: settings.instanceId,
-    iat: now,
-    exp: now + 300,
+    sub: "pixelflow-harness-sidecar", iss: settings.issuer, aud: settings.audience,
+    service_instance_id: settings.instanceId, iat: now, exp: now + 300,
   }));
   const signature = createHmac("sha256", settings.signingKey).update(`${header}.${claims}`).digest("base64url");
   return `${header}.${claims}.${signature}`;
 }
 
-/** 计算与 Gateway 完全相同的稳定 Tool Call 身份。 */
 function sha256(value: string): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
-/** Base64URL 编码 JWT JSON 节，避免引入第二个 JWT Runtime 依赖。 */
 function base64Url(value: string): string {
   return Buffer.from(value, "utf8").toString("base64url");
 }
 
-/** 严格过滤 Broker Observation，拒绝未知字段或安全状态以外的任意载荷。 */
-function canonicalObservation(payload: unknown): {
-  code: "workspace_inspected";
-  public_summary: string;
-  workspace_revision: number;
-  artifact_refs: string[];
-} {
-  const observation = isRecord(payload) ? payload.model_observation : undefined;
-  const workspaceRevision = isRecord(observation) ? observation.workspace_revision : undefined;
-  const artifactRefs = isRecord(observation) ? observation.artifact_refs : undefined;
+/** 严格过滤 Broker 结果，绝不把 Provider raw 或未知字段带回 Harness。 */
+function canonicalObservation(payload: unknown): BrokerObservation {
   if (!isRecord(payload) || payload.protocol_version !== "v1" || payload.status !== "completed"
     || typeof payload.public_summary !== "string" || payload.public_summary.length === 0 || payload.public_summary.length > 512
-    || !isRecord(observation) || observation.code !== "workspace_inspected"
-    || typeof workspaceRevision !== "number" || !Number.isSafeInteger(workspaceRevision)
-    || !Array.isArray(artifactRefs)
-    || artifactRefs.some((item) => typeof item !== "string" || !item.startsWith("artifact:"))) {
+    || !isRecord(payload.model_observation)) {
     throw new Error("PixelFlow Tool Broker 返回了无效 Observation");
   }
-  return {
-    code: "workspace_inspected",
-    public_summary: payload.public_summary,
-    workspace_revision: workspaceRevision,
-    artifact_refs: artifactRefs as string[],
-  };
+  return { public_summary: payload.public_summary, model_observation: payload.model_observation };
 }
 
-/** 判断未经信任 JSON 是否为普通对象。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 限制 Broker 网络目标，生产只能走 HTTPS。 */
 function isSafeBrokerUrl(value: string): boolean {
   return value.startsWith("https://") || /^http:\/\/127\.0\.0\.1:\d+$/u.test(value);
 }
