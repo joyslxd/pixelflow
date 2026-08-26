@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pixelflow.agent_control_plane.persistence.models import PixelFlowLongTermMemoryWriteRow
 from pixelflow.long_term_memory.outbox import MemoryWriteWorker, SQLWriteOutbox
 from pixelflow.long_term_memory.service import (
     LongTermMemoryConfig,
@@ -145,12 +146,22 @@ async def test_mem0_adapter_uses_anonymous_user_id_and_maps_delete(monkeypatch: 
                 ]
             }
         if method == "GET":
+            if path == "/v1/memories/memory-1/history/":
+                assert payload is None
+                return [
+                    {"id": "memory-0", "memory": "旧偏好", "category": "preference"},
+                    {"id": "memory-1", "memory": "偏好暖色调", "category": "preference"},
+                ]
             assert path == "/v1/memories/memory-1/"
             assert payload is None
             return {"id": "memory-1", "memory": "偏好暖色调", "category": "preference"}
         if method == "DELETE" and path == "/v1/memories/memory-1/":
             assert payload is None
             return {}
+        if method == "PUT":
+            assert path == "/v1/memories/memory-1/"
+            assert payload == {"text": "更新后的偏好"}
+            return {"id": "memory-1", "memory": "更新后的偏好", "category": "preference"}
         assert method == "DELETE"
         assert path == "/v1/memories/"
         assert params is not None
@@ -161,6 +172,8 @@ async def test_mem0_adapter_uses_anonymous_user_id_and_maps_delete(monkeypatch: 
     adapter._v1_request = v1_request  # type: ignore[method-assign]
 
     assert await adapter.get(memory_id="memory-1") is not None
+    assert [item.memory_id for item in await adapter.history(memory_id="memory-1")] == ["memory-0", "memory-1"]
+    assert (await adapter.update(memory_id="memory-1", content="更新后的偏好")).content == "更新后的偏好"
     assert await adapter.get_event(
         event_id="event-1",
         user_id="user-1",
@@ -227,11 +240,21 @@ async def test_write_outbox_persists_event_then_polls_same_identity() -> None:
         assert first is not None and first.event_id is None
         event_id = await adapter.add(user_id=first.user_id, content=first.content, category=first.category, write_key=first.write_key)
         assert await outbox.save_event_id(write_key=first.write_key, worker_id="worker", event_id=event_id)
-        await outbox.release(write_key=first.write_key, worker_id="worker")
+        await outbox.retry(
+            write_key=first.write_key,
+            worker_id="worker",
+            retry_after_seconds=0,
+            failure_code="mem0_event_pending",
+        )
         second = await outbox.claim(worker_id="worker", now=datetime.now(UTC))
         assert second is not None and second.event_id == "memory-1"
         assert await adapter.get_event(event_id=second.event_id, user_id="user-1", content="偏好", write_key="write-poll") is None
-        await outbox.release(write_key=second.write_key, worker_id="worker")
+        await outbox.retry(
+            write_key=second.write_key,
+            worker_id="worker",
+            retry_after_seconds=0,
+            failure_code="mem0_event_pending",
+        )
         third = await outbox.claim(worker_id="worker", now=datetime.now(UTC))
         assert third is not None and third.event_id == "memory-1"
         assert await adapter.get_event(event_id=third.event_id, user_id="user-1", content="偏好", write_key="write-poll") is not None
@@ -269,7 +292,7 @@ async def test_worker_persists_remote_event_then_only_polls_same_event() -> None
             outbox,
             adapter,
             worker_id="worker",
-            event_poll_delay_seconds=0,
+            retry_initial_seconds=0,
         )
         assert await worker.run_once()
         assert await worker.run_once()
@@ -277,6 +300,87 @@ async def test_worker_persists_remote_event_then_only_polls_same_event() -> None
         assert adapter.add_calls == 1
         assert adapter.event_calls == 2
         assert await outbox.claim(worker_id="worker-2", now=datetime.now(UTC)) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_moves_unknown_add_boundary_to_manual_review_and_owner_can_requeue() -> None:
+    """未得到 event_id 时不能自动重试 add，只能由同一 owner 显式确认后重新排队。"""
+
+    class Adapter:
+        add_calls = 0
+
+        async def add(self, **_: object) -> None:
+            self.add_calls += 1
+            return None
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        outbox = SQLWriteOutbox(factory)
+        await outbox.enqueue(user_id="user-1", content="偏好", category="preference", write_key="write-manual")
+        worker = MemoryWriteWorker(outbox, Adapter(), worker_id="worker", retry_initial_seconds=0)
+        assert await worker.run_once()
+        async with factory() as session:
+            row = await session.get(PixelFlowLongTermMemoryWriteRow, "write-manual")
+            assert row is not None
+            assert (row.status, row.last_failure_code, row.delivery_attempts) == (
+                "manual_review",
+                "mem0_add_event_id_missing",
+                1,
+            )
+        assert not await outbox.requeue_manual_review(user_id="other-user", write_key="write-manual")
+        assert await outbox.requeue_manual_review(user_id="user-1", write_key="write-manual")
+        replay = await outbox.claim(worker_id="worker-2", now=datetime.now(UTC))
+        assert replay is not None and replay.event_id is None and replay.delivery_attempts == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_exponential_backoff_then_moves_pending_event_to_manual_review() -> None:
+    """已知 event 仅轮询同一身份；达到上限后停止自动查询并留下固定安全原因。"""
+
+    class Adapter:
+        add_calls = 0
+        event_calls = 0
+
+        async def add(self, **_: object) -> str:
+            self.add_calls += 1
+            return "event-1"
+
+        async def get_event(self, **_: object) -> None:
+            self.event_calls += 1
+            return None
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        outbox = SQLWriteOutbox(factory)
+        await outbox.enqueue(user_id="user-1", content="偏好", category="preference", write_key="write-pending")
+        worker = MemoryWriteWorker(
+            outbox,
+            Adapter(),
+            worker_id="worker",
+            retry_initial_seconds=0,
+            max_event_poll_attempts=3,
+        )
+        assert worker._retry_delay_seconds(1) == 0  # noqa: SLF001 - 固定退避公式的边界验证。
+        assert await worker.run_once()
+        assert await worker.run_once()
+        assert await worker.run_once()
+        async with factory() as session:
+            row = await session.get(PixelFlowLongTermMemoryWriteRow, "write-pending")
+            assert row is not None
+            assert (row.status, row.last_failure_code) == (
+                "manual_review",
+                "mem0_event_poll_attempts_exhausted",
+            )
     finally:
         await engine.dispose()
 
@@ -319,6 +423,13 @@ async def test_real_mem0_search_add_and_cleanup() -> None:
                 break
             await asyncio.sleep(2)
         assert completed is not None
+        # 测试环境可在首个更新前返回空历史；关键是稳定 Port 安全映射该响应。
+        assert isinstance(await adapter.history(memory_id=completed.memory_id), list)
+        updated = await adapter.update(
+            memory_id=completed.memory_id,
+            content="M1 隔离测试偏好已更新，请在测试结束后删除。",
+        )
+        assert updated is not None
         await adapter.search(user_id=user_id, query="M1 隔离测试偏好", limit=3)
     finally:
         assert await adapter.delete_all(user_id=user_id)

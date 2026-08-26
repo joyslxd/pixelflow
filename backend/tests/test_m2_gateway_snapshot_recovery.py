@@ -6,6 +6,7 @@ import asyncio
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -73,6 +74,37 @@ def _wait_http(client: httpx.Client, url: str) -> httpx.Response:
             return response
         time.sleep(0.1)
     pytest.fail(f"进程未在限定时间就绪：{url}")
+
+
+def _sidecar_command(sidecar_root: Path, *, port: int) -> list[str]:
+    """返回已验证可执行的本地 Sidecar 命令；缺少官方 Runtime 时跳过真实进程用例。"""
+
+    python = sidecar_root / ".venv/bin/python"
+    command_prefix = [str(python)]
+    if sys.platform == "darwin":
+        command_prefix = ["/usr/bin/arch", "-arm64", str(python)]
+    probe = subprocess.run(
+        [*command_prefix, "-c", "import pixelflow_harness_sidecar"],
+        cwd=sidecar_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("本机未安装可执行的官方 Sidecar Runtime；由 Linux 验收环境执行真实进程用例")
+    return [
+        *command_prefix,
+        "-m",
+        "uvicorn",
+        "pixelflow_harness_sidecar.app:create_app",
+        "--factory",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--log-level",
+        "warning",
+    ]
 
 
 def _start_gateway(app: FastAPI, port: int) -> tuple[uvicorn.Server, threading.Thread]:
@@ -146,21 +178,7 @@ def test_gateway_restart_reprojects_cancelled_run_snapshot_and_sse(tmp_path: Pat
         "PYTHONPATH": str(sidecar_root / "src"),
     }
     sidecar_process = subprocess.Popen(
-        [
-            "/usr/bin/arch",
-            "-arm64",
-            str(sidecar_root / ".venv/bin/python"),
-            "-m",
-            "uvicorn",
-            "pixelflow_harness_sidecar.app:create_app",
-            "--factory",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(sidecar_port),
-            "--log-level",
-            "warning",
-        ],
+        _sidecar_command(sidecar_root, port=sidecar_port),
         cwd=sidecar_root,
         env=environment,
         stdout=subprocess.DEVNULL,

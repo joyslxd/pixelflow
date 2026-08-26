@@ -36,15 +36,12 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# 默认跳过已隔离的 V1 video workflow 单元测试（批次 E）；需要时显式：
-#   uv run pytest -m v1_workflow_legacy
-# 用途：默认排除隔离旧流程测试；影响：常规 pytest 不会意外执行已下线架构用例。
-addopts = ["-m", "not v1_workflow_legacy"]
+# 用途：声明 pytest 默认参数；影响：不再保留旧工作流隔离标记，全部已注册测试均会参与默认收口验证。
+addopts = []
 # 用途：声明项目测试标记；影响：调用方可按标记选择真实外部环境用例。
 markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
-    "v1_workflow_legacy: quarantined agent_workflows/video unit tests (Batch E)",
     "m0_real: 调用真实 Sidecar、DeepSeek 模型与 Gateway Tool Broker 的 M0 纵向测试",
     "mem0_real: 调用隔离 Volcengine Mem0 环境的长期记忆验证",
 ]

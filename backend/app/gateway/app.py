@@ -21,6 +21,7 @@ from app.gateway.csrf_middleware import get_configured_cors_origins
 from app.gateway.routers import (
     auth,
     internal_agent_tools,
+    long_term_memory,
     pixelflow_conversations,
 )
 
@@ -382,6 +383,9 @@ PixelFlow 是电商带货短视频生成 AI Agent 平台。这个接口文档由
     # 挂载各业务 router。
     # Auth API：只保留 /agent/auth/me，用于查看 content-app 当前用户。
     app.include_router(auth.router)
+
+    # 长期记忆人工重放 API：只允许 owner 重新排队自己的 manual_review 写入。
+    app.include_router(long_term_memory.router)
 
     # PixelFlow 对话与 Harness Run API：/agent/conversations。
     app.include_router(pixelflow_conversations.router)

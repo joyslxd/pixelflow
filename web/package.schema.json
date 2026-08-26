@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "description": "用途：声明前端包名称；影响：Node 工具以该名称识别项目。" },
+    "private": { "description": "用途：禁止前端包发布到公共仓库；影响：发布命令会被包管理器拒绝。" },
+    "version": { "description": "用途：声明前端包版本；影响：构建产物和依赖工具读取该版本。" },
+    "type": { "description": "用途：声明 Node 模块类型；影响：测试和构建脚本按 ESM 解析。" },
+    "scripts": {
+      "properties": {
+        "test": { "description": "用途：运行 Harness 前端合同门禁；影响：只执行新 Runtime 测试。" },
+        "test:agent-runtime-contracts": { "description": "用途：单独运行 Harness 合同测试；影响：用于跨端 DTO 漂移检查。" },
+        "dev": { "description": "用途：启动开发模式前端；影响：使用 development 环境变量。" },
+        "dev:test": { "description": "用途：启动测试模式前端；影响：使用 test 环境变量。" },
+        "prod": { "description": "用途：启动生产模式前端；影响：使用 production 环境变量。" },
+        "build-dev": { "description": "用途：构建开发产物；影响：先执行 TypeScript 编译。" },
+        "build-test": { "description": "用途：构建测试产物；影响：先执行 TypeScript 编译。" },
+        "build-prod": { "description": "用途：构建生产产物；影响：先执行 TypeScript 编译。" },
+        "preview": { "description": "用途：预览已构建前端；影响：不会启动 Gateway。" },
+        "lint": { "description": "用途：执行 TypeScript 静态检查；影响：类型错误会阻断前端门禁。" }
+      }
+    },
+    "dependencies": {
+      "properties": {
+        "@tanstack/react-query": { "description": "用途：管理浏览器查询缓存；影响：前端可复用请求状态。" },
+        "@uiw/react-markdown-preview": { "description": "用途：渲染 Markdown 预览；影响：助手文本可显示格式化内容。" },
+        "@uiw/react-md-editor": { "description": "用途：提供 Markdown 编辑器；影响：需要编辑 Markdown 时加载该组件。" },
+        "clsx": { "description": "用途：组合 CSS 类名；影响：组件条件样式可被计算。" },
+        "lucide-react": { "description": "用途：提供图标组件；影响：界面可以显示标准图标。" },
+        "react": { "description": "用途：提供前端组件运行时；影响：工作台无法在缺失时运行。" },
+        "react-dom": { "description": "用途：提供浏览器 DOM 渲染；影响：React 页面无法挂载。" },
+        "react-router-dom": { "description": "用途：提供前端路由；影响：会话页面无法按地址切换。" },
+        "zustand": { "description": "用途：提供轻量状态容器；影响：共享界面状态可被管理。" }
+      }
+    },
+    "devDependencies": {
+      "properties": {
+        "@tailwindcss/vite": { "description": "用途：集成 Tailwind 与 Vite；影响：构建时生成样式。" },
+        "@types/react": { "description": "用途：提供 React 类型；影响：TypeScript 可检查组件代码。" },
+        "@types/react-dom": { "description": "用途：提供 React DOM 类型；影响：TypeScript 可检查挂载代码。" },
+        "@vitejs/plugin-react": { "description": "用途：启用 Vite React 编译；影响：JSX 开发和构建可用。" },
+        "tailwindcss": { "description": "用途：提供样式工具；影响：构建时处理 Tailwind 类名。" },
+        "typescript": { "description": "用途：提供前端类型检查；影响：lint 和构建会使用该编译器。" },
+        "vite": { "description": "用途：提供前端开发服务器与构建器；影响：dev 和 build 脚本可运行。" }
+      }
+    }
+  }
+}

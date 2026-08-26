@@ -2,8 +2,9 @@
 
 import { type FormEvent, useMemo, useState } from "react";
 
-import type { InterruptResponseV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
+import type { InterruptResponseV1, TurnStartV1 } from "@/api/contracts";
 
+import { VideoWorkspaceSnapshotPanel } from "./VideoWorkspaceSnapshotPanel";
 import { useAgentConversation } from "./useAgentConversation";
 
 type AgentWorkspaceProps = {
@@ -27,7 +28,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     newConversation,
     openConversation,
     submitTurn,
-    submitWorkspaceCommand,
     cancelQuotaInterrupt,
     refreshActiveRun,
     cancelActiveRun,
@@ -35,9 +35,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   const [workspaceId, setWorkspaceId] = useState("");
   const [workspaceRevision, setWorkspaceRevision] = useState("1");
   const [input, setInput] = useState("");
-  const [workspacePatch, setWorkspacePatch] = useState("{}");
   const [sending, setSending] = useState(false);
-  const [savingWorkspace, setSavingWorkspace] = useState(false);
   const snapshot = runtime.snapshot;
   const milestones = useMemo(
     () => snapshot?.events.map((event) => `${event.sequence}. ${event.type}`).join("\n") ?? "等待公开进度",
@@ -65,37 +63,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
       // Hook 已保留权威 Snapshot；草稿留在输入框供用户显式重试。
     } finally {
       setSending(false);
-    }
-  };
-
-  const submitWorkspacePatch = async (event: FormEvent) => {
-    /** Workspace Command 只提交 JSON patch；成功后由 Hook 回读唯一 Snapshot。 */
-
-    event.preventDefault();
-    const workspace = snapshot?.workspace;
-    if (!workspace || savingWorkspace) return;
-    let patch: Record<string, unknown>;
-    try {
-      const parsed: unknown = JSON.parse(workspacePatch);
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
-      patch = parsed as Record<string, unknown>;
-    } catch {
-      return;
-    }
-    const command: WorkspaceCommandV1 = {
-      client_command_id: crypto.randomUUID(),
-      workspace_id: workspace.workspace_id,
-      expected_workspace_revision: workspace.revision,
-      patch,
-    };
-    setSavingWorkspace(true);
-    try {
-      await submitWorkspaceCommand(command);
-      setWorkspacePatch("{}");
-    } catch {
-      // Hook 已保留安全错误提示；用户可在刷新 Snapshot 后修正 patch 并重试。
-    } finally {
-      setSavingWorkspace(false);
     }
   };
 
@@ -179,19 +146,11 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
         <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
         {snapshot?.workspace ? (
           <div className="mt-2 space-y-2 text-xs text-ink-soft">
-            <p>版本：{snapshot.workspace.revision}</p>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-canvas p-2">{JSON.stringify(snapshot.workspace.summary, null, 2)}</pre>
-            {typeof snapshot.workspace.summary.quota_interrupt_id === "string" ? (
-              <div className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-900">
-                <p>额度中断：{String(snapshot.workspace.summary.quota_interrupt_reason_code ?? "需要人工处理")}</p>
-                <button className="mt-2 rounded border border-amber-300 px-2 py-1" onClick={() => void cancelQuotaInterruptedPlan()}>取消该任务</button>
-              </div>
-            ) : null}
-            <form className="space-y-2" onSubmit={submitWorkspacePatch}>
-              <label className="block font-medium text-ink">工作区修改（JSON patch）</label>
-              <textarea value={workspacePatch} onChange={(event) => setWorkspacePatch(event.target.value)} rows={4} className="w-full rounded border border-line p-2 font-mono text-xs" />
-              <button disabled={savingWorkspace} className="rounded border border-line px-2 py-1 disabled:opacity-50">提交工作区修改</button>
-            </form>
+            <VideoWorkspaceSnapshotPanel
+              summary={snapshot.workspace.summary}
+              revision={snapshot.workspace.revision}
+              onCancelQuotaInterrupt={() => void cancelQuotaInterruptedPlan()}
+            />
           </div>
         ) : <p className="mt-2 text-xs text-ink-soft">尚无可恢复的 Workspace 投影。Workspace Command 与 Interrupt 会在对应公开 Gateway 合同上线后接入，当前不会回退旧流程或旧轮询。</p>}
       </aside>

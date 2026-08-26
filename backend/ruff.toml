@@ -1,20 +1,23 @@
+# 用途：统一 Python 单行最大长度；影响：超过 240 字符的新增代码会被 Ruff 拒绝。
 line-length = 240
+# 用途：按 Python 3.12 解析和检查语法；影响：低版本解释器无法作为本项目验证环境。
 target-version = "py312"
 
-# Vendored verbatim from the borgrise-creative-assistant skill (single source of
-# the Borgrise API contract; executed as-is in the sandbox in P1). Keep it
-# byte-for-byte identical to upstream rather than reformatting it.
-# ``skills/`` holds installed standard Claude skills (markdown + vendored scripts)
-# loaded by the harness — third-party content, not our code, so don't lint it.
-extend-exclude = ["pixelflow/skills/borgrise/run_generation.py", "skills/"]
+# 用途：排除第三方 Skill 的原样脚本；影响：这些外部文件不参与 PixelFlow 人工代码格式化。
+extend-exclude = ["skills/"]
 
 [lint]
+# 用途：启用基础语法、导入和 Python 升级规则；影响：违反规则的提交会在本地门禁失败。
 select = ["E", "F", "I", "UP"]
+# 用途：声明无额外忽略规则；影响：上述规则全部生效。
 ignore = []
 
 [lint.isort]
-known-first-party = ["pixelflow", "deerflow", "app"]
+# 用途：指定本仓库导入分组；影响：Ruff 不再把已删除的 DeerFlow 识别为一方包。
+known-first-party = ["pixelflow", "app"]
 
 [format]
+# 用途：统一格式化字符串引号；影响：格式化工具输出双引号。
 quote-style = "double"
+# 用途：统一格式化缩进；影响：格式化工具输出空格缩进。
 indent-style = "space"

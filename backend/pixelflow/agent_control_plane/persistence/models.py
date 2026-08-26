@@ -259,14 +259,25 @@ class PixelFlowLongTermMemoryWriteRow(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     delivery_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_not_before: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
+    last_failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = (
-        CheckConstraint("status IN ('pending', 'processing', 'completed')", name="ck_pf_ltm_writes_status"),
-        Index("ix_pf_ltm_writes_due", "status", "lease_expires_at", "created_at"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'manual_review')",
+            name="ck_pf_ltm_writes_status",
+        ),
+        Index(
+            "ix_pf_ltm_writes_due",
+            "status",
+            "retry_not_before",
+            "lease_expires_at",
+            "created_at",
+        ),
     )
 
 

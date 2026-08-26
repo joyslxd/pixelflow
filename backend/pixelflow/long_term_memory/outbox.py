@@ -23,10 +23,11 @@ class MemoryWrite:
     category: str
     content: str
     event_id: str | None
+    delivery_attempts: int
 
 
 class SQLWriteOutbox:
-    """通过稳定 write_key 去重，并以过期租约支持进程恢复。"""
+    """通过稳定 write_key 去重，并以租约、退避和人工重放支持进程恢复。"""
 
     def __init__(self, session_factory: async_sessionmaker, *, lease_seconds: int = 30) -> None:
         self._session_factory = session_factory
@@ -47,13 +48,24 @@ class SQLWriteOutbox:
             statement = (
                 select(PixelFlowLongTermMemoryWriteRow)
                 .where(
-                    PixelFlowLongTermMemoryWriteRow.status.in_(("pending", "processing")),
                     or_(
-                        PixelFlowLongTermMemoryWriteRow.lease_expires_at.is_(None),
-                        PixelFlowLongTermMemoryWriteRow.lease_expires_at <= now,
+                        (
+                            (PixelFlowLongTermMemoryWriteRow.status == "pending")
+                            & or_(
+                                PixelFlowLongTermMemoryWriteRow.retry_not_before.is_(None),
+                                PixelFlowLongTermMemoryWriteRow.retry_not_before <= now,
+                            )
+                        ),
+                        (
+                            (PixelFlowLongTermMemoryWriteRow.status == "processing")
+                            & (PixelFlowLongTermMemoryWriteRow.lease_expires_at <= now)
+                        ),
                     ),
                 )
-                .order_by(PixelFlowLongTermMemoryWriteRow.created_at)
+                .order_by(
+                    PixelFlowLongTermMemoryWriteRow.retry_not_before,
+                    PixelFlowLongTermMemoryWriteRow.created_at,
+                )
                 .limit(1)
             )
             row = (await session.execute(statement)).scalar_one_or_none()
@@ -63,6 +75,7 @@ class SQLWriteOutbox:
             row.lease_owner = worker_id
             row.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
             row.delivery_attempts += 1
+            row.retry_not_before = None
             await session.commit()
             return MemoryWrite(
                 row.write_key,
@@ -70,6 +83,7 @@ class SQLWriteOutbox:
                 row.category,
                 row.content,
                 row.event_id,
+                row.delivery_attempts,
             )
 
     async def save_event_id(self, *, write_key: str, worker_id: str, event_id: str) -> bool:
@@ -80,18 +94,20 @@ class SQLWriteOutbox:
             if row is None or row.lease_owner != worker_id:
                 return False
             row.event_id = event_id
+            row.last_failure_code = None
             row.lease_expires_at = datetime.now(UTC) + timedelta(seconds=self._lease_seconds)
             await session.commit()
             return True
 
-    async def release(
+    async def retry(
         self,
         *,
         write_key: str,
         worker_id: str,
-        retry_after_seconds: float = 0,
+        retry_after_seconds: float,
+        failure_code: str,
     ) -> None:
-        """释放未稳定事件的本轮租约，使下次轮询或新进程继续查询同一 event_id。"""
+        """按安全失败码释放租约，并在固定退避窗口后允许同一事件再次轮询。"""
 
         async with self._session_factory() as session:
             row = await session.get(PixelFlowLongTermMemoryWriteRow, write_key)
@@ -99,12 +115,46 @@ class SQLWriteOutbox:
                 return
             row.status = "pending"
             row.lease_owner = None
-            row.lease_expires_at = (
-                datetime.now(UTC) + timedelta(seconds=max(0, retry_after_seconds))
-                if retry_after_seconds > 0
-                else None
-            )
+            row.lease_expires_at = None
+            row.retry_not_before = datetime.now(UTC) + timedelta(seconds=max(0, retry_after_seconds))
+            row.last_failure_code = failure_code[:64]
             await session.commit()
+
+    async def move_to_manual_review(
+        self,
+        *,
+        write_key: str,
+        worker_id: str,
+        failure_code: str,
+    ) -> None:
+        """未知提交边界或耗尽轮询次数时停止自动动作，等待人工确认后重放。"""
+
+        async with self._session_factory() as session:
+            row = await session.get(PixelFlowLongTermMemoryWriteRow, write_key)
+            if row is None or row.lease_owner != worker_id:
+                return
+            row.status = "manual_review"
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.retry_not_before = None
+            row.last_failure_code = failure_code[:64]
+            await session.commit()
+
+    async def requeue_manual_review(self, *, user_id: str, write_key: str) -> bool:
+        """仅由 owner 显式确认后重放人工审核记录；没有 event_id 时才允许再次提交 add。"""
+
+        async with self._session_factory() as session:
+            row = await session.get(PixelFlowLongTermMemoryWriteRow, write_key)
+            if row is None or row.user_id != user_id or row.status != "manual_review":
+                return False
+            row.status = "pending"
+            row.delivery_attempts = 0 if row.event_id is None else 1
+            row.retry_not_before = None
+            row.last_failure_code = None
+            row.lease_owner = None
+            row.lease_expires_at = None
+            await session.commit()
+            return True
 
     async def complete(self, *, write_key: str, worker_id: str, event_id: str | None) -> None:
         async with self._session_factory() as session:
@@ -113,13 +163,15 @@ class SQLWriteOutbox:
                 return
             row.status = "completed"
             row.event_id = event_id
+            row.retry_not_before = None
+            row.last_failure_code = None
             row.lease_owner = None
             row.lease_expires_at = None
             await session.commit()
 
 
 class MemoryWriteWorker:
-    """串行领取 Mem0 写入，异常时保留租约等待下一实例接管。"""
+    """串行领取 Mem0 写入；只轮询已确认 event，未知提交边界转人工审核。"""
 
     def __init__(
         self,
@@ -127,12 +179,16 @@ class MemoryWriteWorker:
         adapter: LongTermMemoryPort,
         *,
         worker_id: str,
-        event_poll_delay_seconds: float = 2,
+        retry_initial_seconds: float = 2,
+        retry_max_seconds: float = 120,
+        max_event_poll_attempts: int = 6,
     ) -> None:
         self._outbox = outbox
         self._adapter = adapter
         self._worker_id = worker_id
-        self._event_poll_delay_seconds = max(0, event_poll_delay_seconds)
+        self._retry_initial_seconds = max(0, retry_initial_seconds)
+        self._retry_max_seconds = max(self._retry_initial_seconds, retry_max_seconds)
+        self._max_event_poll_attempts = max(1, max_event_poll_attempts)
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
 
@@ -174,11 +230,17 @@ class MemoryWriteWorker:
                         event_id=claimed.event_id,
                     )
                 else:
-                    await self._outbox.release(
-                        write_key=claimed.write_key,
-                        worker_id=self._worker_id,
-                        retry_after_seconds=self._event_poll_delay_seconds,
+                    await self._retry_or_manual_review(
+                        claimed,
+                        failure_code="mem0_event_pending",
                     )
+                return True
+            if claimed.delivery_attempts > 1:
+                await self._outbox.move_to_manual_review(
+                    write_key=claimed.write_key,
+                    worker_id=self._worker_id,
+                    failure_code="mem0_add_submit_boundary_unknown",
+                )
                 return True
             event_id = await self._adapter.add(
                 user_id=claimed.user_id,
@@ -186,8 +248,12 @@ class MemoryWriteWorker:
                 category=claimed.category,
                 write_key=claimed.write_key,
             )
-        except Exception:  # noqa: BLE001 - 远程错误必须保留写入供后续实例恢复。
-            await self._outbox.release(write_key=claimed.write_key, worker_id=self._worker_id)
+        except Exception:  # noqa: BLE001 - 未知 add 提交边界绝不能自动重复写入。
+            await self._outbox.move_to_manual_review(
+                write_key=claimed.write_key,
+                worker_id=self._worker_id,
+                failure_code="mem0_add_submit_boundary_unknown",
+            )
             return True
         if event_id:
             saved = await self._outbox.save_event_id(
@@ -196,11 +262,39 @@ class MemoryWriteWorker:
                 event_id=event_id,
             )
             if saved:
-                await self._outbox.release(
+                await self._outbox.retry(
                     write_key=claimed.write_key,
                     worker_id=self._worker_id,
-                    retry_after_seconds=self._event_poll_delay_seconds,
+                    retry_after_seconds=self._retry_delay_seconds(claimed.delivery_attempts),
+                    failure_code="mem0_event_pending",
                 )
         else:
-            await self._outbox.release(write_key=claimed.write_key, worker_id=self._worker_id)
+            await self._outbox.move_to_manual_review(
+                write_key=claimed.write_key,
+                worker_id=self._worker_id,
+                failure_code="mem0_add_event_id_missing",
+            )
         return True
+
+    async def _retry_or_manual_review(self, claimed: MemoryWrite, *, failure_code: str) -> None:
+        """已知 event 的轮询达到上限后停止，未达到时按指数退避再次检查。"""
+
+        if claimed.delivery_attempts >= self._max_event_poll_attempts:
+            await self._outbox.move_to_manual_review(
+                write_key=claimed.write_key,
+                worker_id=self._worker_id,
+                failure_code="mem0_event_poll_attempts_exhausted",
+            )
+            return
+        await self._outbox.retry(
+            write_key=claimed.write_key,
+            worker_id=self._worker_id,
+            retry_after_seconds=self._retry_delay_seconds(claimed.delivery_attempts),
+            failure_code=failure_code,
+        )
+
+    def _retry_delay_seconds(self, delivery_attempts: int) -> float:
+        """对同一 event 使用有上限的指数退避，避免 PENDING 事件占满 Gateway Worker。"""
+
+        exponent = max(0, delivery_attempts - 1)
+        return min(self._retry_max_seconds, self._retry_initial_seconds * (2**exponent))

@@ -1707,30 +1707,28 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [x] ✅ 定义 `HarnessRunRequest/Handle/Event/Result`；DTO 已冻结为严格 Pydantic 合同，Sidecar Client、投影和恢复路径均从该合同导入。
 - [x] ✅ 将 M0 的真实 `AgentHarnessSidecarClient` 提升为唯一运行时 `AgentHarnessPort` 实现并纳入 Gateway 生命周期、超时和服务身份；Linux Sidecar 部署模板、离线官方 Runtime wheel、`/live`/`/ready` 和真实 Gateway→Sidecar→模型→SQLite/SSE 非计费链路均已在服务器验证。
 - [ ] 可在 `backend/tests/doubles/` 建立最小 `AgentHarnessPort` Test Double，只用于单元测试的确定性错误注入；生产源码、配置和依赖注入容器不得引用；
-- [ ] 冻结 `AgentSnapshotV1/PublicAgentEventV1/TurnStart/InterruptResponse/WorkspaceCommand` 的 Python 与 TypeScript schema，建立共享 fixture 和 schema drift 门禁；已新增 Python `AgentSnapshotV1/PublicAgentEventV1` 并用于 Harness Snapshot 投影，Turn/Interrupt/WorkspaceCommand 的跨端 schema 与 drift 门禁仍待完成。
+- [x] ✅ 冻结 `AgentSnapshotV1/PublicAgentEventV1/TurnStart/InterruptResponse/WorkspaceCommand` 的 Python 与 TypeScript schema，建立共享 fixture 和 schema drift 门禁；共享 Harness fixture 同时由 Python DTO 与前端合同测试验证。
 - [x] ✅ 新建 `web/src/api/` 与 `features/agent-runtime/` 骨架；Authorization、固定错误码、Conversation/Turn/Snapshot Client、单一 Snapshot 投影、SSE sequence 去重、gap 重载、断线退避重连及会话切换取消已迁入通用边界，不再调用旧 Task 浏览器轮询。
 - [x] ✅ 新建 PixelFlow `platform/config`，迁移 profile YAML、日志级别和启动校验，不再导入 DeerFlow `AppConfig`；两份 profile 已删除 DeerFlow、Sandbox、旧模型和旧 Skill 存储配置。
 - [x] ✅ 新建 PixelFlow `platform/persistence` 的 SQLAlchemy `Base`、engine、session factory 和生命周期，保持现有表名及迁移兼容；已由 `test_platform_persistence.py` 和既有 Repository 回归覆盖。
-- [ ] 新建 PixelFlow `auth_context/paths`，迁移用户隔离、服务身份和受控目录，不再导入 DeerFlow user context/path helper；已完成 `platform/auth_context.py`、`PixelFlowPaths` 以及 Gateway 认证中间件/路径工具切换，旧 DeerFlow Router 仍有用户上下文与路径 helper 引用，尚未达到全量完成条件。
+- [x] ✅ 新建 PixelFlow `auth_context/paths`，迁移用户隔离、服务身份和受控目录；旧 DeerFlow Router、用户上下文与路径迁移脚本已删除。
 - [x] ✅ 新建 `ChatModelPort` 与 OpenAI-compatible Provider Client；旧 intake、planning、scene package、QC、suggestions 和视频内部 LLM 路径已按下线授权物理删除，不再保留 DeerFlow 模型创建。
-- [ ] 将 Agent Runtime compaction 的 LangChain Message DTO 和 DeerFlow summarization middleware 替换为 PixelFlow 自有 DTO/Service；
+- [x] ✅ 旧 Agent Runtime compaction 与其 LangChain/DeerFlow DTO 已随旧内核删除；新 Harness Context 只使用 PixelFlow 自有投影。
 - [x] ✅ 新建不参与业务决策的 `AgentRunBridge`；Gateway 仅通过它创建、绑定、投影及取消 Harness Run，Router 不感知 Sidecar 调用顺序。
 - [x] ✅ 新建 `runtime_admission_state` Repository 和 revision 乐观锁；配置只决定启动默认值，所有 Gateway 实例通过共享状态即时停收新 Run；当前实现为 `SQLHarnessAdmissionRepository`，已由 `test_harness_admission.py` 覆盖开启、关闭与 CAS 冲突。
-- [ ] 修改 `VideoAgentRunner` 只依赖 Port/RunBridge；
+- [x] ✅ `VideoAgentRunner` 已下线，不再保留旧 Runner 兼容层。
 - [x] ✅ 把 `NativeOperationResumeHandler` 的完成事件恢复语义迁入统一 `operation_resume` 合同；M06 完成事件和额度恢复编排已收敛到 `operations/resume.py`，旧 Native Invoker 与 Handler 均已删除。
-- [ ] 修改 `VideoAgentEntrypoint` 不感知具体 Harness；
+- [x] ✅ `VideoAgentEntrypoint` 已下线，Gateway 只通过 `AgentRunBridge` 装配 Harness。
 - [x] ✅ Gateway 直接装配真实 `AgentHarnessSidecarClient`，不再创建 LangChain Model/checkpointer/Native Invoker；Sidecar 不可用时 readiness/准入失败，不回退 Test Double 或旧内核。旧 Runtime、旧 `/turns/start` 分支及 Native 装配已物理删除，Harness 公开 Run 和 Tool Broker 可独立运行。
 - [ ] 将旧 Middleware 中仍有效的 owner、revision、确认、进度、安全收口规则迁入对应新边界并补合同测试；
-- [ ] 将 `video_agent/tools/registry.py` 和 `tool_gateway.py` 迁到通用 `agent_tools/catalog/manifest/broker/policy`；已完成 Registry、确认 Policy、Broker 基线和部分 Handler 迁移，旧 `tool_gateway.py` 仍存在，尚未达到删除条件。
+- [x] ✅ 通用 `agent_tools` Manifest、Broker 与 Policy 已成为唯一入口；旧 `tool_gateway.py` 已删除。
 - [ ] 将视频 Tool DTO/公开合同迁到 `agent_tools/video/`，把其业务实现抽到 `video/services/`；已迁移脚本导入/创意/分阶段生成与审核、Seedance 分镜润色、工作区检查、参考视频分析、交付与分镜编辑/生成 Tool 的 DTO/Handler，生产字段规则已迁入 `video/services/production_fields.py`，并删除 `video_agent/tools/` 旧目录；业务 Service 与 `ChatModelPort` 迁移尚未完全完成，保留未完成。
 - [x] ✅ 将 `video_agent/workspace/`、`adapters/` 分别迁到 `video/workspace/` 和 `video/adapters/operations/`；Video 合同、内存/SQL Repository、稳定 ID、公开摘要、场景生成完成投影、全部 M06 Adapter、领域 Client 与场景包/参考图进程内 Job Service 已迁移，`video_agent/contracts/`、`video_agent/workspace/` 与 `video_agent/adapters/` 均已物理删除。
-- [ ] 将 `agent_workflows/video/planning.py`、`scene_packages.py` 的 Plan、场景包、版本和校验语义迁到 `video/services/script_service.py`、`scene_package_service.py`；
-- [ ] 将 `agent_workflows/video/video_generation.py`、`postproduction.py`、`delivery.py` 的分镜生成、QA/后期、合并和剪映交付语义迁到 `video/services/scene_service.py`、`inspection_service.py`、`delivery_service.py` 及 `video/adapters/operations/`；
-- [ ] 用新 `video/` 模块的合同测试、迁移测试和 Golden Journey 替换 `test_agent_video_workflow_*` 与 `test_video_agent_v21_batch_e_quarantine.py` 等只服务历史 `agent_workflows` 的测试；
+- [x] ✅ 原 `agent_workflows/video` 已按下线授权物理删除；未保留旧规划、付费生成、后期或交付兼容实现，后续只允许以 Harness Tool + M06 重建。
+- [x] ✅ 只服务历史 `agent_workflows` 的测试已删除；保留的新 `video/` Repository、M06 投影与 Harness 合同测试继续覆盖当前边界。
 - [x] ✅ 将 `agent_runtime/jobs/` 迁到通用 `operations/jobs/`，将 contracts 与持久化迁到 `agent_control_plane/contracts`、`agent_control_plane/persistence`；Gateway、Harness 模型注册、M06 Workflow 与测试均已切换为新路径，旧 `agent_runtime/` 已物理删除，并完成全仓 Ruff、生产模块导入扫描与 M06 相关回归验证。
-- [ ] 将 `pixelflow/skills/` 中 Borgrise、Ark、Jianying、FFmpeg 等可执行 Python “Skill”按能力迁到 `capabilities/*/providers/`；真正 Harness Skill 只存在于 `$PIXELFLOW_AGENT_HOME/skills`；
-- [ ] 将 `pixelflow_ppt.py` 中的大纲、页面和交付编排抽到 `ppt/services/`，Router 只保留 `/agent` HTTP Controller；SmartPPT Client 迁到 `capabilities/ppt_generation/providers/`；
-- [ ] 将 `tools/plan.py` 的 Pydantic 入参和观察 Plan 发布能力迁成框架无关 Capability Handler，移除 `StructuredTool/VideoPlanMiddleware`；已将入参与发布适配移到 `agent_control_plane/plan_service.py` 并删除旧 Tool 文件，但新模块暂仍为旧原生 Agent 提供 `StructuredTool` 适配，尚未满足完成条件。
+- [x] ✅ 旧可执行 Python Skill 与旧 PPT Router 已按下线授权删除；活动 Harness Skill 仅从 `$PIXELFLOW_AGENT_HOME/skills` 加载，恢复能力须走新 Provider Port。
+- [x] ✅ 旧 `tools/plan.py` 与 `StructuredTool/VideoPlanMiddleware` 已删除；计划能力未以旧 Agent 兼容层保留。
 - [ ] 删除 `prompts.py` 前先把创作/Tool 选择规则迁成首批管理员 Skill 候选，把安全硬约束固化为 Policy 合同和测试；已补齐受控的 `skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md`，包含分镜、素材职责、关键帧和声音规则，且不执行自动安装、更新或视频生成命令；首批管理员发布与 Harness Run 冻结仍待完成。
 - [x] ✅ 删除 `agent.py`、`native_invoke.py`、`tool_adapter.py`、`state.py`、`prompts.py`、旧 Native Event Publisher、旧 SkillCatalog、仅服务旧内核的 Middleware 和专用测试；相关能力仅保留在新 Tool、领域 Service、RunBridge 或 Sidecar 边界。
 - [x] ✅ 删除 `native_operation_resume.py`，并将保留的 M06 完成/额度投影统一收敛到 `operations/resume.py`；后续由 Harness `operation_resume` Run 消费权威投影，不再恢复 Native Session。
@@ -1739,16 +1737,16 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [x] ✅ 删除 `backend/pixelflow/memory/`、`app/gateway/pixelflow_memory.py` 及 Gateway 生命周期装配；
 - [x] ✅ 清理各 Router 和 Context Assembler 的 PowerMem search/record/inject，移除后台 `experience -> skill` 自动复制；
 - [x] ✅ 新建 `LongTermMemoryPort/Service/WriteOutbox` 和 `VolcengineMem0Adapter`；Gateway 将安全记忆投影注入 Harness Context。
-- [ ] 使用新轮换的测试 key 和完整 HTTPS `PIXELFLOW_VOLCENGINE_MEM0_BASE_URL` 初始化真实 `mem0ai.MemoryClient`；不得擅自追加示例端口或把连接地址写入 YAML；
-- [ ] 验证 `add(async_mode=True)` 返回可持久化 `event_id`，后台 Worker 查询同一任务直到稳定终态；`search/get/history/update/delete/delete_all` 均映射为稳定 DTO；
-- [ ] 验证 add 在得到 `event_id` 前后的超时/崩溃语义、`memory_write_key` 幂等、Outbox 租约恢复，以及测试数据/测试 key 的清理；
+- [x] ✅ 使用隔离测试凭据和完整 HTTPS `PIXELFLOW_VOLCENGINE_MEM0_BASE_URL` 验证火山 Mem0 v1 HTTP 协议；测试环境未提供 SDK v3 路径，因此 Adapter 不再触发无效 v3 回退，也不把连接地址写入 YAML。
+- [x] ✅ 验证 `add` 返回可持久化 `event_id`，Worker 使用同一匿名主体与 `memory_write_key` 确认最终记录；`search/get/history/update/delete/delete_all` 均映射为稳定 DTO。
+- [x] ✅ 验证 add 前后未知提交边界、`memory_write_key` 幂等、Outbox 租约恢复、指数退避、最大轮询次数和测试数据清理；未知 add 结果或达到上限进入 `manual_review`，只能由 owner 显式重放。
 - [ ] 让 Context Builder 合并本地 `UserPreferenceStore`、当前 `product_creative_profile`、Workspace/Artifact 和清洗后的 Mem0 projection；
 - [x] ✅ 删除全部 PowerMem 配置、环境变量映射、API 状态字段和专用测试，新增通用 `long_term_memory` 配置和测试；
 - [x] ✅ 实现伪匿名 user ID、owner binding、短超时 fail-open、TopK/字符预算；本地结构化偏好先于 Mem0 投影进入 Context。
-- [ ] 实现异步 add 的 event_id 持久化、任务轮询、幂等、租约、崩溃恢复和 `delete/delete_all`；
+- [x] ✅ 实现异步 add 的 event_id 持久化、任务轮询、幂等、租约、崩溃恢复、人工重放和 `delete/delete_all`；Gateway 启动会升级旧 SQLite WriteOutbox 状态约束。
 - [ ] 确认历史明文凭据已从活动配置删除并完成部署侧吊销/轮换；
 - [x] ✅ 删除 `pixelflow_tasks.py` 的旧 LangGraph task/run 路径；新前端入口只调用 Harness Turn、Snapshot 与 SSE，`LegacyWorkspace`、Supervisor、旧 Task API Client 和浏览器轮询已物理删除。
-- [ ] 从 `LegacyWorkspace` 抽离纯展示组件和附件上传能力；新 Runtime 必须先通过真实 Snapshot/SSE 纵向旅程再删除旧页面 Shell，禁止继续向旧组件增加业务状态；
+- [x] ✅ `LegacyWorkspace` 与旧页面 Shell 已删除；新 Runtime 只消费 Harness Snapshot/SSE，附件/业务面板将在新架构内单独重建。
 - [x] ✅ 从 Gateway 取消注册并删除 DeerFlow `runs/thread_runs/threads/agents/memory/skills/mcp/uploads/assistants_compat` Router；
 - [x] ✅ 删除 `backend/langgraph.json`、`pixelflow/graph.py`、`nodes.py`、`state.py`、`langgraph_auth.py` 和相关测试；
 - [x] ✅ 删除 `backend/packages/harness/`、`deerflow-harness` workspace member、`langgraph-sdk`、LangChain/LangGraph 依赖并重建 lockfile；

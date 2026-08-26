@@ -126,12 +126,20 @@ class HarnessRunProjector:
         workspace = await repository.get_workspace(binding.user_id, binding.workspace_id)
         if workspace is None or workspace.conversation_id != binding.conversation_id:
             return None
-        from pixelflow.video.workspace import build_workspace_digest
+        from pixelflow.video.workspace import build_plan_digest, build_workspace_digest
+
+        summary = build_workspace_digest(workspace)
+        if hasattr(repository, "list_conversation_plans"):
+            plans = await repository.list_conversation_plans(
+                binding.user_id,
+                binding.conversation_id,
+            )
+            summary["active_plan"] = build_plan_digest(plans[-1] if plans else None)
 
         return VideoWorkspaceProjectionV1(
             workspace_id=workspace.workspace_id,
             revision=workspace.revision,
-            summary=build_workspace_digest(workspace),
+            summary=summary,
         )
 
     async def events_after(

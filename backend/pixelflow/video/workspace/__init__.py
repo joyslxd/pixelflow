@@ -2,6 +2,7 @@
 
 from .digest import (
     blocking_confirmation_from_plan,
+    build_plan_digest,
     build_workspace_digest,
     summarize_operations,
     workspace_has_scene_asset_images,
@@ -13,6 +14,7 @@ from .sql_repository import SQLVideoAgentRepository
 
 __all__ = [
     "blocking_confirmation_from_plan",
+    "build_plan_digest",
     "build_workspace_digest",
     "summarize_operations",
     "video_workspace_id_for_conversation",

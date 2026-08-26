@@ -6,7 +6,7 @@ import json
 import logging
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from .base import Base
@@ -100,6 +100,98 @@ async def ensure_schema(engine: AsyncEngine) -> None:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await _migrate_long_term_memory_write_schema(connection)
+
+
+async def _migrate_long_term_memory_write_schema(connection) -> None:
+    """升级 Mem0 WriteOutbox 的失败状态字段；SQLite 需重建旧 CHECK 约束表。"""
+
+    dialect = connection.dialect.name
+    table_name = "pixelflow_long_term_memory_writes"
+    if dialect == "sqlite":
+        row = await connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"),
+            {"name": table_name},
+        )
+        definition = row.scalar_one_or_none()
+        if not definition:
+            return
+        columns = {
+            item[1]
+            for item in (
+                await connection.exec_driver_sql(f"PRAGMA table_info({table_name})")
+            ).all()
+        }
+        if {
+            "retry_not_before",
+            "last_failure_code",
+        }.issubset(columns) and "manual_review" in definition:
+            return
+        await connection.exec_driver_sql(
+            """
+            CREATE TABLE pixelflow_long_term_memory_writes_next (
+                write_key VARCHAR(128) NOT NULL PRIMARY KEY,
+                user_id VARCHAR(64) NOT NULL,
+                category VARCHAR(32) NOT NULL,
+                content TEXT NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                event_id VARCHAR(128),
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                retry_not_before DATETIME,
+                last_failure_code VARCHAR(64),
+                lease_owner VARCHAR(128),
+                lease_expires_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                CONSTRAINT ck_pf_ltm_writes_status
+                    CHECK (status IN ('pending', 'processing', 'completed', 'manual_review'))
+            )
+            """
+        )
+        await connection.exec_driver_sql(
+            """
+            INSERT INTO pixelflow_long_term_memory_writes_next (
+                write_key, user_id, category, content, status, event_id,
+                delivery_attempts, lease_owner, lease_expires_at, created_at, updated_at
+            )
+            SELECT write_key, user_id, category, content, status, event_id,
+                delivery_attempts, lease_owner, lease_expires_at, created_at, updated_at
+            FROM pixelflow_long_term_memory_writes
+            """
+        )
+        await connection.exec_driver_sql("DROP TABLE pixelflow_long_term_memory_writes")
+        await connection.exec_driver_sql(
+            "ALTER TABLE pixelflow_long_term_memory_writes_next RENAME TO pixelflow_long_term_memory_writes"
+        )
+        await connection.exec_driver_sql(
+            "CREATE INDEX ix_pf_ltm_writes_due ON pixelflow_long_term_memory_writes "
+            "(status, retry_not_before, lease_expires_at, created_at)"
+        )
+        logger.info("PixelFlow Mem0 WriteOutbox SQLite schema 已升级")
+        return
+    if dialect == "postgresql":
+        await connection.execute(
+            text(
+                "ALTER TABLE pixelflow_long_term_memory_writes "
+                "ADD COLUMN IF NOT EXISTS retry_not_before TIMESTAMP WITH TIME ZONE"
+            )
+        )
+        await connection.execute(
+            text(
+                "ALTER TABLE pixelflow_long_term_memory_writes "
+                "ADD COLUMN IF NOT EXISTS last_failure_code VARCHAR(64)"
+            )
+        )
+        await connection.execute(
+            text("ALTER TABLE pixelflow_long_term_memory_writes DROP CONSTRAINT IF EXISTS ck_pf_ltm_writes_status")
+        )
+        await connection.execute(
+            text(
+                "ALTER TABLE pixelflow_long_term_memory_writes "
+                "ADD CONSTRAINT ck_pf_ltm_writes_status "
+                "CHECK (status IN ('pending', 'processing', 'completed', 'manual_review'))"
+            )
+        )
 
 
 __all__ = ["close_engine", "ensure_schema", "get_engine", "get_session_factory", "init_engine"]

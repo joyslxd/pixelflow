@@ -48,6 +48,10 @@ class LongTermMemoryPort(Protocol):
 
     async def get(self, *, memory_id: str) -> LongTermMemoryItem | None: ...
 
+    async def history(self, *, memory_id: str) -> list[LongTermMemoryItem]: ...
+
+    async def update(self, *, memory_id: str, content: str) -> LongTermMemoryItem | None: ...
+
     async def get_event(
         self,
         *,
@@ -66,6 +70,8 @@ class MemoryWriteOutboxPort(Protocol):
     """长期记忆写入的持久化入口；业务层不得直接调用远程 add。"""
 
     async def enqueue(self, *, user_id: str, content: str, category: str, write_key: str) -> None: ...
+
+    async def requeue_manual_review(self, *, user_id: str, write_key: str) -> bool: ...
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -226,6 +232,33 @@ class VolcengineMem0Adapter:
             category=str(payload.get("category") or "preference")[:32],
         )
 
+    async def history(self, *, memory_id: str) -> list[LongTermMemoryItem]:
+        """读取单条记忆的版本历史，只返回安全 DTO，不传播供应商审计字段。"""
+
+        if not self._config.available or not memory_id.strip():
+            return []
+        payload = await self._v1_request("GET", f"/v1/memories/{memory_id}/history/")
+        records = payload.get("results", payload) if isinstance(payload, Mapping) else payload
+        if not isinstance(records, list):
+            return []
+        return [item for record in records if isinstance(record, Mapping) and (item := self._map_item(record)) is not None]
+
+    async def update(self, *, memory_id: str, content: str) -> LongTermMemoryItem | None:
+        """更新稳定记忆正文；输入为空或远程异常时返回空而不泄露供应商响应。"""
+
+        if not self._config.available or not memory_id.strip() or not content.strip():
+            return None
+        payload = await self._v1_request(
+            "PUT",
+            f"/v1/memories/{memory_id}/",
+            payload={"text": content},
+        )
+        if isinstance(payload, Mapping):
+            item = self._map_item(payload)
+            if item is not None:
+                return item
+        return await self.get(memory_id=memory_id)
+
     async def get_event(
         self,
         *,
@@ -301,6 +334,16 @@ class LongTermMemoryService:
 
         return await self._adapter.get(memory_id=memory_id)
 
+    async def history(self, *, memory_id: str) -> list[LongTermMemoryItem]:
+        """查询单条记忆的安全历史投影。"""
+
+        return await self._adapter.history(memory_id=memory_id)
+
+    async def update(self, *, memory_id: str, content: str) -> LongTermMemoryItem | None:
+        """更新单条稳定记忆。"""
+
+        return await self._adapter.update(memory_id=memory_id, content=content)
+
     async def delete(self, *, memory_id: str) -> bool:
         """删除单条记忆。"""
 
@@ -310,6 +353,16 @@ class LongTermMemoryService:
         """删除当前用户的全部远程记忆。"""
 
         return await self._adapter.delete_all(user_id=user_id)
+
+    async def requeue_manual_review(self, *, user_id: str, write_key: str) -> bool:
+        """由当前 owner 确认后重新排队人工审核记录，不影响其他用户写入。"""
+
+        if self._outbox is None or not write_key.strip():
+            return False
+        return await self._outbox.requeue_manual_review(
+            user_id=user_id,
+            write_key=write_key,
+        )
 
     def write_background(self, *, user_id: str, content: str, category: str, write_key: str) -> None:
         """异步持久化写入意图；远程投递只能由 Outbox Worker 执行。"""
