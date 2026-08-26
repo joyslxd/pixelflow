@@ -175,7 +175,7 @@ def test_result_projection_uses_text_delta_only_when_final_message_missing() -> 
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "reasoning-delta", "delta": "机密"}}},
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "delta": "公开"}}},
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "usage", "text": "计量"}}},
-                {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "text": "回复"}}},
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "data": {"text": "回复"}}}},
             ],
             final_response="",
             finish_reason="completed",

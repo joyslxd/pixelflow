@@ -218,13 +218,7 @@ def _public_text_from_chunks(events: list[object]) -> str:
         if not isinstance(data, dict):
             continue
         for chunk in _nested_text_delta_chunks(data):
-            delta = chunk.get("delta")
-            if isinstance(delta, str):
-                parts.append(delta)
-                continue
-            text = chunk.get("text")
-            if isinstance(text, str):
-                parts.append(text)
+            parts.extend(_text_delta_values(chunk))
     return "".join(parts)
 
 
@@ -241,4 +235,24 @@ def _nested_text_delta_chunks(value: object) -> tuple[dict[str, object], ...]:
         return current + nested
     if isinstance(value, list):
         return tuple(chunk for child in value for chunk in _nested_text_delta_chunks(child))
+    return ()
+
+
+def _text_delta_values(value: object) -> tuple[str, ...]:
+    """从已确认的 text-delta 节点内递归提取公开文本字段。"""
+
+    if isinstance(value, dict):
+        values = tuple(
+            child
+            for key, child in value.items()
+            if key in {"delta", "text", "content"} and isinstance(child, str)
+        )
+        nested = tuple(
+            item
+            for child in value.values()
+            for item in _text_delta_values(child)
+        )
+        return values + nested
+    if isinstance(value, list):
+        return tuple(item for child in value for item in _text_delta_values(child))
     return ()
