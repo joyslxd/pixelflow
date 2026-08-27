@@ -22,6 +22,7 @@ class SidecarSettings:
     tool_broker_jwt_audience: str
     sidecar_instance_id: str
     model_profile_name: str
+    model_profile_digest: str
     model_id: str
     request_timeout_seconds: float
 
@@ -52,6 +53,7 @@ class SidecarSettings:
                 "PIXELFLOW_HARNESS_MODEL_PROFILE",
                 "deepseek-v4-pro",
             ).strip(),
+            model_profile_digest=os.environ.get("PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST", "").strip(),
             model_id=os.environ.get(
                 "PIXELFLOW_HARNESS_MODEL_ID",
                 "deepseek-v4-pro-ga-260813",
@@ -80,7 +82,7 @@ class SidecarSettings:
             return "model_credential_unconfigured"
         if not os.environ.get("DEEPSEEK_BASE_URL", "").strip():
             return "model_endpoint_unconfigured"
-        if not self.model_profile_name or not self.model_id:
+        if not self.model_profile_name or not self.model_id or not self.model_profile_digest.startswith("sha256:"):
             return "model_profile_unconfigured"
         return None
 

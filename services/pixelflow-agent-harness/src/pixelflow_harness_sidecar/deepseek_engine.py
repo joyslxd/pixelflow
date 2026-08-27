@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -55,8 +56,9 @@ class DeepSeekEngineResult:
     final_response: str
     finish_reason: str | None
     tool_names: tuple[str, ...]
-    response_deltas: tuple[str, ...]
-    public_summaries: tuple[str, ...]
+    response_deltas: tuple[str, ...] = field(default_factory=tuple)
+    public_summaries: tuple[str, ...] = field(default_factory=tuple)
+    notification_events_emitted: bool = False
 
 
 class DeepSeekHarnessEngine:
@@ -81,18 +83,24 @@ class DeepSeekHarnessEngine:
         run_id: str,
         request: HarnessRunRequest,
         skill_snapshot: SkillCatalogSnapshot,
+        on_public_event: Callable[[str, dict[str, str]], None] | None = None,
     ) -> DeepSeekEngineResult:
         """在工作线程运行阻塞 SDK，模型调用只使用进程注入的测试或生产 Secret。"""
 
         if request.model.profile_name != self._settings.model_profile_name:
             raise ValueError("模型档案与 Sidecar 启动配置不匹配")
-        return await asyncio.to_thread(self._execute_blocking, run_id, request, skill_snapshot)
+        if request.model.profile_digest != self._settings.model_profile_digest:
+            raise ValueError("模型档案摘要与 Sidecar 启动配置不匹配")
+        return await asyncio.to_thread(
+            self._execute_blocking, run_id, request, skill_snapshot, on_public_event,
+        )
 
     def _execute_blocking(
         self,
         run_id: str,
         request: HarnessRunRequest,
         skill_snapshot: SkillCatalogSnapshot,
+        on_public_event: Callable[[str, dict[str, str]], None] | None,
     ) -> DeepSeekEngineResult:
         """执行一个真实 Harness Run，不持久化 API key、用户正文或原始 Session 事件。"""
 
@@ -116,43 +124,36 @@ class DeepSeekHarnessEngine:
             )
             manifest_json = self._load_frozen_tool_manifest(request)
             harness = DeepSeekHarness(
-                DeepSeekHarnessConfig(
-                    provider="deepseek-official",
-                    model=self._settings.model_id,
-                    max_tokens=request.model.max_output_tokens,
-                    cwd=str(run_home),
-                    session_root=str(session_root),
-                    cordis=str(self._cordis_path),
-                    env={
-                        "DSH_HOME": str(run_home),
-                        "DSH_AGENTS_HOME": str(run_home / "agents-home"),
-                        "DSH_SESSION_ROOT": str(session_root),
-                        # 用途：向隔离 Runtime 传递部署期模型凭据；影响：仅驻留本次子进程环境，不写入 Run、事件或日志。
-                        "DEEPSEEK_API_KEY": os.environ["DEEPSEEK_API_KEY"],
-                        # 用途：向隔离 Runtime 传递受控模型端点；影响：真实模型请求使用部署配置，避免退回 SDK 默认地址。
-                        "DEEPSEEK_BASE_URL": os.environ["DEEPSEEK_BASE_URL"],
-                        "PIXELFLOW_TOOL_BROKER_BASE_URL": self._settings.tool_broker_base_url,
-                        "PIXELFLOW_TOOL_BROKER_JWT_SIGNING_KEY": self._settings.tool_broker_jwt_signing_key,
-                        "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": self._settings.tool_broker_jwt_issuer,
-                        "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": self._settings.tool_broker_jwt_audience,
-                        "PIXELFLOW_SIDECAR_INSTANCE_ID": self._settings.sidecar_instance_id,
-                        "PIXELFLOW_HARNESS_RUN_ID": run_id,
-                        "PIXELFLOW_HARNESS_SESSION_ID": request.session_id,
-                        "PIXELFLOW_HARNESS_CONTEXT_DIGEST": request.binding.context_digest,
-                        "PIXELFLOW_HARNESS_TOOLSET_VERSION": request.toolset.version,
-                        "PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON": manifest_json,
-                        "PIXELFLOW_HARNESS_WORKSPACE_REVISION": str(request.binding.workspace_revision),
-                    },
-                    request_timeout_seconds=self._settings.request_timeout_seconds,
+                build_deepseek_harness_config(
+                    DeepSeekHarnessConfig,
+                    settings=self._settings,
+                    request=request,
+                    run_id=run_id,
+                    run_home=run_home,
+                    session_root=session_root,
+                    cordis_path=self._cordis_path,
+                    manifest_json=manifest_json,
                 )
             )
             phase = "model_execution"
-            result = harness.run(model_input, session_id=request.session_id)
+            emitted_notification_event = False
+
+            def on_notification(notification: object) -> None:
+                nonlocal emitted_notification_event
+                for event_type, payload in _public_events_from_notification(notification):
+                    emitted_notification_event = True
+                    if on_public_event is not None:
+                        on_public_event(event_type, payload)
+
+            result = harness.run(model_input, session_id=request.session_id, on_notification=on_notification)
             phase = "runtime_cleanup"
             harness.close()
             harness = None
             phase = "result_projection"
-            return _project_harness_result(result)
+            return _project_harness_result(
+                result,
+                notification_events_emitted=emitted_notification_event,
+            )
         except Exception as error:
             diagnostic = _execution_diagnostic(error, phase)
             logger.warning(
@@ -208,6 +209,52 @@ class DeepSeekHarnessEngine:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def build_deepseek_harness_config(
+    config_factory: Callable[..., object],
+    *,
+    settings: SidecarSettings,
+    request: HarnessRunRequest,
+    run_id: str,
+    run_home: Path,
+    session_root: Path,
+    cordis_path: Path,
+    manifest_json: str,
+) -> object:
+    """集中组装官方 SDK 配置，确保 Sidecar 与真实验收使用同一模型路由合同。"""
+
+    environment = {
+        "DSH_HOME": str(run_home),
+        "DSH_AGENTS_HOME": str(run_home / "agents-home"),
+        "DSH_SESSION_ROOT": str(session_root),
+        "DEEPSEEK_API_KEY": os.environ["DEEPSEEK_API_KEY"],
+        "DEEPSEEK_BASE_URL": os.environ["DEEPSEEK_BASE_URL"],
+        "PIXELFLOW_TOOL_BROKER_BASE_URL": settings.tool_broker_base_url,
+        "PIXELFLOW_TOOL_BROKER_JWT_SIGNING_KEY": settings.tool_broker_jwt_signing_key,
+        "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": settings.tool_broker_jwt_issuer,
+        "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": settings.tool_broker_jwt_audience,
+        "PIXELFLOW_SIDECAR_INSTANCE_ID": settings.sidecar_instance_id,
+        "PIXELFLOW_HARNESS_RUN_ID": run_id,
+        "PIXELFLOW_HARNESS_SESSION_ID": request.session_id,
+        "PIXELFLOW_HARNESS_CONTEXT_DIGEST": request.binding.context_digest,
+        "PIXELFLOW_HARNESS_TOOLSET_VERSION": request.toolset.version,
+        "PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON": manifest_json,
+        "PIXELFLOW_HARNESS_WORKSPACE_REVISION": str(request.binding.workspace_revision),
+        "PIXELFLOW_HARNESS_MAX_MODEL_STEPS": str(request.limits.max_model_steps),
+        "PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS": str(request.limits.max_business_tools),
+        "PIXELFLOW_HARNESS_DEADLINE_SECONDS": str(request.limits.deadline_seconds),
+    }
+    return config_factory(
+        provider="deepseek-official",
+        model=settings.model_id,
+        max_tokens=request.model.max_output_tokens,
+        cwd=str(run_home),
+        session_root=str(session_root),
+        cordis=str(cordis_path),
+        env=environment,
+        request_timeout_seconds=settings.request_timeout_seconds,
+    )
+
+
 def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagnostic:
     """把 Runtime 失败压缩为固定字段，禁止把异常正文或链路细节发送到事件流。"""
 
@@ -229,7 +276,11 @@ def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagn
     )
 
 
-def _project_harness_result(result: object) -> DeepSeekEngineResult:
+def _project_harness_result(
+    result: object,
+    *,
+    notification_events_emitted: bool = False,
+) -> DeepSeekEngineResult:
     """投影 SDK 公开结果，不依赖不会暴露给 PixelFlow 的 Session 内部序号。"""
 
     events = getattr(result, "events", None)
@@ -269,7 +320,33 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
         public_summaries=tuple(
             f"正在完成工具：{tool_name}" for tool_name in tool_names[:3]
         ),
+        notification_events_emitted=notification_events_emitted,
     )
+
+
+def _public_events_from_notification(notification: object) -> tuple[tuple[str, dict[str, str]], ...]:
+    """仅把公开文本与 Tool 名称映射为实时事件，推理和原始参数一律丢弃。"""
+
+    if getattr(notification, "method", None) != "session.event":
+        return ()
+    payload = getattr(notification, "payload", None)
+    event = payload.get("event") if isinstance(payload, dict) else None
+    if not isinstance(event, dict):
+        return ()
+    event_type = event.get("type")
+    data = event.get("data")
+    if event_type == "assistant/chunk" and isinstance(data, dict):
+        return tuple(
+            ("response.delta", {"delta": value})
+            for chunk in _nested_text_delta_chunks(data)
+            for value in _text_delta_values(chunk)
+            if value
+        )
+    if event_type == "tool/call" and isinstance(data, dict):
+        name = data.get("name")
+        if isinstance(name, str) and name and len(name) <= 128:
+            return (("public_summary.delta", {"delta": f"正在调用工具：{name}"}),)
+    return ()
 
 
 def _safe_response_chunks(response: str, *, max_chunk_chars: int = 320) -> tuple[str, ...]:
