@@ -6,6 +6,14 @@ FROM python:3.12-slim-bookworm
 # 用途：声明镜像内 Sidecar 工作目录；影响：后续复制和启动命令均在该目录执行。
 WORKDIR /app
 
+# 用途：接收受控 Python 包索引；影响：网络受限 Linux 构建可切换镜像源，未传入时保持 PyPI 默认源。
+ARG UV_INDEX_URL=https://pypi.org/simple
+# 用途：接收包下载等待秒数；影响：仅影响镜像构建期的锁文件同步超时。
+ARG UV_HTTP_TIMEOUT=300
+# 用途：将构建参数传给 uv；影响：锁文件依赖下载使用指定镜像源和超时，不写入运行期 Secret。
+ENV UV_INDEX_URL=$UV_INDEX_URL
+ENV UV_HTTP_TIMEOUT=$UV_HTTP_TIMEOUT
+
 # 用途：先复制依赖清单以复用 Docker 依赖层；影响：源码变更不会重新解析锁定生产依赖。
 COPY pyproject.toml uv.lock README.md ./
 # 用途：从固定官方镜像复制 uv；影响：不依赖仓库中不存在的本地 wheel 才能启动构建。

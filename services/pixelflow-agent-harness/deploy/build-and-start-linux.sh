@@ -35,6 +35,8 @@ docker build \
 
 # 用途：构建离线 Runtime Sidecar 镜像；影响：官方 Runtime 只从服务目录的已校验 wheel 安装。
 docker build \
+  --build-arg "UV_INDEX_URL=$UV_INDEX_URL_VALUE" \
+  --build-arg "UV_HTTP_TIMEOUT=$UV_HTTP_TIMEOUT_SECONDS" \
   -t "$SIDECAR_IMAGE" \
   -f "$ROOT_DIR/services/pixelflow-agent-harness/Dockerfile" \
   "$ROOT_DIR/services/pixelflow-agent-harness"
