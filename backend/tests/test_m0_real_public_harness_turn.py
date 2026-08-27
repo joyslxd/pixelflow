@@ -256,7 +256,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
                     "workspace_id": "m0-public-workspace",
                     "expected_workspace_revision": 1,
                     "content": "请检查当前视频方案：读取工作区、脚本、计划和 scene-1，并给出简短结论。",
-                    # 真实多 Tool 旅程需为 Tool 参数和最终公开结论预留独立预算，192 会在调用完成前耗尽。
+                    # 真实多 Tool 旅程需为 Tool 参数和最终公开结论预留独立预算。
                     "max_output_tokens": 1024,
                 },
             )

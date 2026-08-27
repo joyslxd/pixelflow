@@ -66,7 +66,8 @@ class HarnessTurnStartRequestV1(_ControlPlaneModel):
     workspace_id: str = Field(min_length=1, max_length=64)
     expected_workspace_revision: int = Field(ge=1)
     content: str = Field(min_length=1, max_length=32_000)
-    max_output_tokens: int = Field(default=192, ge=1, le=512)
+    # 用途：允许浏览器为多 Tool 旅程申请足够的最终回复预算；影响：上限与 Gateway/Sidecar Harness DTO 一致，仍受模型档案与上下文预算约束。
+    max_output_tokens: int = Field(default=192, ge=1, le=131_072)
 
 
 class HarnessTurnStartResponseV1(_ControlPlaneModel):
