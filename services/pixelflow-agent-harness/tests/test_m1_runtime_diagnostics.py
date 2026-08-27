@@ -201,6 +201,7 @@ def test_result_projection_uses_text_delta_only_when_final_message_missing() -> 
             events=[
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "reasoning-delta", "delta": "机密"}}},
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "delta": "公开"}}},
+                {"type": "assistant/chunk", "data": {"chunk": {"type": "text-chunks", "chunks": [{"text": "文本"}]}}},
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "usage", "text": "计量"}}},
                 {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "data": {"text": "回复"}}}},
             ],
@@ -209,4 +210,4 @@ def test_result_projection_uses_text_delta_only_when_final_message_missing() -> 
         )
     )
 
-    assert projected.final_response == "公开回复"
+    assert projected.final_response == "公开文本回复"

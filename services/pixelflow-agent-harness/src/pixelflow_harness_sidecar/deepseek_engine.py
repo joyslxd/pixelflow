@@ -257,7 +257,7 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
 
 
 def _public_text_from_chunks(events: list[object]) -> str:
-    """仅聚合 text-delta，严格忽略 reasoning、usage 和工具私有块。"""
+    """仅聚合 Runtime 明确标记的公开文本块，忽略 reasoning、usage 和工具私有块。"""
 
     parts: list[str] = []
     for event in events:
@@ -272,10 +272,12 @@ def _public_text_from_chunks(events: list[object]) -> str:
 
 
 def _nested_text_delta_chunks(value: object) -> tuple[dict[str, object], ...]:
-    """遍历 SDK chunk 包装层，只返回明确标记为 text-delta 的字典。"""
+    """遍历 SDK chunk 包装层，只返回明确标记的公开文本字典。"""
 
     if isinstance(value, dict):
-        current = (value,) if value.get("type") == "text-delta" else ()
+        # Runtime 0.1 同时使用历史 text-delta 与稳定 text-chunks；reasoning-chunks
+        # 必须留在白名单之外，防止推理文本进入 Gateway Event/Snapshot。
+        current = (value,) if value.get("type") in {"text-delta", "text-chunks"} else ()
         nested = tuple(
             chunk
             for child in value.values()
