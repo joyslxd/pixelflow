@@ -194,7 +194,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-public-sidecar",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
             "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": profile_digest,
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro",
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(limit_profiles),
             "PYTHONPATH": str(sidecar_root / "src"),

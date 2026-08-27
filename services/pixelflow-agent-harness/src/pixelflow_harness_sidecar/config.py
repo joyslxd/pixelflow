@@ -59,7 +59,7 @@ class SidecarSettings:
             model_profile_digest=os.environ.get("PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST", "").strip(),
             model_id=os.environ.get(
                 "PIXELFLOW_HARNESS_MODEL_ID",
-                "deepseek-v4-pro-ga-260813",
+                "deepseek-v4-pro",
             ).strip(),
             request_timeout_seconds=float(
                 os.environ.get("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "90"),
