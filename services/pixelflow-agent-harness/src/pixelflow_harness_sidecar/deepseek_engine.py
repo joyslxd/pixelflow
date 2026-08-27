@@ -55,6 +55,8 @@ class DeepSeekEngineResult:
     final_response: str
     finish_reason: str | None
     tool_names: tuple[str, ...]
+    response_deltas: tuple[str, ...]
+    public_summaries: tuple[str, ...]
 
 
 class DeepSeekHarnessEngine:
@@ -108,7 +110,9 @@ class DeepSeekHarnessEngine:
             # 该文本只在本次模型请求中存在；Sidecar Repository 只保存 request_digest。
             model_input = (
                 f"【PixelFlow 安全指令】\n{request.context.system_instruction}\n\n"
-                f"【用户请求】\n{request.context.user_input}"
+                f"【用户请求】\n{request.context.user_input}\n\n"
+                "【输出要求】\n完成内部推理后，必须输出一条简洁、可公开的最终文本回复；"
+                "不得只产生 reasoning 或工具过程。"
             )
             manifest_json = self._load_frozen_tool_manifest(request)
             harness = DeepSeekHarness(
@@ -260,7 +264,21 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
         final_response=response[:8_000],
         finish_reason=finish_reason,
         tool_names=tool_names,
+        response_deltas=_safe_response_chunks(response[:8_000]),
+        # 公开摘要只能由可审计的 Tool 名称派生，绝不转发模型 reasoning。
+        public_summaries=tuple(
+            f"正在完成工具：{tool_name}" for tool_name in tool_names[:3]
+        ),
     )
+
+
+def _safe_response_chunks(response: str, *, max_chunk_chars: int = 320) -> tuple[str, ...]:
+    """把最终公开回复切成有界增量，禁止把 Runtime 私有块带入事件流。"""
+
+    text = response.strip()
+    if not text:
+        return ()
+    return tuple(text[index:index + max_chunk_chars] for index in range(0, len(text), max_chunk_chars))
 
 
 def _public_text_from_chunks(events: list[object]) -> str:
