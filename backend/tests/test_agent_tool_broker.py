@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import socket
 import threading
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
@@ -21,6 +23,9 @@ from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
 from pixelflow.agent_tools.contracts import ToolCallRequest
 from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import RunBinding
+from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
+from pixelflow.agent_tools.video.delivery import ComposeOrExportVideoTool
+from pixelflow.agent_tools.video.registry import VideoToolRegistry
 from pixelflow.platform.persistence import Base
 from pixelflow.video.contracts import AgentPlan, AgentPlanStatus, VideoWorkspace
 from pixelflow.video.workspace import SQLVideoAgentRepository
@@ -113,6 +118,106 @@ async def test_inspect_tool_reads_bound_workspace_from_sqlite_and_replays_observ
     assert first.status == "completed"
     assert first.model_observation["workspace_revision"] == 1
     assert replay == first
+
+
+@pytest.mark.asyncio
+async def test_confirmation_tool_is_ledgered_and_never_executes_provider_before_user_response(tmp_path) -> None:
+    """M5 首次计费调用只能生成稳定确认挂起，未确认前不得触发 Operation Port。"""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-tools-confirmation.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    video_repository = SQLVideoAgentRepository(session_factory)
+    repository = SQLAgentToolRepository(session_factory)
+    now = datetime.now(UTC)
+    workspace = await video_repository.create_workspace(
+        "m5-tool-user",
+        VideoWorkspace(
+            workspace_id="m5-tool-workspace",
+            conversation_id="m5-tool-conversation",
+            revision=1,
+            payload={"scenes": []},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    binding = RunBinding(
+        run_id="hrun_m5_confirmation",
+        session_id="pfh_m5_confirmation",
+        user_id="m5-tool-user",
+        conversation_id=workspace.conversation_id,
+        workspace_id=workspace.workspace_id,
+        workspace_revision=workspace.revision,
+        context_digest="sha256:" + "a" * 64,
+        toolset_version="agent-tools-v1",
+        tool_manifest_digest=manifest().digest,
+        request_digest="sha256:" + "b" * 64,
+    )
+    await repository.register_run_binding(binding)
+    request = ToolCallRequest(
+        protocol_version="v1",
+        run_id=binding.run_id,
+        session_id=binding.session_id,
+        tool_call_id="m5-confirmation-call",
+        tool_name="compose_or_export_video",
+        arguments={"output_type": "mp4"},
+        expected_workspace_revision=workspace.revision,
+        context_digest=binding.context_digest,
+        toolset_version=binding.toolset_version,
+    )
+    credential_store = TransientRunCredentialStore()
+    broker = AgentToolBroker(
+        repository,
+        video_repository,
+        video_tools=VideoToolRegistry((ComposeOrExportVideoTool(),)),
+        credential_store=credential_store,
+    )
+    try:
+        key = repository.tool_call_key(run_id=request.run_id, tool_call_id=request.tool_call_id)
+        first = await broker.call(request, idempotency_key=key)
+        replay = await broker.call(request, idempotency_key=key)
+        interrupt_id = str(first.suspension["interrupt_id"])
+        confirmed = await repository.respond_interrupt(
+            interrupt_id=interrupt_id,
+            binding=binding,
+            client_response_id="b8bd2c37-4c1a-4e0d-8299-8dc091cc6b43",
+            expected_workspace_revision=1,
+        )
+        resumed_binding = replace(
+            binding,
+            run_id="hrun_m5_confirmation_resume",
+            session_id="pfh_m5_confirmation_resume",
+        )
+        await repository.register_run_binding(resumed_binding)
+        await repository.bind_interrupt_resume_run(
+            interrupt_id=interrupt_id,
+            client_response_id=confirmed.response_id or "",
+            resumed_run_id=resumed_binding.run_id,
+        )
+        await credential_store.put(
+            run_id=resumed_binding.run_id,
+            authorization="Bearer test-only-authorization",
+        )
+        resumed = await broker.call(
+            request.model_copy(update={"run_id": resumed_binding.run_id, "session_id": resumed_binding.session_id, "tool_call_id": "m5-confirmed-call"}),
+            idempotency_key=repository.tool_call_key(run_id=resumed_binding.run_id, tool_call_id="m5-confirmed-call"),
+        )
+    finally:
+        await credential_store.aclose()
+        await engine.dispose()
+
+    assert first.status == replay.status == "awaiting_confirmation"
+    assert first == replay
+    assert first.suspension == {
+        "kind": "awaiting_confirmation",
+        "tool_name": "compose_or_export_video",
+        "interrupt_id": "hint_" + hashlib.sha256(
+            f"v1:harness-interrupt:{key}".encode(),
+        ).hexdigest()[:32],
+    }
+    assert resumed.status == "completed"
+    assert resumed.status != "awaiting_confirmation"
 
 
 @pytest.mark.asyncio

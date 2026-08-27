@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -85,13 +85,20 @@ class MappingProviderJobAdapterResolver:
         self._adapters = normalized
 
     def resolve(self, stage: str) -> ProviderJobAdapter:
-        """未知 stage 必须 fail-closed，不能猜测供应商协议。"""
+        """精确或显式前缀路由；未知 stage 必须 fail-closed，不能猜测协议。"""
 
         stage_name = _scope_text("stage", stage)
         try:
             return self._adapters[stage_name]
         except KeyError:
-            raise OperationConflictError("Operation stage 未配置 Provider Job Adapter") from None
+            matched = [
+                (prefix.removesuffix("*"), adapter)
+                for prefix, adapter in self._adapters.items()
+                if prefix.endswith("*") and stage_name.startswith(prefix.removesuffix("*"))
+            ]
+            if not matched:
+                raise OperationConflictError("Operation stage 未配置 Provider Job Adapter") from None
+            return max(matched, key=lambda item: len(item[0]))[1]
 
 
 class OperationManualRecoveryAction(StrEnum):
@@ -306,6 +313,7 @@ class OperationRecoveryRuntime:
         resumer: WorkflowGraphResumePort,
         worker_id: str,
         quota_resumer: WorkflowGraphQuotaStatePort | None = None,
+        candidate_filter: Callable[[str, OperationRecord], Awaitable[bool]] | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=2),
@@ -327,6 +335,9 @@ class OperationRecoveryRuntime:
         self._resolver = resolver
         self._resumer = resumer
         self._quota_resumer = quota_resumer
+        if candidate_filter is not None and not callable(candidate_filter):
+            raise TypeError("candidate_filter 必须可调用")
+        self._candidate_filter = candidate_filter
         self._worker_id = _scope_text("worker_id", worker_id, maximum=96)
         self._delivery_worker_id = f"{self._worker_id}:completion"
         self._quota_delivery_worker_id = f"{self._worker_id}:quota"
@@ -362,6 +373,8 @@ class OperationRecoveryRuntime:
             limit=self._scan_limit,
         )
         for candidate in pending_quota:
+            if not await self._accept_candidate(candidate.user_id, candidate.operation):
+                continue
             try:
                 await self._dispatch_quota(candidate, now=self._clock())
             except Exception as exc:
@@ -372,6 +385,8 @@ class OperationRecoveryRuntime:
             limit=self._scan_limit,
         )
         for candidate in pending_completion:
+            if not await self._accept_candidate(candidate.user_id, candidate.operation):
+                continue
             try:
                 await self._dispatch_completion(
                     candidate.user_id,
@@ -386,6 +401,8 @@ class OperationRecoveryRuntime:
             limit=self._scan_limit,
         )
         for candidate in due:
+            if not await self._accept_candidate(candidate.user_id, candidate.operation):
+                continue
             try:
                 operation = candidate.operation
                 adapter = self._resolver.resolve(operation.stage)
@@ -407,6 +424,13 @@ class OperationRecoveryRuntime:
                 )
             except Exception as exc:
                 self._log_candidate_failure("operation_poll", exc)
+
+    async def _accept_candidate(self, user_id: str, operation: OperationRecord) -> bool:
+        """可选范围过滤使多个 M06 Worker 不会互相领取不属于自己的 Operation。"""
+
+        if self._candidate_filter is None:
+            return True
+        return await self._candidate_filter(user_id, operation)
 
     @staticmethod
     def _log_candidate_failure(phase: str, exc: Exception) -> None:

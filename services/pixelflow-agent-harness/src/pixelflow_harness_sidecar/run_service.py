@@ -147,6 +147,9 @@ class RunService:
             current = await self._store.get(run_id)
             if current is None or current.status is not RunStatus.RUNNING:
                 return
+            if result.suspension_kind is not None:
+                await self._suspend(run_id, result.suspension_kind)
+                return
             if result.finish_reason != "completed":
                 await self._store.transition(
                     run_id,
@@ -248,6 +251,21 @@ class RunService:
             async with self._lock:
                 self._tasks.pop(run_id, None)
                 self._pending_requests.pop(run_id, None)
+
+    async def _suspend(self, run_id: str, kind: str) -> None:
+        """把 Broker 的结构化挂起结果收口为可恢复但不可继续的当前 Run 状态。"""
+
+        mapping = {
+            "pending_operation": (RunStatus.SUSPENDED_OPERATION, TerminationReason.SUSPENDED_OPERATION),
+            "awaiting_confirmation": (RunStatus.SUSPENDED_CONFIRMATION, TerminationReason.SUSPENDED_CONFIRMATION),
+            "authorization_required": (RunStatus.SUSPENDED_AUTHORIZATION, TerminationReason.SUSPENDED_AUTHORIZATION),
+        }
+        try:
+            status, reason = mapping[kind]
+        except KeyError as error:
+            raise RuntimeError("未知 Tool 挂起状态") from error
+        await self._store.transition(run_id, status=status, termination_reason=reason)
+        await self._store.append_event(run_id, "run.suspended", {"status": status.value})
 
 
 class RunActivationError(RuntimeError):

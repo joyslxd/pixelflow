@@ -5,6 +5,7 @@ import type {
   PublicAgentEventTypeV1,
   PublicAgentEventV1,
   PublicMessageV1,
+  PublicInterruptV1,
   RunStatusV1,
   VideoWorkspaceProjectionV1,
 } from "../../api/contracts";
@@ -26,6 +27,7 @@ export type AgentWorkspaceState = {
   videoWorkspace: VideoWorkspaceProjectionV1 | null;
   connection: ConnectionState;
   progressLines: string[];
+  interrupts: PublicInterruptV1[];
 };
 
 export const initialAgentWorkspaceState: AgentWorkspaceState = {
@@ -39,6 +41,7 @@ export const initialAgentWorkspaceState: AgentWorkspaceState = {
   videoWorkspace: null,
   connection: "idle",
   progressLines: [],
+  interrupts: [],
 };
 
 const EVENT_TYPE_ALIASES: Record<string, PublicAgentEventTypeV1> = {
@@ -146,6 +149,21 @@ export function foldAppliedEvent(
     case "input.state_changed": {
       const inputStatus = payloadInputStatus(event.payload);
       return inputStatus === null ? next : { ...next, inputStatus };
+    }
+    case "interrupt.opened":
+    case "agent.confirmation.requested": {
+      const interrupt = payloadInterrupt(event);
+      if (interrupt === null) return next;
+      return { ...next, interrupts: upsertInterrupt(state.interrupts, interrupt) };
+    }
+    case "interrupt.responded":
+    case "interrupt.closed": {
+      const interruptId = payloadText(event.payload, "interrupt_id") || payloadText(event.payload, "confirmation_id");
+      if (interruptId === null) return next;
+      return {
+        ...next,
+        interrupts: state.interrupts.filter((interrupt) => interrupt.interrupt_id !== interruptId),
+      };
     }
     case "agent.tool.completed": {
       const summary = payloadText(event.payload, "public_summary")
@@ -263,6 +281,34 @@ function upsertMessage(messages: PublicMessageV1[], message: PublicMessageV1): P
     return messages;
   }
   return [...messages, message];
+}
+
+function upsertInterrupt(interrupts: PublicInterruptV1[], interrupt: PublicInterruptV1): PublicInterruptV1[] {
+  const index = interrupts.findIndex((item) => item.interrupt_id === interrupt.interrupt_id);
+  if (index < 0) return [...interrupts, interrupt];
+  return interrupts.map((item, itemIndex) => (itemIndex === index ? { ...item, ...interrupt } : item));
+}
+
+function payloadInterrupt(event: PublicAgentEventV1): PublicInterruptV1 | null {
+  /** 只接受冻结的公开字段；未知 payload 不得生成可提交的人工操作。 */
+
+  const payload = event.payload;
+  const interruptId = payloadText(payload, "interrupt_id") || payloadText(payload, "confirmation_id");
+  if (interruptId === null) return null;
+  const rawKind = payloadText(payload, "kind");
+  const kind = event.type === "agent.confirmation.requested"
+    ? "awaiting_confirmation"
+    : rawKind === "authorization_required" || rawKind === "quota" || rawKind === "form"
+      ? rawKind
+      : "awaiting_confirmation";
+  const title = payloadText(payload, "title") || (
+    kind === "awaiting_confirmation" ? "请确认继续执行" : "需要你的处理"
+  );
+  const description = payloadText(payload, "cost_summary")
+    || payloadText(payload, "public_summary")
+    || payloadText(payload, "reason_code")
+    || "请根据当前工作区状态完成处理。";
+  return { interrupt_id: interruptId, kind, title, description, status: "open" };
 }
 
 function payloadStatus(payload: Record<string, unknown>): RunStatusV1 | null {

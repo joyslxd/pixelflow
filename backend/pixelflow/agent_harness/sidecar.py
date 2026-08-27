@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -12,6 +12,7 @@ import httpx
 import jwt
 from pydantic import BaseModel, ConfigDict, Field
 
+from pixelflow.agent_tools.contracts import ToolManifestResponse
 from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import RunBinding, SQLAgentToolRepository
 
@@ -75,6 +76,8 @@ class AgentHarnessSidecarClient:
         repository: SQLAgentToolRepository,
         timeout_seconds: float = 10,
         client: httpx.AsyncClient | None = None,
+        manifest_provider: Callable[[], ToolManifestResponse] | None = None,
+        on_run_bound: Callable[[str, HarnessRunRequest], Awaitable[None]] | None = None,
     ) -> None:
         """注入仅限内部网络的 Sidecar 地址和短期 JWT 签名材料。"""
 
@@ -91,6 +94,8 @@ class AgentHarnessSidecarClient:
         self._signing_key = gateway_jwt_signing_key
         self._instance_id = gateway_instance_id
         self._repository = repository
+        self._manifest_provider = manifest_provider or manifest
+        self._on_run_bound = on_run_bound
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_seconds, read=None),
@@ -99,7 +104,7 @@ class AgentHarnessSidecarClient:
     async def create_and_bind(self, request: HarnessRunRequest) -> HarnessRunHandle:
         """创建或回读 Sidecar Run，再按返回 run_id 写入 Gateway binding。"""
 
-        manifest_snapshot = manifest()
+        manifest_snapshot = self._manifest_provider()
         request_body = self._sidecar_request(request, manifest_snapshot.digest)
         try:
             response = await self._client.post(
@@ -136,6 +141,8 @@ class AgentHarnessSidecarClient:
                 request_digest=request_body["request_digest"],
             ),
         )
+        if self._on_run_bound is not None:
+            await self._on_run_bound(run_id, request)
         try:
             activation = await self._client.post(
                 f"{self._base_url}/internal/v1/runs/{run_id}/activate",

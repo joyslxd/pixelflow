@@ -34,6 +34,13 @@ export type HarnessInterruptResultV1 = {
   workspace: NonNullable<AgentSnapshotV1["workspace"]>;
 };
 
+export type HarnessConfirmationResultV1 = {
+  interrupt_id: string;
+  run_id: string;
+  status: "accepted";
+  workspace_revision: number;
+};
+
 export type VideoPlanPublicGoalUpdateV1 = {
   plan_id: string;
   revision: number;
@@ -116,6 +123,24 @@ export function respondToHarnessInterrupt(
 
   return agentRequest<HarnessInterruptResultV1>(
     `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/responses`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function confirmHarnessInterrupt(
+  conversationId: string,
+  workspaceId: string,
+  interruptId: string,
+  body: { client_response_id: string; expected_workspace_revision: number },
+): Promise<HarnessConfirmationResultV1> {
+  /** 确认只交给 Gateway 创建唯一恢复 Run；浏览器不续跑旧 Session 或启动 Provider。 */
+
+  return agentRequest<HarnessConfirmationResultV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/confirmations`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -1,5 +1,20 @@
 """持久化 External Job Operation 领域能力。"""
 
+from .batch import (
+    MAX_CHILD_OPERATIONS_PER_BATCH,
+    OperationBatchChild,
+    OperationBatchPlan,
+    build_operation_batch_completion_event_id,
+    build_operation_batch_plan,
+)
+from .batch_repository import (
+    MemoryOperationBatchRepository,
+    OperationBatchChildRecord,
+    OperationBatchRecord,
+    OperationBatchRepository,
+    SQLOperationBatchRepository,
+)
+from .batch_resume import OperationBatchResumeDispatcher, OperationBatchResumePort
 from .completion import (
     OperationCompletionConflictError,
     OperationCompletionCoordinator,
@@ -59,6 +74,15 @@ __all__ = [
     "OperationCompletionDispatcher",
     "OperationCompletionRecord",
     "OperationCoordinator",
+    "MAX_CHILD_OPERATIONS_PER_BATCH",
+    "MemoryOperationBatchRepository",
+    "OperationBatchChild",
+    "OperationBatchChildRecord",
+    "OperationBatchPlan",
+    "OperationBatchRecord",
+    "OperationBatchRepository",
+    "OperationBatchResumeDispatcher",
+    "OperationBatchResumePort",
     "OperationLeaseCoordinator",
     "OperationQuotaAuthorizedResume",
     "OperationQuotaCoordinator",
@@ -83,9 +107,12 @@ __all__ = [
     "WorkflowGraphResumePort",
     "WorkflowGraphQuotaStatePort",
     "build_operation_completion_event_id",
+    "build_operation_batch_completion_event_id",
+    "build_operation_batch_plan",
     "build_operation_idempotency_key",
     "build_operation_quota_event_id",
     "build_operation_request",
     "ensure_operation_transition",
     "hash_operation_request",
+    "SQLOperationBatchRepository",
 ]

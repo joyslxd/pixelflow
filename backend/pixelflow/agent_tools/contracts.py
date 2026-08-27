@@ -36,6 +36,15 @@ class ToolCallResponse(ContractModel):
     model_observation: dict[str, Any]
     suspension: dict[str, Any] | None = None
 
+    def requires_suspension(self) -> bool:
+        """确认三种 M5 业务状态必须附带可由 Sidecar 强制消费的挂起标识。"""
+
+        return self.status in {
+            "pending_operation",
+            "awaiting_confirmation",
+            "authorization_required",
+        }
+
 
 class ToolManifestResponse(ContractModel):
     """发布时冻结的 Capability Tool Manifest。"""

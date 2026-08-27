@@ -12,6 +12,7 @@ import { ConversationMessages } from "@/features/conversations/ConversationMessa
 import { AgentTaskBoard } from "./AgentTaskBoard";
 import { Composer } from "./Composer";
 import { ConnectionNotice } from "./ConnectionNotice";
+import { InterruptHost } from "./InterruptHost";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 type AgentWorkspaceProps = {
@@ -41,6 +42,8 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     openConversation,
     submitTurn,
     cancelQuotaInterrupt,
+    confirmInterrupt,
+    confirmationSubmittingId,
     refreshActiveRun,
     cancelActiveRun,
     updatePlanPublicGoal,
@@ -95,6 +98,11 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
       composer={(
         <>
           <AgentTaskBoard status={snapshot?.status} />
+          <InterruptHost
+            interrupts={runtime.interrupts}
+            confirmationSubmittingId={confirmationSubmittingId}
+            onConfirm={confirmInterrupt}
+          />
           <Composer
             canSend={canSend && detail !== null}
             sending={runtime.inputStatus === "sending"}

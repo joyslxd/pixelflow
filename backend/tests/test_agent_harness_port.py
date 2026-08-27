@@ -91,6 +91,95 @@ async def test_gateway_does_not_retry_unknown_sidecar_create_failure() -> None:
     assert request_count == 1
 
 
+@pytest.mark.asyncio
+async def test_transient_credential_grant_is_bound_before_activation_and_never_sent_to_sidecar() -> None:
+    """确认授权票据只留在 Gateway 内存，绑定完成后才激活 Sidecar Run。"""
+
+    calls: list[str] = []
+    bound: list[tuple[str, str | None]] = []
+
+    class Repository:
+        async def register_run_binding(self, binding):
+            calls.append(f"binding:{binding.run_id}")
+            return binding
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/internal/v1/runs":
+            assert b"credential-grant" not in request.content
+            return httpx.Response(
+                202,
+                json={
+                    "protocol_version": "v1",
+                    "run_id": "hrun_" + "a" * 32,
+                    "status": "created",
+                    "termination_reason": None,
+                    "engine_id": "test",
+                    "engine_version": "v1",
+                    "skill_catalog_digest": _digest("skills"),
+                    "accepted_at": "2026-08-27T00:00:00+00:00",
+                    "completed_at": None,
+                },
+            )
+        assert request.url.path == "/internal/v1/runs/hrun_" + "a" * 32 + "/activate"
+        assert bound == [("hrun_" + "a" * 32, "credential-grant:test")]
+        return httpx.Response(
+            200,
+            json={
+                "protocol_version": "v1",
+                "run_id": "hrun_" + "a" * 32,
+                "status": "running",
+                "termination_reason": None,
+                "engine_id": "test",
+                "engine_version": "v1",
+                "skill_catalog_digest": _digest("skills"),
+                "accepted_at": "2026-08-27T00:00:00+00:00",
+                "completed_at": None,
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        bridge = AgentHarnessSidecarClient(
+            base_url="http://127.0.0.1:8090",
+            gateway_jwt_signing_key="k" * 32,
+            gateway_instance_id="gateway-test",
+            repository=Repository(),
+            client=transport,
+            on_run_bound=lambda run_id, request: _record_grant(bound, run_id, request.transient_credential_grant_id),
+        )
+        request = HarnessRunRequest(
+            user_id="m5-user",
+            conversation_id="m5-conversation",
+            workspace_id="m5-workspace",
+            workspace_revision=1,
+            trigger_id="confirmation",
+            trigger_type="confirmation_resume",
+            user_input="用户已确认。",
+            system_instruction="执行受控操作。",
+            context_digest=_digest("context"),
+            model_profile_digest=_digest("model"),
+            context_budget_digest=_digest("budget"),
+            run_limits_digest=_digest("limits"),
+            limit_profile="confirmation_resume_v1",
+            max_model_steps=10,
+            max_business_tools=5,
+            max_billable_batch_starts=1,
+            deadline_seconds=150,
+            transient_credential_grant_id="credential-grant:test",
+        )
+        await bridge.create_and_bind(request)
+
+    assert calls == ["/internal/v1/runs", "binding:hrun_" + "a" * 32, "/internal/v1/runs/hrun_" + "a" * 32 + "/activate"]
+
+
+async def _record_grant(
+    values: list[tuple[str, str | None]],
+    run_id: str,
+    grant_id: str | None,
+) -> None:
+    values.append((run_id, grant_id))
+
+
 def test_harness_run_request_rejects_unknown_or_invalid_digest() -> None:
     """稳定请求 DTO 必须拒绝未知字段和未冻结的摘要。"""
 

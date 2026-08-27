@@ -26,6 +26,9 @@ from .models import (
     PixelFlowAgentTurnRow,
     PixelFlowAgentVideoStateRow,
     PixelFlowAgentWorkflowRow,
+    PixelFlowOperationBatchChildRow,
+    PixelFlowOperationBatchOutboxRow,
+    PixelFlowOperationBatchRow,
 )
 from .repositories import (
     AgentRuntimeQuotaResumeStaleError,
@@ -72,6 +75,9 @@ __all__ = [
     "PixelFlowAgentEventRow",
     "PixelFlowAgentInterruptRow",
     "PixelFlowAgentOperationRow",
+    "PixelFlowOperationBatchChildRow",
+    "PixelFlowOperationBatchRow",
+    "PixelFlowOperationBatchOutboxRow",
     "PixelFlowAgentProjectionMessageRow",
     "PixelFlowAgentTurnExecutionRow",
     "PixelFlowAgentTurnRow",

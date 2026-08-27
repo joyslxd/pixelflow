@@ -6,6 +6,13 @@ interface ToolRegistryContext {
   tools: { register(tool: ToolDefinition): void };
 }
 
+interface RunPolicy {
+  assertBillableBatchStart(): void;
+  suspend(kind: SuspensionKind): void;
+}
+
+type SuspensionKind = "pending_operation" | "awaiting_confirmation" | "authorization_required";
+
 interface ToolDefinition {
   name: string;
   description: string;
@@ -28,6 +35,7 @@ interface BrokerSettings {
   contextDigest: string;
   toolsetVersion: string;
   workspaceRevision: number;
+  maxBillableBatchStarts: number;
 }
 
 interface ManifestTool {
@@ -46,18 +54,20 @@ interface FrozenManifest {
 }
 
 interface BrokerObservation {
+  status: "completed" | SuspensionKind;
   public_summary: string;
   model_observation: Record<string, unknown>;
+  suspension?: { kind: SuspensionKind };
 }
 
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
 export const name = "pixelflow-capability-tools";
 
 /** 声明 Plugin 只依赖官方 Tool Registry。 */
-export const inject = ["tools"];
+export const inject = ["tools", "pixelflowRunPolicy"];
 
 /** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
-export function apply(ctx: ToolRegistryContext): void {
+export function apply(ctx: ToolRegistryContext & { pixelflowRunPolicy: RunPolicy }): void {
   const manifest = frozenManifestFromEnvironment();
   for (const tool of manifest.tools) {
     ctx.tools.register({
@@ -77,7 +87,14 @@ export function apply(ctx: ToolRegistryContext): void {
         render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
-        return callBroker(tool.name, args, String(exec.callId));
+        const observation = await callBroker(tool, args, String(exec.callId));
+        if (tool.cost_level === "billable" && observation.status === "pending_operation") {
+          ctx.pixelflowRunPolicy.assertBillableBatchStart();
+        }
+        if (observation.status !== "completed") {
+          ctx.pixelflowRunPolicy.suspend(observation.status);
+        }
+        return observation;
       },
     });
   }
@@ -98,17 +115,19 @@ function settingsFromEnvironment(): BrokerSettings {
     contextDigest: process.env.PIXELFLOW_HARNESS_CONTEXT_DIGEST ?? "",
     toolsetVersion: process.env.PIXELFLOW_HARNESS_TOOLSET_VERSION ?? "",
     workspaceRevision,
+    maxBillableBatchStarts: parseNonNegativeInteger(process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS ?? ""),
   };
   if (!isSafeBrokerUrl(value.baseUrl) || value.signingKey.length < 32 || !value.instanceId
     || !/^hrun_[a-z0-9]+$/u.test(value.runId) || !/^pfh_[a-z0-9_]+$/u.test(value.sessionId)
     || !/^sha256:[a-f0-9]{64}$/u.test(value.contextDigest) || !value.toolsetVersion
-    || !Number.isSafeInteger(value.workspaceRevision) || value.workspaceRevision < 1) {
+    || !Number.isSafeInteger(value.workspaceRevision) || value.workspaceRevision < 1
+    || !Number.isSafeInteger(value.maxBillableBatchStarts) || value.maxBillableBatchStarts < 0) {
     throw new Error("PixelFlow Tool Broker 运行配置不完整或无效");
   }
   return value;
 }
 
-/** 读取经 Sidecar 校验 digest 的 Manifest JSON，拒绝意外扩展或计费 Tool。 */
+/** 读取经 Sidecar 校验 digest 的 Manifest JSON；计费 Tool 仍须由 Broker 返回稳定挂起结果。 */
 function frozenManifestFromEnvironment(): FrozenManifest {
   const raw = process.env.PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON ?? "";
   let parsed: unknown;
@@ -129,11 +148,12 @@ function frozenManifestFromEnvironment(): FrozenManifest {
   return { protocol_version: "v1", version: parsed.version, digest: parsed.digest, tools };
 }
 
-/** Manifest 只允许 Sidecar 可安全调用的非计费、无需确认 Tool。 */
+/** Manifest 只允许已声明成本与确认边界的 Capability Tool。 */
 function validateManifestTool(value: unknown): ManifestTool {
   if (!isRecord(value) || typeof value.name !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(value.name)
     || typeof value.description !== "string" || value.description.length === 0 || value.description.length > 2_000
-    || !isRecord(value.parameters_schema) || value.cost_level !== "none" || value.confirmation_required !== false) {
+    || !isRecord(value.parameters_schema) || !isCostLevel(value.cost_level)
+    || typeof value.confirmation_required !== "boolean") {
     throw new Error("冻结 Tool Manifest 包含未授权能力");
   }
   return {
@@ -145,8 +165,12 @@ function validateManifestTool(value: unknown): ManifestTool {
   };
 }
 
+function isCostLevel(value: unknown): value is "none" | "billable" {
+  return value === "none" || value === "billable";
+}
+
 /** 通过唯一 Gateway Broker 执行调用，Sidecar 不直连 Repository、Provider 或文件系统。 */
-async function callBroker(toolName: string, args: Record<string, unknown>, toolCallId: string): Promise<BrokerObservation> {
+async function callBroker(tool: ManifestTool, args: Record<string, unknown>, toolCallId: string): Promise<BrokerObservation> {
   const settings = settingsFromEnvironment();
   const response = await fetch(`${settings.baseUrl}/agent/internal/agent-tools/calls`, {
     method: "POST",
@@ -160,7 +184,7 @@ async function callBroker(toolName: string, args: Record<string, unknown>, toolC
       run_id: settings.runId,
       session_id: settings.sessionId,
       tool_call_id: toolCallId,
-      tool_name: toolName,
+      tool_name: tool.name,
       arguments: args,
       expected_workspace_revision: settings.workspaceRevision,
       context_digest: settings.contextDigest,
@@ -194,12 +218,30 @@ function base64Url(value: string): string {
 
 /** 严格过滤 Broker 结果，绝不把 Provider raw 或未知字段带回 Harness。 */
 function canonicalObservation(payload: unknown): BrokerObservation {
-  if (!isRecord(payload) || payload.protocol_version !== "v1" || payload.status !== "completed"
+  if (!isRecord(payload) || payload.protocol_version !== "v1" || !isSuspensionStatus(payload.status)
     || typeof payload.public_summary !== "string" || payload.public_summary.length === 0 || payload.public_summary.length > 512
     || !isRecord(payload.model_observation)) {
     throw new Error("PixelFlow Tool Broker 返回了无效 Observation");
   }
-  return { public_summary: payload.public_summary, model_observation: payload.model_observation };
+  if (payload.status === "completed") return { status: "completed", public_summary: payload.public_summary, model_observation: payload.model_observation };
+  if (!isRecord(payload.suspension) || payload.suspension.kind !== payload.status) {
+    throw new Error("PixelFlow Tool Broker 返回了无效挂起合同");
+  }
+  return {
+    status: payload.status,
+    public_summary: payload.public_summary,
+    model_observation: payload.model_observation,
+    suspension: { kind: payload.status },
+  };
+}
+
+function isSuspensionStatus(value: unknown): value is BrokerObservation["status"] {
+  return value === "completed" || value === "pending_operation" || value === "awaiting_confirmation" || value === "authorization_required";
+}
+
+function parseNonNegativeInteger(value: string): number {
+  if (!/^\d+$/u.test(value)) return Number.NaN;
+  return Number.parseInt(value, 10);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

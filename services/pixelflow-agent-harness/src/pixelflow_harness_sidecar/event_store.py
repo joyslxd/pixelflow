@@ -211,7 +211,7 @@ class SqliteRunEventStore:
 
         completed_at = (
             _utc_now()
-            if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+            if status not in {RunStatus.ACCEPTED, RunStatus.RUNNING}
             else None
         )
         async with self._lock:

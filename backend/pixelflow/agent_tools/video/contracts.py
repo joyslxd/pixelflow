@@ -74,6 +74,9 @@ class VideoToolContext:
 
     user_id: str
     workspace: VideoWorkspace
+    # Run 与 Tool Call 来自 Gateway 的冻结 binding；计费批次不得信任模型参数生成身份。
+    run_id: str | None = None
+    tool_call_id: str | None = None
     plan_id: str | None = None
     step_id: str | None = None
     credential: TransientVideoAgentCredential | None = None
@@ -85,6 +88,14 @@ class VideoToolContext:
 
         if not self.user_id.strip():
             raise ValueError("工具上下文必须包含用户标识")
+        if (self.run_id is None) != (self.tool_call_id is None):
+            raise ValueError("工具上下文的 run_id 与 tool_call_id 必须同时提供")
+        if self.run_id is not None and (
+            not self.run_id.startswith("hrun_")
+            or not self.tool_call_id
+            or not self.tool_call_id.strip()
+        ):
+            raise ValueError("工具上下文的冻结 Run 或 Tool Call 标识无效")
         if (self.plan_id is None) != (self.step_id is None):
             raise ValueError("工具上下文的 plan_id 与 step_id 必须同时提供")
         if self.plan_id is not None and (

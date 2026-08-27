@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyHarnessWorkspaceCommand,
   cancelHarnessRun,
+  confirmHarnessInterrupt,
   getHarnessSnapshot,
   respondToHarnessInterrupt,
   startHarnessTurn,
@@ -61,6 +62,8 @@ export function useAgentConversation(initialConversationId?: string) {
   const requestGenerationRef = useRef(0);
   const runtimeRef = useRef(runtime);
   const pendingTurnRef = useRef<{ client_input_id: string; content: string } | null>(null);
+  const confirmationResponseIdsRef = useRef(new Map<string, string>());
+  const [confirmationSubmittingId, setConfirmationSubmittingId] = useState<string | null>(null);
 
   useEffect(() => {
     runtimeRef.current = runtime;
@@ -123,6 +126,7 @@ export function useAgentConversation(initialConversationId?: string) {
     requestGenerationRef.current = generation;
     stopStream();
     pendingTurnRef.current = null;
+    confirmationResponseIdsRef.current.clear();
     setLoading(true);
     setError("");
     setRuntime(initialAgentWorkspaceState);
@@ -342,6 +346,46 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [detail, refreshActiveRun]);
 
+  const confirmInterrupt = useCallback(async (interruptId: string) => {
+    /** 同一中断重试复用 client_response_id；409 会刷新权威 revision，但不丢弃提交身份。 */
+
+    const workspace = runtime.videoWorkspace;
+    if (detail === null || workspace === null) throw new Error("harness_workspace_not_found");
+    const clientResponseId = confirmationResponseIdsRef.current.get(interruptId) ?? crypto.randomUUID();
+    confirmationResponseIdsRef.current.set(interruptId, clientResponseId);
+    setConfirmationSubmittingId(interruptId);
+    setError("");
+    try {
+      const confirmed = await confirmHarnessInterrupt(
+        detail.conversation.conversation_id,
+        workspace.workspace_id,
+        interruptId,
+        { client_response_id: clientResponseId, expected_workspace_revision: workspace.revision },
+      );
+      confirmationResponseIdsRef.current.delete(interruptId);
+      setRuntime((current) => replaceVideoWorkspace(current, {
+        ...workspace,
+        revision: confirmed.workspace_revision,
+      }));
+      await hydrateRun(detail.conversation.conversation_id, confirmed.run_id);
+      void startEventStream(detail.conversation.conversation_id, confirmed.run_id);
+    } catch (caught) {
+      const apiError = caught instanceof AgentApiError ? caught : null;
+      if (apiError?.status === 409) {
+        try {
+          const latest = await getOrCreateVideoWorkspace(detail.conversation.conversation_id);
+          setRuntime((current) => replaceVideoWorkspace(current, latest));
+        } catch {
+          // 保留稳定错误码；刷新失败不得清空当前中断或提交身份。
+        }
+      }
+      setError(publicErrorMessage(apiError?.code));
+      throw caught;
+    } finally {
+      setConfirmationSubmittingId(null);
+    }
+  }, [detail, hydrateRun, runtime.videoWorkspace, startEventStream]);
+
   useEffect(() => {
     void refreshConversations().catch((caught) => {
       setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
@@ -367,6 +411,8 @@ export function useAgentConversation(initialConversationId?: string) {
     updateScript,
     updatePlanPublicGoal,
     cancelQuotaInterrupt,
+    confirmInterrupt,
+    confirmationSubmittingId,
     refreshActiveRun,
     cancelActiveRun,
   };

@@ -72,3 +72,37 @@ test("空状态忽略不属于当前 Run 的事件", () => {
   const [, result] = applyPublicEvent(initialAgentWorkspaceState, fixture.snapshot.events[0]);
   assert.equal(result, "ignored");
 });
+
+test("确认中断可由公开事件恢复，并在关闭事件后移除", () => {
+  let state = hydrateSnapshot({
+    ...fixture.snapshot,
+    events: [],
+    last_sequence: 0,
+  });
+  const opened = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "agent.confirmation.requested",
+    payload: {
+      confirmation_id: "hint_123",
+      title: "生成视频",
+      cost_summary: "确认后会开始生成。",
+    },
+  };
+  [state] = applyPublicEvent(state, opened);
+  assert.deepEqual(state.interrupts, [{
+    interrupt_id: "hint_123",
+    kind: "awaiting_confirmation",
+    title: "生成视频",
+    description: "确认后会开始生成。",
+    status: "open",
+  }]);
+  const closed = {
+    ...opened,
+    sequence: 2,
+    type: "interrupt.closed",
+    payload: { interrupt_id: "hint_123" },
+  };
+  [state] = applyPublicEvent(state, closed);
+  assert.deepEqual(state.interrupts, []);
+});

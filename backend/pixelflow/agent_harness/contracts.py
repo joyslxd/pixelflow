@@ -35,6 +35,8 @@ class HarnessRunRequest(_StrictModel):
     deadline_seconds: int = Field(ge=1, le=3_600)
     model_profile_name: str = Field(default="deepseek-v4-pro", min_length=1, max_length=120)
     max_output_tokens: int = Field(default=256, ge=1, le=131_072)
+    # Gateway 本地的瞬时凭据票据；不会序列化到 Sidecar 请求、Run binding 或事件。
+    transient_credential_grant_id: str | None = Field(default=None, min_length=1, max_length=128)
     workspace_projection: dict[str, Any] = Field(default_factory=dict)
     conversation_projection: dict[str, Any] = Field(default_factory=dict)
     preference_projection: dict[str, Any] = Field(default_factory=dict)

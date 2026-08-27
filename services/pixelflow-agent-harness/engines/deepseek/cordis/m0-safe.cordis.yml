@@ -8,10 +8,6 @@
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek' # 用途：选择官方 DeepSeek Provider；影响：模型请求只经该适配器发送。
 
-# 用途：加载真实 PixelFlow Capability Tool Plugin；只经内部 Broker 读取受绑定工作区，不授予模型数据库、文件或 Provider 权限。
-- id: pixelflow-capability-tools
-  name: '../packages/dsh-plugin-capability-tools/dist/index.js' # 用途：加载 PixelFlow Tool 插件；影响：模型仅能调用已发布 Manifest。
-
 # 用途：限制单个 Run 的模型、Tool 与截止时间；影响：达到预算或取消状态时仅产生固定终止原因。
 - id: pixelflow-run-policy
   name: '../packages/dsh-plugin-run-policy/dist/index.js' # 用途：加载 Run 资源策略；影响：不提供任何业务 Tool。
@@ -20,8 +16,14 @@
     maxModelSteps: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_MODEL_STEPS)"
     # 用途：限制单 Run 业务 Tool 次数；影响：超过后拒绝继续 Tool 调用。
     maxBusinessTools: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS)"
+    # 用途：限制单 Run 成功启动的计费批次；影响：达到上限后禁止再次启动 Provider Operation。
+    maxBillableBatchStarts: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS)"
     # 用途：限制单 Run 墙钟时长（秒）；影响：超时后拒绝继续执行。
     deadlineSeconds: !!js "Number(process.env.PIXELFLOW_HARNESS_DEADLINE_SECONDS)"
+
+# 用途：加载真实 PixelFlow Capability Tool Plugin；只经内部 Broker 读取受绑定工作区，不授予模型数据库、文件或 Provider 权限。
+- id: pixelflow-capability-tools
+  name: '../packages/dsh-plugin-capability-tools/dist/index.js' # 用途：加载 PixelFlow Tool 插件；影响：模型仅能调用已发布 Manifest，挂起结果会停止本 Run。
 
 # 用途：校验 Gateway 输入的安全上下文投影；影响：凭据类字段或超长字符串会使 Run 失败关闭。
 - id: pixelflow-context-policy

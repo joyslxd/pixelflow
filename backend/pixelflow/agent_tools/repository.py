@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pixelflow.agent_control_plane.persistence.models import (
+    PixelFlowAgentHarnessInterruptRow,
     PixelFlowAgentHarnessRecoveryRow,
     PixelFlowAgentHarnessRunBindingRow,
     PixelFlowAgentHarnessToolCallRow,
@@ -43,6 +44,24 @@ class HarnessRecoveryRecord:
     recovery_event_id: str
     status: str
     recovery_run_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessInterruptRecord:
+    """一个 Tool Call 唯一对应一个可公开响应的 M5 人工中断。"""
+
+    interrupt_id: str
+    tool_call_key: str
+    run_id: str
+    user_id: str
+    conversation_id: str
+    workspace_id: str
+    workspace_revision: int
+    kind: str
+    status: str
+    payload: dict[str, Any]
+    response_id: str | None
+    resumed_run_id: str | None
 
 
 class ToolCallClaimState(StrEnum):
@@ -114,6 +133,113 @@ class SQLAgentToolRepository:
                     session.add(row)
                     return self._recovery_from_row(row)
                 return self._recovery_from_row(row)
+
+    async def get_or_create_interrupt(
+        self,
+        *,
+        tool_call_key: str,
+        binding: RunBinding,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> HarnessInterruptRecord:
+        """按 Tool Call 身份创建或回读中断；重复模型请求不得生成第二个确认按钮。"""
+
+        if kind not in {"awaiting_confirmation", "authorization_required"}:
+            raise ValueError("Harness Interrupt 类型不受支持")
+        interrupt_id = "hint_" + hashlib.sha256(
+            f"v1:harness-interrupt:{tool_call_key}".encode(),
+        ).hexdigest()[:32]
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+                if row is None:
+                    row = PixelFlowAgentHarnessInterruptRow(
+                        interrupt_id=interrupt_id,
+                        tool_call_key=tool_call_key,
+                        run_id=binding.run_id,
+                        user_id=binding.user_id,
+                        conversation_id=binding.conversation_id,
+                        workspace_id=binding.workspace_id,
+                        workspace_revision=binding.workspace_revision,
+                        kind=kind,
+                        payload_json=dict(payload),
+                    )
+                    session.add(row)
+                    return self._interrupt_from_row(row)
+                record = self._interrupt_from_row(row)
+                expected = (tool_call_key, binding.run_id, kind, payload)
+                actual = (record.tool_call_key, record.run_id, record.kind, record.payload)
+                if actual != expected:
+                    raise AgentToolBindingConflictError("同一 Harness 中断身份发生漂移")
+                return record
+
+    async def get_run_binding_by_interrupt(self, interrupt_id: str) -> RunBinding | None:
+        """从权威中断回查原 Run binding，浏览器不得直接指定恢复来源。"""
+
+        async with self._session_factory() as session:
+            interrupt = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+            if interrupt is None:
+                return None
+            binding = await session.get(PixelFlowAgentHarnessRunBindingRow, interrupt.run_id)
+            return None if binding is None else self._binding_from_row(binding)
+
+    async def is_tool_confirmation_granted(self, *, run_id: str, tool_name: str) -> bool:
+        """只允许指定 confirmation_resume Run 执行其已确认的同名 Tool。"""
+
+        statement = select(PixelFlowAgentHarnessInterruptRow).where(
+            PixelFlowAgentHarnessInterruptRow.resumed_run_id == run_id,
+            PixelFlowAgentHarnessInterruptRow.status == "responded",
+            PixelFlowAgentHarnessInterruptRow.kind == "awaiting_confirmation",
+        )
+        async with self._session_factory() as session:
+            rows = (await session.scalars(statement)).all()
+        return any(row.payload_json.get("tool_name") == tool_name for row in rows)
+
+    async def respond_interrupt(
+        self,
+        *,
+        interrupt_id: str,
+        binding: RunBinding,
+        client_response_id: str,
+        expected_workspace_revision: int,
+    ) -> HarnessInterruptRecord:
+        """以客户端响应 ID 幂等确认中断，revision 漂移必须在创建恢复 Run 前失败关闭。"""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+                if row is None or row.user_id != binding.user_id or row.conversation_id != binding.conversation_id:
+                    raise LookupError("Harness 中断不存在或不属于当前会话")
+                if row.workspace_id != binding.workspace_id or row.run_id != binding.run_id:
+                    raise AgentToolBindingConflictError("Harness 中断绑定发生漂移")
+                if row.response_id is not None:
+                    if row.response_id != client_response_id:
+                        raise AgentToolBindingConflictError("Harness 中断已由其他响应处理")
+                    return self._interrupt_from_row(row)
+                if row.status != "open" or row.workspace_revision != expected_workspace_revision:
+                    raise AgentToolBindingConflictError("Harness 中断已关闭或工作区版本不一致")
+                row.status = "responded"
+                row.response_id = client_response_id
+                return self._interrupt_from_row(row)
+
+    async def bind_interrupt_resume_run(
+        self,
+        *,
+        interrupt_id: str,
+        client_response_id: str,
+        resumed_run_id: str,
+    ) -> HarnessInterruptRecord:
+        """将唯一 confirmation_resume Run 回写给响应记录，重复网络请求只能回读同一 Run。"""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+                if row is None or row.status != "responded" or row.response_id != client_response_id:
+                    raise AgentToolBindingConflictError("Harness 中断响应不存在或不一致")
+                if row.resumed_run_id is not None and row.resumed_run_id != resumed_run_id:
+                    raise AgentToolBindingConflictError("同一 Harness 中断创建了多个恢复 Run")
+                row.resumed_run_id = resumed_run_id
+                return self._interrupt_from_row(row)
 
     async def mark_recovery_manual_review(self, original_run_id: str) -> HarnessRecoveryRecord:
         """无法安全重建恢复上下文时留下稳定人工核对状态，不自动重跑。"""
@@ -292,6 +418,23 @@ class SQLAgentToolRepository:
             recovery_run_id=row.recovery_run_id,
         )
 
+    @staticmethod
+    def _interrupt_from_row(row: PixelFlowAgentHarnessInterruptRow) -> HarnessInterruptRecord:
+        return HarnessInterruptRecord(
+            interrupt_id=row.interrupt_id,
+            tool_call_key=row.tool_call_key,
+            run_id=row.run_id,
+            user_id=row.user_id,
+            conversation_id=row.conversation_id,
+            workspace_id=row.workspace_id,
+            workspace_revision=row.workspace_revision,
+            kind=row.kind,
+            status=row.status,
+            payload=dict(row.payload_json),
+            response_id=row.response_id,
+            resumed_run_id=row.resumed_run_id,
+        )
+
 
 async def ensure_sql_agent_tool_schema(engine: object) -> None:
     """启动期创建 M0 新增的 Run binding/Tool Call 表，不修改既有业务表。"""
@@ -304,6 +447,7 @@ async def ensure_sql_agent_tool_schema(engine: object) -> None:
                     PixelFlowAgentHarnessRunBindingRow.__table__,
                     PixelFlowAgentHarnessToolCallRow.__table__,
                     PixelFlowAgentHarnessRecoveryRow.__table__,
+                    PixelFlowAgentHarnessInterruptRow.__table__,
                 ],
             ),
         )

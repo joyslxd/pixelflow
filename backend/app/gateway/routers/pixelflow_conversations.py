@@ -152,6 +152,24 @@ class HarnessInterruptResponseResponse(BaseModel):
     workspace: VideoWorkspaceProjectionV1
 
 
+class HarnessConfirmationResponseRequest(BaseModel):
+    """确认计费或破坏性 Tool 的 M5 公开输入，浏览器不得携带 Tool 参数或授权。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_response_id: uuid.UUID
+    expected_workspace_revision: int = Field(ge=1)
+
+
+class HarnessConfirmationResponse(BaseModel):
+    """返回唯一 confirmation_resume Run，重复点击只回读同一身份。"""
+
+    interrupt_id: str = Field(min_length=1, max_length=64)
+    run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["accepted"]
+    workspace_revision: int = Field(ge=1)
+
+
 class ConversationMessageUpdateRequest(BaseModel):
     content: str | None = None
     payload: dict[str, Any] | None = None
@@ -760,6 +778,104 @@ async def apply_harness_workspace_command(
         client_command_id=body.client_command_id,
         workspace=_workspace_projection(workspace),
     )
+
+
+@router.post(
+    "/{conversation_id}/workspaces/{workspace_id}/interrupts/{interrupt_id}/confirmations",
+    response_model=HarnessConfirmationResponse,
+)
+async def confirm_harness_interrupt(
+    conversation_id: str,
+    workspace_id: str,
+    interrupt_id: str,
+    body: HarnessConfirmationResponseRequest,
+    request: Request,
+) -> HarnessConfirmationResponse:
+    """确认后仅创建新的冻结 Run；不在旧 Harness Session 中续跑，也不直接启动 Provider。"""
+
+    from pixelflow.agent_harness import GatewayHarnessSidecarError, HarnessRunRequest
+    from pixelflow.agent_harness.limits import LimitProfileResolver
+    from pixelflow.agent_tools.repository import AgentToolBindingConflictError, SQLAgentToolRepository
+    from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    workspace = await _require_conversation_workspace(
+        request,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+    )
+    if workspace.revision != body.expected_workspace_revision:
+        raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
+    repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
+    if not isinstance(repository, SQLAgentToolRepository):
+        raise HTTPException(status_code=503, detail={"code": "harness_interrupt_repository_unavailable"})
+    bridge = _harness_run_bridge(request)
+    # 先按 interrupt 的原 Run 回查 owner binding，禁止客户端把确认提交到另一会话或工作区。
+    original = await repository.get_run_binding_by_interrupt(interrupt_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail={"code": "harness_interrupt_not_found"})
+    try:
+        confirmed = await repository.respond_interrupt(
+            interrupt_id=interrupt_id,
+            binding=original,
+            client_response_id=str(body.client_response_id),
+            expected_workspace_revision=body.expected_workspace_revision,
+        )
+    except (LookupError, AgentToolBindingConflictError) as error:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
+    if confirmed.resumed_run_id is not None:
+        return HarnessConfirmationResponse(
+            interrupt_id=interrupt_id,
+            run_id=confirmed.resumed_run_id,
+            status="accepted",
+            workspace_revision=workspace.revision,
+        )
+    conversation = await _task_store(request).get_conversation(conversation_id, user_id=user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    context = await _build_harness_context(
+        request, user_id=user_id, conversation=conversation, workspace=workspace, user_input="用户已确认继续执行。",
+    )
+    limits = LimitProfileResolver().resolve("confirmation_resume")
+    credential_store = getattr(
+        request.app.state,
+        "pixelflow_transient_run_credential_store",
+        None,
+    )
+    grant_id: str | None = None
+    if isinstance(credential_store, TransientRunCredentialStore):
+        authorization = request.headers.get("Authorization", "")
+        if authorization:
+            grant_id = f"credential-grant:{uuid.uuid4()}"
+            await credential_store.put_grant(
+                grant_id=grant_id,
+                authorization=authorization,
+            )
+    try:
+        handle = await bridge.start(HarnessRunRequest(
+            user_id=user_id, conversation_id=conversation_id, workspace_id=workspace.workspace_id,
+            workspace_revision=workspace.revision, trigger_id=interrupt_id + ":" + str(body.client_response_id),
+            trigger_type="confirmation_resume", user_input="用户已确认继续执行。",
+            system_instruction="用户已确认上一项受控操作。仅依据当前权威工作区继续，不得重复确认。",
+            context_digest=_harness_digest({"interrupt_id": interrupt_id, "workspace_revision": workspace.revision, "context": context}),
+            model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+            context_budget_digest=_harness_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
+            run_limits_digest=limits.digest, limit_profile=limits.profile, max_model_steps=limits.max_model_steps,
+            max_business_tools=limits.max_business_tools, max_billable_batch_starts=limits.max_billable_batch_starts,
+            deadline_seconds=limits.deadline_seconds, max_output_tokens=192, **context,
+            transient_credential_grant_id=grant_id,
+        ))
+        confirmed = await repository.bind_interrupt_resume_run(
+            interrupt_id=interrupt_id, client_response_id=str(body.client_response_id), resumed_run_id=handle.run_id,
+        )
+    except GatewayHarnessSidecarError as error:
+        if grant_id is not None and isinstance(credential_store, TransientRunCredentialStore):
+            await credential_store.discard_grant(grant_id)
+        raise HTTPException(status_code=503, detail={"code": "harness_confirmation_resume_unavailable"}) from error
+    return HarnessConfirmationResponse(interrupt_id=interrupt_id, run_id=confirmed.resumed_run_id or handle.run_id, status="accepted", workspace_revision=workspace.revision)
 
 
 @router.post(

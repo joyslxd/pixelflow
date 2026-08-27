@@ -6,11 +6,12 @@ from typing import Any
 
 from .catalog import runtime_video_tool_registry
 from .contracts import ToolManifestResponse
+from .video import VideoToolRegistry
 
 MANIFEST_VERSION = "agent-tools-v1"
 
 
-def manifest() -> ToolManifestResponse:
+def manifest(video_tools: VideoToolRegistry | None = None) -> ToolManifestResponse:
     """返回当前可运行 Tool 的完整可审计 Manifest。"""
 
     tools: list[dict[str, Any]] = [
@@ -24,7 +25,7 @@ def manifest() -> ToolManifestResponse:
             "recovery_mode": spec.recovery_mode.value,
             "workspace_mutation_roots": list(spec.workspace_mutations),
         }
-        for spec in runtime_video_tool_registry().specs()
+        for spec in (video_tools or runtime_video_tool_registry()).specs()
     ]
     digest = "sha256:" + hashlib.sha256(
         json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),

@@ -10,9 +10,12 @@ from .contracts import (
     VideoToolSpec,
     VideoToolValidationError,
 )
+from .credential_store import TransientBatchCredentialStore, TransientRunCredentialStore
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
 from .registry import VideoToolRegistry
 from .scene import (
+    GenerateScenesInput,
+    GenerateScenesTool,
     InspectSceneTool,
     PatchSceneInput,
     PatchSceneTool,
@@ -32,6 +35,8 @@ from .script_plan import (
 
 __all__ = [
     "VideoTool",
+    "TransientRunCredentialStore",
+    "TransientBatchCredentialStore",
     "VideoToolContext",
     "VideoToolCostLevel",
     "VideoToolExecutionError",
@@ -45,6 +50,8 @@ __all__ = [
     "InspectVideoPlanInput",
     "InspectVideoPlanTool",
     "InspectSceneTool",
+    "GenerateScenesInput",
+    "GenerateScenesTool",
     "PatchSceneInput",
     "PatchSceneTool",
     "ReplaceSceneAssetInput",

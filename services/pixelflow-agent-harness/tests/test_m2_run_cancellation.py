@@ -88,6 +88,19 @@ class _BlockingEngine:
         )
 
 
+class _SuspendingEngine(_BlockingEngine):
+    """只模拟 Broker 已返回挂起结果后的 Sidecar 状态收口。"""
+
+    async def execute(self, *_args, **_kwargs):
+        self.started.set()
+        return DeepSeekEngineResult(
+            final_response="",
+            finish_reason="suspended",
+            tool_names=("compose_or_export_video",),
+            suspension_kind="awaiting_confirmation",
+        )
+
+
 def _engine(tmp_path: Path) -> _BlockingEngine:
     """写入最小有效 Skill，供真实 Sidecar 快照逻辑复用。"""
 
@@ -144,3 +157,31 @@ async def test_cancel_running_run_persists_one_terminal_event(tmp_path: Path) ->
         assert all(event.type != "response.completed" for event in events)
     finally:
         await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_suspension_stops_run_without_publishing_a_final_model_response(tmp_path: Path) -> None:
+    """M5 确认挂起必须成为当前 Run 终态，不能继续生成模型回复或 Tool 调用。"""
+
+    engine = _SuspendingEngine(tmp_path)
+    service = RunService(SqliteRunEventStore(tmp_path / "runs.sqlite3"), engine)  # type: ignore[arg-type]
+    try:
+        created = await service.create_run(_request())
+        await service.activate_run(created.run_id)
+        await asyncio.wait_for(engine.started.wait(), timeout=1)
+        for _ in range(20):
+            state = await service.get_run(created.run_id)
+            if state is not None and state.status is RunStatus.SUSPENDED_CONFIRMATION:
+                break
+            await asyncio.sleep(0)
+        events = await service.events_after(created.run_id, 0)
+    finally:
+        await service.aclose()
+
+    assert state is not None
+    assert state.status is RunStatus.SUSPENDED_CONFIRMATION
+    assert state.termination_reason is TerminationReason.SUSPENDED_CONFIRMATION
+    assert [event.type for event in events] == [
+        "run.accepted", "run.started", "run.suspended",
+    ]
+    assert all(event.type != "response.completed" for event in events)

@@ -65,6 +65,15 @@ export type InterruptResponseV1 = {
   };
 };
 
+/** 浏览器只消费 Gateway 投影的中断摘要，不持有 Tool 参数、授权或 Provider 状态。 */
+export type PublicInterruptV1 = {
+  interrupt_id: string;
+  kind: "awaiting_confirmation" | "authorization_required" | "quota" | "form";
+  title: string;
+  description: string;
+  status: "open" | "submitting";
+};
+
 export type WorkspaceCommandV1 = {
   client_command_id: string;
   workspace_id: string;

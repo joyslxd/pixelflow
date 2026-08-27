@@ -1,9 +1,10 @@
-/** 验证 Capability Plugin 只注册已冻结 Manifest 中的非计费 Tool。 */
+/** 验证 Capability Plugin 只注册已冻结 Manifest 中明确声明边界的 Tool。 */
 
 import assert from "node:assert/strict";
 import { apply } from "../dist/index.js";
 
 process.env.PIXELFLOW_HARNESS_TOOLSET_VERSION = "agent-tools-v1";
+process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS = "1";
 process.env.PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON = JSON.stringify({
   protocol_version: "v1",
   version: "agent-tools-v1",
@@ -32,6 +33,10 @@ apply({
     register(tool) {
       registered.push(tool);
     },
+  },
+  pixelflowRunPolicy: {
+    assertBillableBatchStart() {},
+    suspend() {},
   },
 });
 

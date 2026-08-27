@@ -186,7 +186,14 @@ class HarnessRunProjector:
                 event = await self._append_source_event(binding, source_event)
                 if source_event.type == "response.completed":
                     await self._append_response_message(binding, source_event)
-                if event.type is AgentEventType.RUN_STATE_CHANGED and event.payload.get("status") in {"completed", "failed", "cancelled"}:
+                if event.type is AgentEventType.RUN_STATE_CHANGED and event.payload.get("status") in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "suspended_operation",
+                    "suspended_confirmation",
+                    "suspended_authorization",
+                }:
                     return
         except GatewayHarnessSidecarError as error:
             raise HarnessEventProjectionError("Sidecar 事件投影失败") from error
@@ -286,15 +293,22 @@ class HarnessRunProjector:
     def _public_event(source_event: HarnessRunEvent) -> tuple[AgentEventType, dict[str, Any]]:
         """把有限 Sidecar 事件映射到既有公开枚举，拒绝 reasoning、参数和未知类型。"""
 
-        if source_event.type in {"run.accepted", "run.started", "run.completed", "run.failed", "run.cancelled"}:
+        if source_event.type in {"run.accepted", "run.started", "run.completed", "run.failed", "run.cancelled", "run.suspended"}:
             status_by_type = {
                 "run.accepted": "accepted",
                 "run.started": "running",
                 "run.completed": "completed",
                 "run.failed": "failed",
                 "run.cancelled": "cancelled",
+                "run.suspended": source_event.payload.get("status"),
             }
             payload: dict[str, Any] = {"status": status_by_type[source_event.type]}
+            if source_event.type == "run.suspended" and payload["status"] not in {
+                "suspended_operation",
+                "suspended_confirmation",
+                "suspended_authorization",
+            }:
+                raise HarnessEventProjectionError("Sidecar 挂起状态不符合公开合同")
             if source_event.type == "run.failed":
                 code = source_event.payload.get("code")
                 if isinstance(code, str) and code in {

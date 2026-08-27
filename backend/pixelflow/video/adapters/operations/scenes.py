@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,15 +15,22 @@ from pydantic import JsonValue, ValidationError
 from pixelflow.agent_control_plane.contracts import ExternalJobStatus
 from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRepository
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
+from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
 from pixelflow.agent_tools.video.scene import SceneGenerationJob
 from pixelflow.operations.jobs import (
+    OperationBatchRecord,
+    OperationBatchRepository,
     OperationStartCoordinator,
     OperationStartQuotaPausedError,
     ProviderJobAdapter,
+    build_operation_batch_plan,
     build_operation_request,
 )
 from pixelflow.operations.jobs.providers import ProviderJobCallError
 from pixelflow.operations.ports import OperationConflictError
+from pixelflow.video.workspace.repository import VideoWorkspaceRepository
+
+logger = logging.getLogger(__name__)
 
 _SEEDANCE_ASSET_REFERENCE_MODELS = frozenset(
     {"seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"}
@@ -51,6 +60,10 @@ class M06SceneGenerationOperationPort:
         authorization_provider: Callable[[VideoToolContext], str] | None = None,
         lease_owner: str,
         provider_request_builder: SceneProviderRequestBuilder | None = None,
+        provider_request_transformer: Callable[
+            [Mapping[str, JsonValue]], Mapping[str, JsonValue]
+        ]
+        | None = None,
         clock: Callable[[], datetime] | None = None,
         job_id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -71,6 +84,7 @@ class M06SceneGenerationOperationPort:
         self._lease_owner = normalized_owner
         # 未注入自定义 builder 时，从 Workspace creation_contract + 分镜 mentions 组装。
         self._provider_request_builder = provider_request_builder
+        self._provider_request_transformer = provider_request_transformer
         self._clock = clock or (lambda: datetime.now(UTC))
         self._job_id_factory = job_id_factory
 
@@ -81,11 +95,11 @@ class M06SceneGenerationOperationPort:
         scene: Mapping[str, JsonValue],
         variant_index: int,
         attempt: int,
+        workflow_id: str | None = None,
+        expected_operation_idempotency_key: str | None = None,
     ) -> SceneGenerationJob:
         """启动或回读同一镜头版本，Authorization不进入对象或持久层。"""
 
-        if context.plan_id is None or context.step_id is None:
-            raise VideoToolExecutionError("镜头生成Operation缺少计划身份")
         scene_id = str(scene.get("scene_id") or "").strip()
         if not scene_id:
             raise VideoToolExecutionError("镜头生成Operation缺少镜头身份")
@@ -97,14 +111,23 @@ class M06SceneGenerationOperationPort:
             provider_request = dict(
                 build_scene_provider_request(context, scene, variant_index)
             )
+        if self._provider_request_transformer is not None:
+            provider_request = dict(
+                self._provider_request_transformer(provider_request)
+            )
         scene_digest = hashlib.sha256(scene_id.encode()).hexdigest()[:12]
         request = build_operation_request(
-            workflow_id=context.plan_id,
+            workflow_id=workflow_id or context.plan_id or context.run_id or "",
             stage=f"generate_scene:{scene_digest}:v{variant_index}",
             stage_version=1,
             attempt=attempt,
             provider_request=provider_request,
         )
+        if (
+            expected_operation_idempotency_key is not None
+            and request.idempotency_key != expected_operation_idempotency_key
+        ):
+            raise VideoToolExecutionError("镜头生成批次子项幂等身份不一致")
         coordinator = OperationStartCoordinator(
             self._repository,
             adapter=self._adapter,
@@ -177,7 +200,7 @@ class M06SceneGenerationOperationPort:
         if not isinstance(result, Mapping):
             raise VideoToolExecutionError("镜头生成Operation缺少安全结果")
         try:
-            job = SceneGenerationJob.model_validate(
+            return SceneGenerationJob.model_validate(
                 {
                     "job_id": operation_job_id,
                     "scene_id": scene_id,
@@ -186,15 +209,306 @@ class M06SceneGenerationOperationPort:
                     "variant_id": result.get("variant_id"),
                     "artifact_ref": result.get("artifact_ref"),
                     "video_url": result.get("video_url"),
-                    "completed_at": (
-                        result.get("completed_at") or matches[0].occurred_at
-                    ),
+                    "completed_at": result.get("completed_at") or matches[0].occurred_at,
                 }
             )
         except ValidationError as exc:
             raise VideoToolExecutionError("镜头生成Operation结果无效") from exc
-        return job
 
+
+class M06SceneGenerationBatchDispatcher:
+    """领取一个批次内的 start 槽位，并委托既有 M06 单 Operation Port 启动。
+
+    这里是批次与 Provider Adapter 的唯一接线点：Tool 只创建/回读批次，
+    Dispatcher 才能取得槽位并接触 Provider。单个批次由构造参数硬限制为最多 6
+    个并发子 Operation，未领取的子项保持 queued，等待下一轮 Dispatcher。
+    """
+
+    def __init__(
+        self,
+        *,
+        batch_repository: OperationBatchRepository,
+        operation_port: M06SceneGenerationOperationPort,
+        max_concurrent_child_operations_per_batch: int = 6,
+    ) -> None:
+        if not 1 <= max_concurrent_child_operations_per_batch <= 6:
+            raise ValueError("每批次并发子 Operation 必须在 1 到 6 之间")
+        self._batch_repository = batch_repository
+        self._operation_port = operation_port
+        self._max_concurrent = max_concurrent_child_operations_per_batch
+
+    async def dispatch_start_slots(
+        self,
+        *,
+        batch: OperationBatchRecord,
+        context: VideoToolContext,
+        scenes_by_id: Mapping[str, Mapping[str, JsonValue]],
+        attempt: int,
+    ) -> dict[str, SceneGenerationJob]:
+        """按槽位启动子 Operation，并把 Job 身份或终态原子回写批次。"""
+
+        claimed = await self._batch_repository.claim_children(
+            batch_id=batch.batch_id,
+            max_concurrent=self._max_concurrent,
+        )
+        jobs: dict[str, SceneGenerationJob] = {}
+        for child in claimed:
+            scene = scenes_by_id.get(child.scene_id)
+            if scene is None:
+                await self._batch_repository.mark_child_terminal(
+                    batch_id=batch.batch_id,
+                    child_key=child.operation_idempotency_key,
+                    status="failed",
+                    job_id=child.operation_idempotency_key,
+                )
+                jobs[child.operation_idempotency_key] = SceneGenerationJob(
+                    job_id=child.operation_idempotency_key,
+                    scene_id=child.scene_id,
+                    variant_index=child.variant_index,
+                    status="failed",
+                )
+                continue
+            try:
+                job = await self._operation_port.start_scene_variant(
+                    context,
+                    scene=scene,
+                    variant_index=child.variant_index,
+                    attempt=attempt,
+                    workflow_id=batch.batch_id,
+                    expected_operation_idempotency_key=child.operation_idempotency_key,
+                )
+            except VideoToolExecutionError:
+                await self._batch_repository.mark_child_terminal(
+                    batch_id=batch.batch_id,
+                    child_key=child.operation_idempotency_key,
+                    status="failed",
+                    job_id=child.operation_idempotency_key,
+                )
+                jobs[child.operation_idempotency_key] = SceneGenerationJob(
+                    job_id=child.operation_idempotency_key,
+                    scene_id=child.scene_id,
+                    variant_index=child.variant_index,
+                    status="failed",
+                )
+                continue
+            if (
+                job.scene_id != child.scene_id
+                or job.variant_index != child.variant_index
+            ):
+                raise VideoToolExecutionError("镜头生成Operation结果身份不一致")
+            if job.status == "succeeded":
+                await self._batch_repository.mark_child_terminal(
+                    batch_id=batch.batch_id,
+                    child_key=child.operation_idempotency_key,
+                    status="succeeded",
+                    job_id=job.job_id,
+                )
+            else:
+                await self._batch_repository.mark_child_polling(
+                    batch_id=batch.batch_id,
+                    child_key=child.operation_idempotency_key,
+                    job_id=job.job_id,
+                )
+            jobs[child.operation_idempotency_key] = job
+        return jobs
+
+
+class M06SceneGenerationBatchOperationPort:
+    """给 generate_scenes 使用的批次 Port，建立双重幂等后交由 M06 Dispatcher。"""
+
+    def __init__(
+        self,
+        *,
+        batch_repository: OperationBatchRepository,
+        dispatcher: M06SceneGenerationBatchDispatcher,
+        credential_store: TransientBatchCredentialStore | None = None,
+    ) -> None:
+        self._batch_repository = batch_repository
+        self._dispatcher = dispatcher
+        self._credential_store = credential_store
+
+    async def create_or_read_batch(
+        self,
+        context: VideoToolContext,
+        *,
+        scenes: Sequence[Mapping[str, JsonValue]],
+        variant_count: int,
+        attempt: int,
+    ) -> tuple[str, tuple[SceneGenerationJob, ...]]:
+        """创建或回读 scene × variant 批次；Tool 本身不再循环启动 Provider。"""
+
+        if context.run_id is None or context.tool_call_id is None:
+            raise VideoToolExecutionError("镜头生成批次缺少冻结 Run 绑定")
+        scene_ids = tuple(str(scene.get("scene_id") or "").strip() for scene in scenes)
+        try:
+            plan = build_operation_batch_plan(
+                run_id=context.run_id,
+                tool_call_id=context.tool_call_id,
+                scene_ids=scene_ids,
+                variant_count=variant_count,
+                attempt=attempt,
+            )
+        except (ValueError, OperationConflictError) as exc:
+            raise VideoToolExecutionError("镜头生成批次参数无效") from exc
+        batch = await self._batch_repository.create_or_read(
+            user_id=context.user_id,
+            conversation_id=context.workspace.conversation_id,
+            workspace_id=context.workspace.workspace_id,
+            plan=plan,
+            run_id=context.run_id,
+            tool_call_id=context.tool_call_id,
+            attempt=attempt,
+            source_workspace_revision=context.workspace.revision,
+        )
+        if self._credential_store is not None and context.credential is not None:
+            # Broker 会在 Tool 返回后清理原凭据；批次凭据是独立的进程内短租约，
+            # 只用于本批次尚未领取的槽位，绝不写入数据库。
+            await self._credential_store.put(
+                batch_id=batch.batch_id,
+                authorization=context.credential.borrow_authorization(),
+            )
+        scenes_by_id = {str(scene.get("scene_id") or "").strip(): scene for scene in scenes}
+        started = await self._dispatcher.dispatch_start_slots(
+            batch=batch,
+            context=context,
+            scenes_by_id=scenes_by_id,
+            attempt=attempt,
+        )
+        jobs = tuple(
+            started.get(
+                child.operation_idempotency_key,
+                SceneGenerationJob(
+                    job_id=child.job_id or child.operation_idempotency_key,
+                    scene_id=child.scene_id,
+                    variant_index=child.variant_index,
+                    status="polling" if child.job_id else "queued",
+                ),
+            )
+            for child in batch.children
+        )
+        return batch.batch_id, jobs
+
+
+class M06SceneGenerationBatchDispatcherWorker:
+    """Gateway 重启后扫描持久化 queued 子项，并在仍有瞬时授权时补领槽位。"""
+
+    def __init__(
+        self,
+        *,
+        batch_repository: OperationBatchRepository,
+        video_repository: VideoWorkspaceRepository,
+        dispatcher: M06SceneGenerationBatchDispatcher,
+        credential_store: TransientBatchCredentialStore,
+        worker_id: str,
+        scan_interval: timedelta = timedelta(seconds=1),
+        scan_limit: int = 100,
+    ) -> None:
+        if not worker_id.strip() or scan_interval <= timedelta(0) or scan_limit < 1:
+            raise ValueError("批次 Dispatcher Worker 配置无效")
+        self._batches = batch_repository
+        self._videos = video_repository
+        self._dispatcher = dispatcher
+        self._credentials = credential_store
+        self._worker_id = worker_id.strip()
+        self._scan_interval = scan_interval
+        self._scan_limit = scan_limit
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+        self._wake = asyncio.Event()
+
+    def wake(self) -> None:
+        """子项终态后立即尝试领取下一槽位，不等待下一次轮询。"""
+
+        self._wake.set()
+
+    async def run_once(self) -> int:
+        """处理所有当前可安全启动的批次；无授权只保留队列，不伪造 Provider start。"""
+
+        dispatched = 0
+        for batch in await self._batches.list_dispatchable_batches(limit=self._scan_limit):
+            credential = await self._credentials.get(batch_id=batch.batch_id)
+            if credential is None:
+                # 用户 Authorization 不得持久化。重启或租约过期后，等待新的显式授权。
+                continue
+            if batch.run_id is None or batch.tool_call_id is None or batch.attempt is None:
+                logger.warning("operation_batch_dispatch_missing_identity batch_id=%s", batch.batch_id)
+                continue
+            workspace = await self._videos.get_workspace(batch.user_id, batch.workspace_id)
+            if workspace is None or workspace.conversation_id != batch.conversation_id:
+                logger.warning("operation_batch_dispatch_workspace_unavailable batch_id=%s", batch.batch_id)
+                continue
+            if (
+                batch.source_workspace_revision is not None
+                and workspace.revision > batch.source_workspace_revision + 1
+            ):
+                logger.warning("operation_batch_dispatch_workspace_stale batch_id=%s", batch.batch_id)
+                continue
+            payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
+            raw_scenes = payload.get("scenes")
+            scenes = raw_scenes if isinstance(raw_scenes, list) else []
+            scenes_by_id = {
+                str(scene.get("scene_id") or "").strip(): scene
+                for scene in scenes
+                if isinstance(scene, Mapping) and str(scene.get("scene_id") or "").strip()
+            }
+            try:
+                await self._dispatcher.dispatch_start_slots(
+                    batch=batch,
+                    context=VideoToolContext(
+                        user_id=batch.user_id,
+                        workspace=workspace,
+                        run_id=batch.run_id,
+                        tool_call_id=batch.tool_call_id,
+                        credential=credential,
+                    ),
+                    scenes_by_id=scenes_by_id,
+                    attempt=batch.attempt,
+                )
+                dispatched += 1
+            except Exception as exc:  # noqa: BLE001 - 保留状态给下一轮与 M06 lease 恢复。
+                logger.warning(
+                    "operation_batch_dispatch_failed batch_id=%s error_type=%s",
+                    batch.batch_id,
+                    type(exc).__name__,
+                )
+        return dispatched
+
+    async def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("批次 Dispatcher Worker 已关闭")
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._run(),
+                name=f"operation-batch-dispatch:{self._worker_id}",
+            )
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self._wake.set()
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+    async def _run(self) -> None:
+        while not self._closed:
+            try:
+                await self.run_once()
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._wake.wait(),
+                        timeout=self._scan_interval.total_seconds(),
+                    )
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 周期性任务必须在单轮失败后继续。
+                logger.warning(
+                    "operation_batch_dispatch_worker_failed error_type=%s",
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(self._scan_interval.total_seconds())
 
 def build_scene_provider_request(
     context: VideoToolContext,

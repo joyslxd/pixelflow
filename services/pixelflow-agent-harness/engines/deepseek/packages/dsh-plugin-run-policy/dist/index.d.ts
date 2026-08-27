@@ -6,17 +6,25 @@ interface CordisContext {
 export interface RunPolicyConfig {
     maxModelSteps?: number;
     maxBusinessTools?: number;
+    maxBillableBatchStarts?: number;
     deadlineSeconds?: number;
 }
+export type SuspensionKind = "pending_operation" | "awaiting_confirmation" | "authorization_required";
 export declare class RunPolicy {
     private readonly config;
     private readonly startedAt;
     private modelSteps;
     private businessTools;
+    private billableBatchStarts;
     private cancelled;
+    private suspension;
     constructor(config: Required<RunPolicyConfig>);
     assertModelStep(): void;
     assertBusinessTool(): void;
+    /** 计费批次只能由 Broker 的稳定结果计数，模型参数和 Skill 均无权修改。 */
+    assertBillableBatchStart(): void;
+    /** 收到业务挂起结果后阻断同一 Harness Session 的下一次模型或 Tool 调用。 */
+    suspend(kind: SuspensionKind): void;
     cancel(): void;
     dispose(): void;
     private assertActive;

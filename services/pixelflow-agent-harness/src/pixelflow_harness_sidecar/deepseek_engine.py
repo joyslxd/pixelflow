@@ -56,6 +56,7 @@ class DeepSeekEngineResult:
     final_response: str
     finish_reason: str | None
     tool_names: tuple[str, ...]
+    suspension_kind: str | None = None
     response_deltas: tuple[str, ...] = field(default_factory=tuple)
     public_summaries: tuple[str, ...] = field(default_factory=tuple)
     notification_events_emitted: bool = False
@@ -247,6 +248,8 @@ def build_deepseek_harness_config(
         "PIXELFLOW_HARNESS_WORKSPACE_REVISION": str(request.binding.workspace_revision),
         "PIXELFLOW_HARNESS_MAX_MODEL_STEPS": str(request.limits.max_model_steps),
         "PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS": str(request.limits.max_business_tools),
+        # 用途：把 Gateway 冻结的计费批次上限传给 Sidecar Policy；影响：模型无法在单个 Run 内绕过 M5 费用边界。
+        "PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS": str(request.limits.max_billable_batch_starts),
         "PIXELFLOW_HARNESS_DEADLINE_SECONDS": str(request.limits.deadline_seconds),
     }
     return config_factory(
@@ -300,6 +303,15 @@ def _project_harness_result(
         and isinstance((data := event.get("data")), dict)
         and isinstance(data.get("name"), str)
     )
+    suspension_kind = _suspension_from_tool_events(events)
+    if suspension_kind is not None:
+        return DeepSeekEngineResult(
+            final_response="",
+            finish_reason="suspended",
+            tool_names=tool_names,
+            suspension_kind=suspension_kind,
+            notification_events_emitted=notification_events_emitted,
+        )
     final_response = getattr(result, "final_response", None)
     response = final_response.strip() if isinstance(final_response, str) else ""
     if not response:
@@ -328,6 +340,27 @@ def _project_harness_result(
         ),
         notification_events_emitted=notification_events_emitted,
     )
+
+
+def _suspension_from_tool_events(events: list[object]) -> str | None:
+    """只识别 Tool Runtime 返回的结构化挂起结果，绝不从模型文本推断业务状态。"""
+
+    allowed = {"pending_operation", "awaiting_confirmation", "authorization_required"}
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") not in {"tool/result", "tool_result"}:
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        for key in ("result", "output", "value", "observation"):
+            candidate = data.get(key)
+            if not isinstance(candidate, dict):
+                continue
+            status = candidate.get("status")
+            suspension = candidate.get("suspension")
+            if status in allowed and isinstance(suspension, dict) and suspension.get("kind") == status:
+                return status
+    return None
 
 
 def _public_events_from_notification(notification: object) -> tuple[tuple[str, dict[str, str]], ...]:

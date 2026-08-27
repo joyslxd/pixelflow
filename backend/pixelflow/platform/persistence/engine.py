@@ -102,6 +102,8 @@ async def ensure_schema(engine: AsyncEngine) -> None:
         await connection.run_sync(Base.metadata.create_all)
         await _migrate_video_plan_revision_schema(connection)
         await _migrate_long_term_memory_write_schema(connection)
+        await _migrate_operation_batch_workspace_schema(connection)
+        await _migrate_operation_batch_dispatch_schema(connection)
 
 
 async def _migrate_video_plan_revision_schema(connection) -> None:
@@ -216,4 +218,60 @@ async def _migrate_long_term_memory_write_schema(connection) -> None:
         )
 
 
+async def _migrate_operation_batch_workspace_schema(connection) -> None:
+    """为 M5 早期批次表补权威 workspace_id；旧记录标记为不可恢复而非猜测归属。"""
+
+    migrations = (
+        ("pixelflow_operation_batches", "workspace_id"),
+        ("pixelflow_operation_batch_outbox", "workspace_id"),
+    )
+    dialect = connection.dialect.name
+    if dialect == "sqlite":
+        for table_name, column_name in migrations:
+            rows = await connection.exec_driver_sql(f"PRAGMA table_info({table_name})")
+            columns = {str(row[1]) for row in rows.all()}
+            if columns and column_name not in columns:
+                await connection.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} "
+                    "VARCHAR(64) NOT NULL DEFAULT '__missing_workspace__'"
+                )
+        return
+    if dialect == "postgresql":
+        for table_name, column_name in migrations:
+            await connection.execute(
+                text(
+                    f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} "
+                    "VARCHAR(64) NOT NULL DEFAULT '__missing_workspace__'"
+                )
+            )
+
+
+async def _migrate_operation_batch_dispatch_schema(connection) -> None:
+    """为既有批次补可恢复调度身份；旧批次缺身份时保持安全等待重新授权。"""
+
+    migrations = (
+        ("pixelflow_operation_batches", "run_id", "VARCHAR(64)"),
+        ("pixelflow_operation_batches", "tool_call_id", "VARCHAR(128)"),
+        ("pixelflow_operation_batches", "attempt", "INTEGER"),
+        ("pixelflow_operation_batches", "source_workspace_revision", "INTEGER"),
+        ("pixelflow_operation_batch_children", "started_at", "DATETIME"),
+    )
+    dialect = connection.dialect.name
+    if dialect == "sqlite":
+        for table_name, column_name, definition in migrations:
+            rows = await connection.exec_driver_sql(f"PRAGMA table_info({table_name})")
+            columns = {str(row[1]) for row in rows.all()}
+            if columns and column_name not in columns:
+                await connection.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                )
+        return
+    if dialect == "postgresql":
+        for table_name, column_name, definition in migrations:
+            await connection.execute(
+                text(
+                    f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {definition}"
+                )
+            )
+        return
 __all__ = ["close_engine", "ensure_schema", "get_engine", "get_session_factory", "init_engine"]

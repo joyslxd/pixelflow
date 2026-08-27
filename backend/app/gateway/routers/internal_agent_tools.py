@@ -9,7 +9,6 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from pixelflow.agent_tools.broker import AgentToolBroker
 from pixelflow.agent_tools.contracts import ToolCallRequest, ToolCallResponse, ToolManifestResponse
-from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import AgentToolBindingConflictError
 
 router = APIRouter(
@@ -66,11 +65,14 @@ def _broker(request: Request) -> AgentToolBroker:
 
 
 @router.get("/manifest", response_model=ToolManifestResponse)
-async def get_manifest(authorization: str | None = Header(default=None)) -> ToolManifestResponse:
+async def get_manifest(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> ToolManifestResponse:
     """返回当前只读 Manifest；Sidecar readiness 会据此核对冻结摘要。"""
 
     _require_service_identity(authorization)
-    return manifest()
+    return _broker(request).manifest_snapshot
 
 
 @router.post("/calls", response_model=ToolCallResponse)

@@ -164,7 +164,8 @@ class ReplaceSceneAssetInput(BaseModel):
 class GenerateScenesInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scene_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    # M06 一个批次最多 6 个 scene × variant 子 Operation；输入层先做硬限制。
+    scene_ids: tuple[str, ...] = Field(default=(), max_length=6)
     variant_count: int = Field(default=1, ge=1, le=3)
     attempt: int = Field(default=1, ge=1, le=10)
 
@@ -172,6 +173,8 @@ class GenerateScenesInput(BaseModel):
     def validate_unique_ids(self) -> GenerateScenesInput:
         if len(set(self.scene_ids)) != len(self.scene_ids):
             raise ValueError("scene_ids 不能重复")
+        if len(self.scene_ids) * self.variant_count > 6:
+            raise ValueError("单次镜头生成最多包含 6 个 scene × variant 子任务")
         return self
 
 
@@ -186,7 +189,7 @@ class SceneGenerationJob(VideoAgentContract):
     job_id: str = Field(min_length=1, max_length=128)
     scene_id: str = Field(min_length=1, max_length=128)
     variant_index: int = Field(ge=1, le=3)
-    status: Literal["polling", "start_paused_quota", "succeeded"]
+    status: Literal["queued", "polling", "start_paused_quota", "succeeded", "failed"]
     variant_id: str | None = Field(default=None, max_length=128)
     artifact_ref: str | None = Field(default=None, pattern=_ARTIFACT_PATTERN, max_length=256)
     video_url: str | None = Field(default=None, max_length=4_096)
@@ -201,7 +204,7 @@ class SceneGenerationJob(VideoAgentContract):
             or self.completed_at is None
         ):
             raise ValueError("已完成生成任务必须包含版本、产物、视频和完成时间")
-        if self.status == "start_paused_quota" and any(
+        if self.status in {"queued", "start_paused_quota", "failed"} and any(
             value is not None
             for value in (
                 self.variant_id,
@@ -236,6 +239,19 @@ class SceneGenerationOperationPort(Protocol):
         variant_index: int,
         attempt: int,
     ) -> SceneGenerationJob: ...
+
+
+class SceneGenerationBatchOperationPort(Protocol):
+    """把一个冻结 Tool Call 原子映射为 OperationBatch，再交给 M06 Dispatcher。"""
+
+    async def create_or_read_batch(
+        self,
+        context: VideoToolContext,
+        *,
+        scenes: Sequence[Mapping[str, JsonValue]],
+        variant_count: int,
+        attempt: int,
+    ) -> tuple[str, tuple[SceneGenerationJob, ...]]: ...
 
 
 class InspectSceneTool:
@@ -618,10 +634,10 @@ class GenerateScenesTool:
     def __init__(
         self,
         *,
-        operation_port: SceneGenerationOperationPort | None = None,
+        batch_operation_port: SceneGenerationBatchOperationPort | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._operation_port = operation_port
+        self._batch_operation_port = batch_operation_port
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def execute(
@@ -645,24 +661,29 @@ class GenerateScenesTool:
         scene_ids = list(request.scene_ids) or _text_list(payload.get("dirty_scene_ids"))
         if not scene_ids:
             raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
+        if len(scene_ids) * request.variant_count > 6:
+            raise VideoToolValidationError("单次镜头生成最多包含 6 个 scene × variant 子任务")
         selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
-        if self._operation_port is None:
+        if self._batch_operation_port is None:
             raise VideoToolExecutionError("镜头生成Operation尚未装配")
         jobs_by_scene: dict[str, list[SceneGenerationJob]] = {
             scene_id: [] for scene_id in scene_ids
         }
-        for scene in selected:
-            scene_id = str(scene["scene_id"])
-            for variant_index in range(1, request.variant_count + 1):
-                job = await self._operation_port.start_scene_variant(
-                    context,
-                    scene=scene,
-                    variant_index=variant_index,
-                    attempt=request.attempt,
-                )
-                if job.scene_id != scene_id or job.variant_index != variant_index:
-                    raise VideoToolExecutionError("镜头生成Operation结果身份不一致")
-                jobs_by_scene[scene_id].append(job)
+        batch_id, jobs = await self._batch_operation_port.create_or_read_batch(
+            context,
+            scenes=tuple(selected),
+            variant_count=request.variant_count,
+            attempt=request.attempt,
+        )
+        if not batch_id.startswith("operation-batch-"):
+            raise VideoToolExecutionError("镜头生成批次身份无效")
+        if len(jobs) != len(selected) * request.variant_count:
+            raise VideoToolExecutionError("镜头生成批次子任务数量不一致")
+        for job in jobs:
+            scene_jobs = jobs_by_scene.get(job.scene_id)
+            if scene_jobs is None or not 1 <= job.variant_index <= request.variant_count:
+                raise VideoToolExecutionError("镜头生成批次子任务身份不一致")
+            scene_jobs.append(job)
         next_scenes: list[dict[str, JsonValue]] = []
         completed_dirty: list[str] = []
         for scene in scenes:
@@ -819,7 +840,7 @@ class GenerateScenesTool:
             for job in scene_jobs:
                 progress_total += 1
                 status = str(job.get("status") or "").strip().casefold()
-                if status and status not in {"polling", "start_paused_quota", "created"}:
+                if status and status not in {"queued", "polling", "start_paused_quota", "created"}:
                     progress_completed += 1
         if progress_total <= 0:
             progress_total = total_jobs
@@ -845,7 +866,7 @@ class GenerateScenesTool:
         }
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=f"已为 {len(selected)} 个镜头启动 {request.variant_count} 版定向生成",
+            public_summary=f"已创建批次 {batch_id}，包含 {len(jobs)} 个镜头生成子任务",
             workspace_patch=workspace_patch,
             artifact_refs=tuple(
                 job.artifact_ref
@@ -857,7 +878,7 @@ class GenerateScenesTool:
                 job.job_id
                 for jobs in jobs_by_scene.values()
                 for job in jobs
-                if job.status in {"polling", "start_paused_quota"}
+                if job.status in {"queued", "polling", "start_paused_quota"}
             ),
             requires_confirmation=True,
         )
