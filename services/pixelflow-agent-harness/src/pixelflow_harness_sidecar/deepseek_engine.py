@@ -244,6 +244,8 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
     if not response:
         response = _public_text_from_chunks(events).strip()
     if not response:
+        response = _public_text_from_final_messages(events).strip()
+    if not response:
         raise HarnessProjectionError("final_response_missing")
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
@@ -273,6 +275,32 @@ def _public_text_from_chunks(events: list[object]) -> str:
             continue
         for chunk in _nested_text_delta_chunks(data):
             parts.extend(_text_delta_values(chunk))
+    return "".join(parts)
+
+
+def _public_text_from_final_messages(events: list[object]) -> str:
+    """读取 Runtime 明确标记的最终公开消息，避免遗漏流式结果的最终文本。"""
+
+    parts: list[str] = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "assistant/message":
+            continue
+        data = event.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") not in {"text", "text-delta"}:
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
     return "".join(parts)
 
 

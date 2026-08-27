@@ -211,3 +211,29 @@ def test_result_projection_uses_text_delta_only_when_final_message_missing() -> 
     )
 
     assert projected.final_response == "公开文本块回复"
+
+
+def test_result_projection_uses_public_final_message_when_chunks_absent() -> None:
+    """Runtime 仅在最终消息携带文本时，仍必须投影公开文本且排除 reasoning 块。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {
+                    "type": "assistant/message",
+                    "data": {
+                        "message": {
+                            "content": [
+                                {"type": "reasoning", "text": "不得公开"},
+                                {"type": "text", "text": "最终回复"},
+                            ]
+                        }
+                    },
+                }
+            ],
+            final_response="",
+            finish_reason="completed",
+        )
+    )
+
+    assert projected.final_response == "最终回复"
