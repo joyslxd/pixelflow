@@ -298,12 +298,19 @@ def _text_delta_values(value: object) -> tuple[str, ...]:
             for key, child in value.items()
             if key in {"delta", "text", "content"} and isinstance(child, str)
         )
+        chunk_values = tuple(
+            item
+            for key, child in value.items()
+            if key == "chunks" and isinstance(child, list)
+            for item in child
+            if isinstance(item, str)
+        )
         nested = tuple(
             item
             for child in value.values()
             for item in _text_delta_values(child)
         )
-        return values + nested
+        return values + chunk_values + nested
     if isinstance(value, list):
         return tuple(item for child in value for item in _text_delta_values(child))
     return ()
