@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -42,6 +43,14 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _sidecar_python_command(python: Path) -> list[str]:
+    """macOS ARM64 强制原生 Runtime；Linux 使用其当前架构的锁定 wheel。"""
+
+    if sys.platform == "darwin":
+        return ["/usr/bin/arch", "-arm64", str(python)]
+    return [str(python)]
 
 
 @pytest.mark.m0_real
@@ -187,9 +196,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
     )
     sidecar_process = subprocess.Popen(
         [
-            "/usr/bin/arch",
-            "-arm64",
-            str(sidecar_root / ".venv/bin/python"),
+            *_sidecar_python_command(sidecar_root / ".venv/bin/python"),
             "-m",
             "uvicorn",
             "pixelflow_harness_sidecar.app:create_app",
@@ -516,9 +523,7 @@ def test_real_public_run_recovery_after_sidecar_kill_and_restart(
 
         return subprocess.Popen(
             [
-                "/usr/bin/arch",
-                "-arm64",
-                str(sidecar_root / ".venv/bin/python"),
+                *_sidecar_python_command(sidecar_root / ".venv/bin/python"),
                 "-m",
                 "uvicorn",
                 "pixelflow_harness_sidecar.app:create_app",
