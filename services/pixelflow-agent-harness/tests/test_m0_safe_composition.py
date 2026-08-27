@@ -130,7 +130,7 @@ def test_fixed_sdk_performs_real_ark_deepseek_turn(tmp_path: Path) -> None:
         deepseek_harness.DeepSeekHarnessConfig(
             provider="deepseek-official",
             model=os.environ.get("PIXELFLOW_M0_DEEPSEEK_MODEL", "deepseek-v4-pro-ga-260813"),
-            max_tokens=64,
+                max_tokens=256,
             cwd=str(root),
             session_root=str(root / "sessions"),
             cordis=str(cordis),
