@@ -15,14 +15,14 @@ APT_MIRROR_HOST="${PIXELFLOW_APT_MIRROR:-mirrors.aliyun.com}"
 
 cd "$DEPLOY_DIR"
 
-mapfile -t IMAGES < <(docker compose -f "$COMPOSE_FILE" config --images)
-if [[ "${#IMAGES[@]}" -ne 2 || -z "${IMAGES[0]}" || -z "${IMAGES[1]}" ]]; then
+# 用途：按 Compose 服务名读取解析后的镜像；影响：不依赖 config --images 的非稳定输出顺序，避免镜像错标。
+COMPOSE_CONFIG_JSON="$(docker compose -f "$COMPOSE_FILE" config --format json)"
+GATEWAY_IMAGE="$(printf '%s' "$COMPOSE_CONFIG_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["gateway"]["image"])')"
+SIDECAR_IMAGE="$(printf '%s' "$COMPOSE_CONFIG_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["harness-sidecar"]["image"])')"
+if [[ -z "$GATEWAY_IMAGE" || -z "$SIDECAR_IMAGE" ]]; then
   echo "Compose 镜像配置不完整，拒绝构建。" >&2
   exit 1
 fi
-
-GATEWAY_IMAGE="${IMAGES[0]}"
-SIDECAR_IMAGE="${IMAGES[1]}"
 
 # 用途：构建 Gateway 当前源码镜像；影响：复用 Docker/uv 缓存，下载超时由上方变量控制。
 docker build \
