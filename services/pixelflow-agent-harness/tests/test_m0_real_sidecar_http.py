@@ -41,7 +41,7 @@ def _request_payload() -> dict[str, object]:
         "model": {
             "profile_name": "deepseek-v4-pro",
             "profile_digest": "sha256:m0-real-model-profile",
-            "max_output_tokens": 256,
+            "max_output_tokens": 1024,
         },
         "context_budget": {
             "effective_context_k": 896,
