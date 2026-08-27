@@ -252,7 +252,9 @@ def _start_payload(request: Mapping[str, JsonValue]) -> tuple[str, dict[str, Jso
         "size": _required_text(request, "size"),
         "duration": request.get("duration"),
         "videoCount": 1,
-        "sound": _required_text(request, "sound"),
+        # Workspace 创作合同沿用 on/off，content-app 视频 DTO 固定使用 yes/no。
+        # 在 Adapter 边界归一化，避免把厂商枚举泄漏回 Harness Tool 合同。
+        "sound": _content_app_sound(_required_text(request, "sound")),
     }
     images = _string_list(request.get("image_urls"))
     videos = _string_list(request.get("video_urls"))
@@ -277,6 +279,17 @@ def _start_payload(request: Mapping[str, JsonValue]) -> tuple[str, dict[str, Jso
         if images:
             common["refImage"] = images[0]
     return endpoint, common
+
+
+def _content_app_sound(value: str) -> str:
+    """把稳定视频声音开关映射为 content-app 的 yes/no 枚举。"""
+
+    normalized = value.strip().casefold()
+    if normalized in {"on", "yes"}:
+        return "yes"
+    if normalized in {"off", "no"}:
+        return "no"
+    raise ProviderJobMappingError("video_sound_unsupported")
 
 
 def _to_snapshot(payload: Mapping[str, object], *, expected_job_id: str | None) -> ProviderJobSnapshot:

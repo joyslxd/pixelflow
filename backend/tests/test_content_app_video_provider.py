@@ -85,7 +85,9 @@ async def test_start_and_status_use_separate_authorizations(monkeypatch) -> None
     assert requests[0].headers["Authorization"] == "Bearer user-start-token"
     assert requests[0].headers["Idempotency-Key"] == "operation:v1:test"
     assert requests[1].headers["Authorization"] == "Bearer service-status-token"
-    assert json.loads(requests[0].content)["videoCount"] == 1
+    body = json.loads(requests[0].content)
+    assert body["videoCount"] == 1
+    assert body["sound"] == "yes"
 
 
 @pytest.mark.asyncio
