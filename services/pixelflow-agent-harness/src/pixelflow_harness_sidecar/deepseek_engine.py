@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +123,10 @@ class DeepSeekHarnessEngine:
                         "DSH_HOME": str(run_home),
                         "DSH_AGENTS_HOME": str(run_home / "agents-home"),
                         "DSH_SESSION_ROOT": str(session_root),
+                        # 用途：向隔离 Runtime 传递部署期模型凭据；影响：仅驻留本次子进程环境，不写入 Run、事件或日志。
+                        "DEEPSEEK_API_KEY": os.environ["DEEPSEEK_API_KEY"],
+                        # 用途：向隔离 Runtime 传递受控模型端点；影响：真实模型请求使用部署配置，避免退回 SDK 默认地址。
+                        "DEEPSEEK_BASE_URL": os.environ["DEEPSEEK_BASE_URL"],
                         "PIXELFLOW_TOOL_BROKER_BASE_URL": self._settings.tool_broker_base_url,
                         "PIXELFLOW_TOOL_BROKER_JWT_SIGNING_KEY": self._settings.tool_broker_jwt_signing_key,
                         "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": self._settings.tool_broker_jwt_issuer,
