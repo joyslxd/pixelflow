@@ -34,6 +34,7 @@ class RunService:
     async def create_run(self, request: HarnessRunRequest) -> HarnessRunState:
         """持久化接受状态，等待 Gateway 写入 binding 后再激活真实模型执行。"""
 
+        self._engine.validate_request(request)
         existing = await self._store.get_by_request(request)
         if existing is not None:
             return existing
@@ -126,7 +127,23 @@ class RunService:
             started = await self._store.start_if_accepted(run_id)
             if started is None or started.status is not RunStatus.RUNNING:
                 return
-            result = await self._engine.execute(run_id, request, skill_snapshot)
+            loop = asyncio.get_running_loop()
+
+            def append_realtime_event(event_type: str, payload: dict[str, str]) -> None:
+                """SDK 回调在工作线程触发；SQLite 写入必须回到 Sidecar 事件循环。"""
+
+                future = asyncio.run_coroutine_threadsafe(
+                    self._store.append_event(run_id, event_type, payload),
+                    loop,
+                )
+                future.result(timeout=10)
+
+            result = await self._engine.execute(
+                run_id,
+                request,
+                skill_snapshot,
+                on_public_event=append_realtime_event,
+            )
             current = await self._store.get(run_id)
             if current is None or current.status is not RunStatus.RUNNING:
                 return
@@ -148,6 +165,26 @@ class RunService:
                     "tool.completed",
                     {"tool_name": tool_name},
                 )
+            if not result.notification_events_emitted:
+                for summary in result.public_summaries:
+                    await self._store.append_event(
+                        run_id,
+                        "public_summary.delta",
+                        {"delta": summary},
+                    )
+            if result.public_summaries:
+                await self._store.append_event(
+                    run_id,
+                    "public_summary.completed",
+                    {"summary": "\n".join(result.public_summaries)},
+                )
+            if not result.notification_events_emitted:
+                for delta in result.response_deltas:
+                    await self._store.append_event(
+                        run_id,
+                        "response.delta",
+                        {"delta": delta},
+                    )
             await self._store.append_event(
                 run_id,
                 "response.completed",

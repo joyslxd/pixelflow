@@ -96,6 +96,7 @@ class AgentPlan(VideoAgentContract):
     plan_id: str = Field(min_length=1, max_length=64)
     workspace_id: str = Field(min_length=1, max_length=64)
     conversation_id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(default=1, ge=1)
     status: AgentPlanStatus
     public_goal: str | None = Field(default=None, max_length=2_000)
     steps: tuple[AgentPlanStep, ...] = ()
@@ -116,6 +117,7 @@ class VideoToolResult(VideoAgentContract):
     artifact_refs: tuple[str, ...] = ()
     pending_operation_job_ids: tuple[str, ...] = ()
     requires_confirmation: bool = False
+    model_observation: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_pending_operations(self) -> VideoToolResult:

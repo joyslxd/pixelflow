@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import subprocess
@@ -15,6 +16,18 @@ from urllib.request import Request, urlopen
 
 import jwt
 import pytest
+
+
+_LIMIT_PROFILE = {
+    "deadline_seconds": 180,
+    "max_model_steps": 12,
+    "max_business_tools": 6,
+    "max_billable_batch_starts": 1,
+}
+_LIMITS = {"profile": "video_interactive_v1", **_LIMIT_PROFILE}
+_LIMITS_DIGEST = "sha256:" + hashlib.sha256(
+    json.dumps(_LIMITS, sort_keys=True, separators=(",", ":")).encode(),
+).hexdigest()
 
 
 def _free_port() -> int:
@@ -70,7 +83,7 @@ def _payload() -> dict[str, object]:
             "require_verified_model_profile": True,
             "policy_digest": "sha256:m2-http-budget",
         },
-        "limits": {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
+        "limits": {"digest": _LIMITS_DIGEST, **_LIMITS},
         "toolset": {"version": "agent-tools-v1", "manifest_digest": "sha256:m2-http-manifest"},
         "context": {
             "system_instruction": "执行 M2 HTTP 协议测试。",
@@ -171,6 +184,8 @@ def test_cancel_endpoint_is_authenticated_idempotent_and_replayable(tmp_path: Pa
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m2-sidecar-http",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m2-http-model",
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps({"video_interactive_v1": _LIMIT_PROFILE}),
             "DEEPSEEK_API_KEY": "test-only-not-used",
             "DEEPSEEK_BASE_URL": "https://example.invalid",
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
@@ -290,6 +305,8 @@ def test_kill_restart_closes_unactivated_run_with_auditable_event(tmp_path: Path
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m2-sidecar-restart",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m2-http-model",
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps({"video_interactive_v1": _LIMIT_PROFILE}),
             "DEEPSEEK_API_KEY": "test-only-not-used",
             "DEEPSEEK_BASE_URL": "https://example.invalid",
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),

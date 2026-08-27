@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +27,7 @@ class SidecarSettings:
     model_profile_digest: str
     model_id: str
     request_timeout_seconds: float
+    run_limit_profiles_json: str = ""
 
     @classmethod
     def from_env(cls) -> "SidecarSettings":
@@ -61,6 +64,7 @@ class SidecarSettings:
             request_timeout_seconds=float(
                 os.environ.get("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "90"),
             ),
+            run_limit_profiles_json=os.environ.get("PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES", "").strip(),
         )
 
     def readiness_error(self) -> str | None:
@@ -84,7 +88,50 @@ class SidecarSettings:
             return "model_endpoint_unconfigured"
         if not self.model_profile_name or not self.model_id or not self.model_profile_digest.startswith("sha256:"):
             return "model_profile_unconfigured"
+        if not self.run_limit_profiles_json:
+            return "run_limit_profiles_unconfigured"
+        try:
+            self._limit_profiles()
+        except ValueError:
+            return "run_limit_profiles_invalid"
         return None
+
+    def validate_run_limits(self, limits: object) -> None:
+        """校验 Gateway 冻结的档案、数值和 digest 与本地配置完全一致。"""
+
+        profile_name = getattr(limits, "profile", None)
+        profile = self._limit_profiles().get(profile_name)
+        if profile is None:
+            raise ValueError("Run 限制档案未获 Sidecar 授权")
+        expected = {
+            "profile": profile_name,
+            "max_model_steps": getattr(limits, "max_model_steps", None),
+            "max_business_tools": getattr(limits, "max_business_tools", None),
+            "max_billable_batch_starts": getattr(limits, "max_billable_batch_starts", None),
+            "deadline_seconds": getattr(limits, "deadline_seconds", None),
+        }
+        if profile != expected:
+            raise ValueError("Run 限制数值与 Sidecar 档案不一致")
+        encoded = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+        if getattr(limits, "digest", None) != "sha256:" + hashlib.sha256(encoded).hexdigest():
+            raise ValueError("Run 限制摘要与 Sidecar 档案不一致")
+
+    def _limit_profiles(self) -> dict[str, dict[str, int | str]]:
+        try:
+            value = json.loads(self.run_limit_profiles_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("Run 限制档案不是 JSON") from error
+        if not isinstance(value, dict):
+            raise ValueError("Run 限制档案不是对象")
+        required = {"deadline_seconds", "max_model_steps", "max_business_tools", "max_billable_batch_starts"}
+        profiles: dict[str, dict[str, int | str]] = {}
+        for name, raw in value.items():
+            if not isinstance(name, str) or not isinstance(raw, dict) or set(raw) != required:
+                raise ValueError("Run 限制档案字段无效")
+            if any(isinstance(item, bool) or not isinstance(item, int) for item in raw.values()):
+                raise ValueError("Run 限制档案必须为整数")
+            profiles[name] = {"profile": name, **raw}
+        return profiles
 
     @property
     def agent_home_raw_is_configured(self) -> bool:

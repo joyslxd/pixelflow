@@ -10,6 +10,7 @@ from pixelflow.agent_tools.repository import HarnessRecoveryRecord, SQLAgentTool
 from pixelflow.tasks import PixelFlowTaskStore
 
 from .contracts import HarnessRunRequest
+from .limits import LimitProfileResolver
 from .port import AgentHarnessPort
 
 
@@ -70,6 +71,7 @@ class HarnessRecoveryService:
             return self._result(
                 await self._bindings.mark_recovery_manual_review(original_run_id),
             )
+        limits = LimitProfileResolver().resolve("run_recovery")
         request = HarnessRunRequest(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -94,9 +96,12 @@ class HarnessRecoveryService:
             context_budget_digest=_digest(
                 {"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32},
             ),
-            run_limits_digest=_digest(
-                {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
-            ),
+            run_limits_digest=limits.digest,
+            limit_profile=limits.profile,
+            max_model_steps=limits.max_model_steps,
+            max_business_tools=limits.max_business_tools,
+            max_billable_batch_starts=limits.max_billable_batch_starts,
+            deadline_seconds=limits.deadline_seconds,
             max_output_tokens=192,
         )
         run = await bridge.create_and_bind(request)

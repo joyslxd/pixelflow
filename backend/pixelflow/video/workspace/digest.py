@@ -355,6 +355,8 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "script_version": script.get("version"),
             "script_chars": _safe_len(script_content),
             "script_preview": script_content[:1_200] or None,
+            # 前端脚本编辑走同一 Workspace Command；长度与 Tool 输入合同一致。
+            "script_editor_content": script_content[:8_000] or None,
             "script_pipeline_stages": pipeline_stages,
             "script_entry_path": str(payload.get("script_entry_path") or "") or None,
             "script_plan_confirmed": bool(payload.get("script_plan_confirmed")),
@@ -410,6 +412,7 @@ def build_plan_digest(plan: AgentPlan | None) -> dict[str, Any] | None:
         return None
     return {
         "plan_id": plan.plan_id,
+        "revision": plan.revision,
         "status": plan.status.value,
         "goal": (plan.public_goal or "")[:800] or None,
         "steps": [

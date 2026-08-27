@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -30,7 +31,7 @@ from pixelflow.agent_harness.recovery import HarnessRecoveryService
 from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
 from pixelflow.platform.persistence import Base
 from pixelflow.tasks import PixelFlowConversationRecord, SQLPixelFlowTaskStore
-from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.contracts import AgentPlan, AgentPlanStatus, VideoWorkspace
 from pixelflow.video.workspace import SQLVideoAgentRepository
 from tests.test_m0_real_gateway_sidecar_tool import _service_jwt
 
@@ -44,6 +45,7 @@ def _free_port() -> int:
 
 
 @pytest.mark.m0_real
+@pytest.mark.m4_real
 def test_real_authenticated_public_harness_turn_and_sse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -64,6 +66,16 @@ def test_real_authenticated_public_harness_turn_and_sse(
         pytest.skip("真实 Borgrise Authorization 未携带可用用户主体")
     if not isinstance(owner, str) or not owner.strip():
         pytest.skip("真实 Borgrise Authorization 未携带可用用户主体")
+    limit_profiles = {
+        "video_interactive_v1": {"deadline_seconds": 180, "max_model_steps": 12, "max_business_tools": 6, "max_billable_batch_starts": 1},
+        "operation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
+        "confirmation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
+        "run_recovery_v1": {"deadline_seconds": 90, "max_model_steps": 6, "max_business_tools": 3, "max_billable_batch_starts": 0},
+    }
+    profile_digest = "sha256:" + hashlib.sha256(
+        json.dumps({"profile": "deepseek-v4-pro"}, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    monkeypatch.setenv("PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES", json.dumps(limit_profiles))
 
     async def prepare_gateway() -> tuple[object, SQLPixelFlowTaskStore, SQLAgentToolRepository, SQLVideoAgentRepository, SQLCompactionQueueRepository]:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'm0-public-turn.db'}")
@@ -87,13 +99,26 @@ def test_real_authenticated_public_harness_turn_and_sse(
                 conversation_id="m0-public-conversation",
                 revision=1,
                 payload={
-                    "script": "白色陶瓷杯展示短视频脚本",
+                    "script": {"content": "白色陶瓷杯展示短视频脚本", "status": "已生成"},
                     "assets": [{"asset_id": "cup-reference"}],
                     "scenes": [{"scene_id": "scene-1"}, {"scene_id": "scene-2"}],
                 },
                 created_at=now,
                 updated_at=now,
             ),
+        )
+        await video_repository.save_plan(
+            owner,
+            AgentPlan(
+                plan_id="m4-public-plan",
+                workspace_id="m0-public-workspace",
+                conversation_id="m0-public-conversation",
+                status=AgentPlanStatus.RUNNING,
+                public_goal="完成陶瓷杯视频方案",
+                created_at=now,
+                updated_at=now,
+            ),
+            [],
         )
         return (
             engine,
@@ -135,7 +160,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
     skill_file.parent.mkdir(parents=True)
     skill_file.write_text(
         "---\nname: workspace-inspection\ndescription: 用户询问当前视频工作区的脚本、素材或分镜时使用。\nuser-invocable: false\n---\n"
-        "用户询问当前工作区事实时，必须先调用 inspect_video_workspace 获取证据，再基于 Tool 返回的安全摘要回答。",
+        "用户要求检查视频方案时，必须依次调用 inspect_video_workspace、inspect_script、inspect_video_plan 和 inspect_scene 获取证据，再基于 Tool 返回的安全摘要回答。",
         encoding="utf-8",
     )
     sidecar_root = Path(__file__).parents[2] / "services/pixelflow-agent-harness"
@@ -153,8 +178,10 @@ def test_real_authenticated_public_harness_turn_and_sse(
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-public-sidecar",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": profile_digest,
             "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(limit_profiles),
             "PYTHONPATH": str(sidecar_root / "src"),
         },
     )
@@ -211,7 +238,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
                     "client_input_id": "01447dc1-0dfb-4e70-98fa-cba6e48cfb7d",
                     "workspace_id": "m0-public-workspace",
                     "expected_workspace_revision": 1,
-                    "content": "请读取当前视频工作区，告诉我脚本、素材和分镜数量。",
+                    "content": "请检查当前视频方案：读取工作区、脚本、计划和 scene-1，并给出简短结论。",
                     "max_output_tokens": 192,
                 },
             )
@@ -318,6 +345,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
         assert {event["type"] for event in events} >= {
             "run.state_changed",
             "agent.tool.completed",
+            "agent.thinking.delta",
             "agent.response.completed",
         }
         assert snapshot.json()["status"] == "completed"
@@ -338,6 +366,15 @@ def test_real_authenticated_public_harness_turn_and_sse(
                     ),
                 )
                 assert tool_call is not None
+                tool_names = {
+                    row.tool_name
+                    for row in (await session.scalars(
+                        select(PixelFlowAgentHarnessToolCallRow).where(
+                            PixelFlowAgentHarnessToolCallRow.run_id == run["run_id"],
+                        ),
+                    )).all()
+                }
+                assert {"inspect_video_workspace", "inspect_script", "inspect_video_plan", "inspect_scene"}.issubset(tool_names)
 
         asyncio.run(assert_persistence())
     finally:

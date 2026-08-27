@@ -19,6 +19,16 @@ from .scene import (
     ReplaceSceneAssetInput,
     ReplaceSceneAssetTool,
 )
+from .script_plan import (
+    InspectScriptInput,
+    InspectScriptTool,
+    InspectVideoPlanInput,
+    InspectVideoPlanTool,
+    UpdateScriptInput,
+    UpdateScriptTool,
+    UpdateVideoPlanInput,
+    UpdateVideoPlanTool,
+)
 
 __all__ = [
     "VideoTool",
@@ -30,11 +40,19 @@ __all__ = [
     "VideoToolRegistry",
     "InspectVideoWorkspaceInput",
     "InspectVideoWorkspaceTool",
+    "InspectScriptInput",
+    "InspectScriptTool",
+    "InspectVideoPlanInput",
+    "InspectVideoPlanTool",
     "InspectSceneTool",
     "PatchSceneInput",
     "PatchSceneTool",
     "ReplaceSceneAssetInput",
     "ReplaceSceneAssetTool",
+    "UpdateScriptInput",
+    "UpdateScriptTool",
+    "UpdateVideoPlanInput",
+    "UpdateVideoPlanTool",
     "VideoToolSpec",
     "VideoToolValidationError",
 ]

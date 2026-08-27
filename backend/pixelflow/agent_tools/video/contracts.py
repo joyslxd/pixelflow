@@ -58,6 +58,8 @@ class VideoToolSpec:
     idempotency_mode: VideoToolIdempotencyMode
     recovery_mode: VideoToolRecoveryMode
     workspace_mutations: tuple[str, ...]
+    # 仅这些字段可以进入 model_observation；Broker 还会施加总字节预算。
+    model_observation_keys: tuple[str, ...] = ()
 
     @property
     def input_schema(self) -> dict[str, object]:

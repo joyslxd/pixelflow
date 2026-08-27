@@ -493,6 +493,8 @@ class MemoryVideoAgentRepository:
         user_id: str,
         plan: AgentPlan,
         steps: list[AgentPlanStep],
+        *,
+        expected_revision: int | None = None,
     ) -> AgentPlan:
         owner = _owner(user_id)
         if await self.get_workspace(owner, plan.workspace_id) is None:
@@ -501,7 +503,31 @@ class MemoryVideoAgentRepository:
         if existing_owner is not None:
             if existing_owner != owner:
                 raise AgentRuntimeRecordConflictError("VideoAgent plan 已属于其他用户")
-            return _clone(self._plan_by_owner[(owner, plan.plan_id)])
+            async with self._transition_lock:
+                existing = self._plan_by_owner[(owner, plan.plan_id)]
+                if expected_revision is None or existing.revision != expected_revision:
+                    raise AgentRuntimeRecordConflictError("VideoAgent plan revision 已变化")
+                if (
+                    existing.workspace_id != plan.workspace_id
+                    or existing.conversation_id != plan.conversation_id
+                ):
+                    raise AgentRuntimeRecordConflictError("VideoAgent plan 不允许变更归属")
+                stored = plan.model_copy(
+                    update={
+                        "revision": existing.revision + 1,
+                        "steps": tuple(steps),
+                        "created_at": existing.created_at,
+                        "updated_at": _stored_time(plan.updated_at),
+                    }
+                )
+                self._plan_by_owner[(owner, stored.plan_id)] = _clone(stored)
+                for key in [key for key in self._steps_by_owner if key[:2] == (owner, stored.plan_id)]:
+                    del self._steps_by_owner[key]
+                for step in steps:
+                    self._steps_by_owner[(owner, stored.plan_id, step.step_id)] = _clone(step)
+                return _clone(stored)
+        if expected_revision is not None:
+            raise AgentRuntimeRecordConflictError("新建 VideoAgent plan 不接受 expected_revision")
         if not steps:
             if plan.status not in {
                 AgentPlanStatus.WAITING_FOR_INPUT,
@@ -544,8 +570,21 @@ class MemoryVideoAgentRepository:
         _assert_plan_transition(plan.status, status)
         steps = await self.list_plan_steps(owner, plan_id)
         updated = plan.model_copy(
-            update={"status": status, "steps": tuple(steps), "updated_at": now}
+            update={"status": status, "revision": plan.revision + 1, "steps": tuple(steps), "updated_at": now}
         )
+        self._plan_by_owner[key] = _clone(updated)
+        return _clone(updated)
+
+    async def update_plan_public_goal(self, user_id: str, plan_id: str, public_goal: str | None, *, expected_revision: int, now: datetime) -> AgentPlan:
+        owner = _owner(user_id)
+        key = (owner, plan_id)
+        plan = self._plan_by_owner.get(key)
+        if plan is None:
+            raise AgentRuntimeRecordConflictError("VideoAgent plan 不存在或不属于当前用户")
+        if plan.revision != expected_revision:
+            raise AgentRuntimeRecordConflictError("VideoAgent plan revision 已变化")
+        steps = await self.list_plan_steps(owner, plan_id)
+        updated = plan.model_copy(update={"public_goal": public_goal, "revision": plan.revision + 1, "steps": tuple(steps), "updated_at": now})
         self._plan_by_owner[key] = _clone(updated)
         return _clone(updated)
 

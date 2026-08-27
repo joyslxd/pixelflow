@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -132,3 +134,28 @@ def test_sidecar_compose_gateway_endpoint_is_limited_to_fixed_service_name(monke
     assert settings._tool_broker_url_is_safe
     monkeypatch.setenv("PIXELFLOW_TOOL_BROKER_BASE_URL", "http://untrusted-host:8001")
     assert not SidecarSettings.from_env()._tool_broker_url_is_safe
+
+
+def test_sidecar_rejects_limit_profile_or_digest_drift(monkeypatch) -> None:
+    """Sidecar 只能接受与本地配置逐字段、逐摘要一致的 Gateway Run limits。"""
+
+    from pixelflow_harness_sidecar.config import SidecarSettings
+    from pixelflow_harness_sidecar.contracts import RunLimits
+
+    profiles = {
+        "video_interactive_v1": {
+            "deadline_seconds": 180,
+            "max_model_steps": 12,
+            "max_business_tools": 6,
+            "max_billable_batch_starts": 1,
+        }
+    }
+    monkeypatch.setenv("PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES", json.dumps(profiles))
+    expected = {"profile": "video_interactive_v1", **profiles["video_interactive_v1"]}
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(expected, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    settings = SidecarSettings.from_env()
+    settings.validate_run_limits(RunLimits(digest=digest, **expected))
+    with pytest.raises(ValueError, match="限制"):
+        settings.validate_run_limits(RunLimits(digest=digest, **{**expected, "max_business_tools": 5}))

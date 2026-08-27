@@ -73,7 +73,10 @@ class _BlockingEngine:
 
         return self._snapshot
 
-    async def execute(self, *_args):
+    def validate_request(self, _request) -> None:
+        """测试替身只模拟执行阻塞；真实限制校验由 DeepSeek Engine 覆盖。"""
+
+    async def execute(self, *_args, **_kwargs):
         """阻塞到测试显式释放，避免以 sleep 猜测执行时序。"""
 
         self.started.set()

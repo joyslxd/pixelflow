@@ -22,7 +22,7 @@ from pixelflow.agent_tools.contracts import ToolCallRequest
 from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import RunBinding
 from pixelflow.platform.persistence import Base
-from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.contracts import AgentPlan, AgentPlanStatus, VideoWorkspace
 from pixelflow.video.workspace import SQLVideoAgentRepository
 
 
@@ -187,6 +187,116 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
     assert current is not None
     assert current.revision == 2
     assert current.payload["scenes"][0]["title"] == "新镜头"
+
+
+@pytest.mark.asyncio
+async def test_script_and_plan_tools_use_distinct_workspace_and_plan_revisions(tmp_path) -> None:
+    """四个非计费 Tool 只公开白名单 observation，Plan 不会误写 Workspace。"""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-tools-script-plan.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    video_repository = SQLVideoAgentRepository(session_factory)
+    repository = SQLAgentToolRepository(session_factory)
+    now = datetime.now(UTC)
+    workspace = await video_repository.create_workspace(
+        "script-plan-user",
+        VideoWorkspace(
+            workspace_id="script-plan-workspace",
+            conversation_id="script-plan-conversation",
+            revision=1,
+            payload={"script": {"content": "原始脚本", "status": "已生成"}},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    plan = await video_repository.save_plan(
+        "script-plan-user",
+        AgentPlan(
+            plan_id="script-plan-id",
+            workspace_id=workspace.workspace_id,
+            conversation_id=workspace.conversation_id,
+            status=AgentPlanStatus.RUNNING,
+            public_goal="初始目标",
+            created_at=now,
+            updated_at=now,
+        ),
+        [],
+    )
+
+    async def call_tool(
+        *,
+        name: str,
+        arguments: dict[str, object],
+        run_suffix: str,
+        workspace_revision: int,
+    ):
+        binding = RunBinding(
+            run_id=f"hrun_script_plan_{run_suffix}",
+            session_id=f"pfh_script_plan_{run_suffix}",
+            user_id="script-plan-user",
+            conversation_id=workspace.conversation_id,
+            workspace_id=workspace.workspace_id,
+            workspace_revision=workspace_revision,
+            context_digest="sha256:" + run_suffix[0] * 64,
+            toolset_version="agent-tools-v1",
+            tool_manifest_digest=manifest().digest,
+            request_digest="sha256:" + "9" * 64,
+        )
+        await repository.register_run_binding(binding)
+        request = ToolCallRequest(
+            protocol_version="v1",
+            run_id=binding.run_id,
+            session_id=binding.session_id,
+            tool_call_id=f"script-plan-call-{run_suffix}",
+            tool_name=name,
+            arguments=arguments,
+            expected_workspace_revision=workspace_revision,
+            context_digest=binding.context_digest,
+            toolset_version=binding.toolset_version,
+        )
+        broker = AgentToolBroker(repository, video_repository)
+        return await broker.call(
+            request,
+            idempotency_key=repository.tool_call_key(
+                run_id=request.run_id,
+                tool_call_id=request.tool_call_id,
+            ),
+        )
+
+    try:
+        inspected_script = await call_tool(
+            name="inspect_script", arguments={}, run_suffix="a", workspace_revision=1,
+        )
+        updated_script = await call_tool(
+            name="update_script", arguments={"content": "修订脚本"}, run_suffix="b", workspace_revision=1,
+        )
+        inspected_plan = await call_tool(
+            name="inspect_video_plan", arguments={"plan_id": plan.plan_id}, run_suffix="c", workspace_revision=2,
+        )
+        updated_plan = await call_tool(
+            name="update_video_plan",
+            arguments={
+                "plan_id": plan.plan_id,
+                "expected_plan_revision": plan.revision,
+                "public_goal": "修订目标",
+            },
+            run_suffix="d",
+            workspace_revision=2,
+        )
+        current_workspace = await video_repository.get_workspace("script-plan-user", workspace.workspace_id)
+        current_plan = await video_repository.get_plan("script-plan-user", plan.plan_id)
+    finally:
+        await engine.dispose()
+
+    assert inspected_script.model_observation["script_preview"] == "原始脚本"
+    assert updated_script.model_observation["workspace_revision"] == 2
+    assert inspected_plan.model_observation["plan_revision"] == 1
+    assert updated_plan.model_observation["plan_revision"] == 2
+    assert current_workspace is not None and current_workspace.revision == 2
+    assert current_plan is not None and current_plan.revision == 2
+    assert current_plan.public_goal == "修订目标"
 
 
 @pytest.mark.asyncio

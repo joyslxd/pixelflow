@@ -100,7 +100,29 @@ async def ensure_schema(engine: AsyncEngine) -> None:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await _migrate_video_plan_revision_schema(connection)
         await _migrate_long_term_memory_write_schema(connection)
+
+
+async def _migrate_video_plan_revision_schema(connection) -> None:
+    """为已存在的 Plan 表补 revision，旧记录统一从第一版开始。"""
+
+    table_name = "pixelflow_video_agent_plans"
+    if connection.dialect.name == "sqlite":
+        rows = await connection.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        columns = {str(row[1]) for row in rows.all()}
+        if columns and "revision" not in columns:
+            await connection.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN revision INTEGER NOT NULL DEFAULT 1"
+            )
+        return
+    if connection.dialect.name == "postgresql":
+        await connection.execute(
+            text(
+                "ALTER TABLE pixelflow_video_agent_plans "
+                "ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1"
+            )
+        )
 
 
 async def _migrate_long_term_memory_write_schema(connection) -> None:

@@ -34,6 +34,12 @@ export type HarnessInterruptResultV1 = {
   workspace: NonNullable<AgentSnapshotV1["workspace"]>;
 };
 
+export type VideoPlanPublicGoalUpdateV1 = {
+  plan_id: string;
+  revision: number;
+  public_goal: string | null;
+};
+
 export function startHarnessTurn(
   conversationId: string,
   body: TurnStartV1,
@@ -77,6 +83,23 @@ export function applyHarnessWorkspaceCommand(
     `/conversations/${encodeURIComponent(conversationId)}/workspaces/commands`,
     {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function updateVideoPlanPublicGoal(
+  conversationId: string,
+  planId: string,
+  body: { expected_revision: number; public_goal: string | null },
+): Promise<VideoPlanPublicGoalUpdateV1> {
+  /** Plan 独立于 Workspace 保存 revision；冲突由 409/current_revision 明确返回。 */
+
+  return agentRequest<VideoPlanPublicGoalUpdateV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}`,
+    {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     },

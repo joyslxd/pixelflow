@@ -18,6 +18,27 @@ harness:
   sidecar_base_url: "" # 用途：配置 Linux Sidecar HTTPS 地址；影响：留空时 Gateway 拒绝接收新 Harness Run。
   gateway_instance_id: "pixelflow-dev" # 用途：标识 Gateway 服务实例；影响：写入服务 JWT 审计 claim。
   request_timeout_seconds: 15 # 用途：限制 Gateway 调用 Sidecar 的等待秒数；影响：超时后关闭新 Run 准入。
+  run_limit_profiles:
+    video_interactive_v1:
+      deadline_seconds: 180 # 用途：限制用户视频互动 Run 的模型循环秒数；影响：到期安全收口，不等待 Provider 任务。
+      max_model_steps: 12 # 用途：限制用户视频互动的模型决策轮次；影响：达到上限后停止继续调用 Tool。
+      max_business_tools: 6 # 用途：限制用户视频互动的业务 Tool 数；影响：读取、编辑与规划调用共同计数。
+      max_billable_batch_starts: 1 # 用途：限制本 Run 可启动计费批次；影响：M5 计费 Tool 最多一次。
+    operation_resume_v1:
+      deadline_seconds: 150 # 用途：限制 Operation 完成后的恢复 Run 秒数；影响：只允许短决策，不等待外部轮询。
+      max_model_steps: 10 # 用途：限制 Operation 恢复的模型轮次；影响：防止恢复 Run 空转。
+      max_business_tools: 5 # 用途：限制 Operation 恢复的 Tool 数；影响：为审片和下一步决策保留预算。
+      max_billable_batch_starts: 1 # 用途：限制 Operation 恢复可启动的下一计费批次；影响：避免连续费用循环。
+    confirmation_resume_v1:
+      deadline_seconds: 150 # 用途：限制用户确认后的恢复 Run 秒数；影响：确认不会延长模型循环。
+      max_model_steps: 10 # 用途：限制确认恢复的模型轮次；影响：达到上限后安全收口。
+      max_business_tools: 5 # 用途：限制确认恢复的业务 Tool 数；影响：防止确认后无限编排。
+      max_billable_batch_starts: 1 # 用途：限制确认恢复可启动的计费批次；影响：一次确认最多启动一批。
+    run_recovery_v1:
+      deadline_seconds: 90 # 用途：限制崩溃恢复 Run 秒数；影响：恢复只核对权威状态。
+      max_model_steps: 6 # 用途：限制崩溃恢复的模型轮次；影响：避免恢复时扩张工作流。
+      max_business_tools: 3 # 用途：限制崩溃恢复的 Tool 数；影响：仅允许必要的安全检查。
+      max_billable_batch_starts: 0 # 用途：禁止崩溃恢复自动计费；影响：必须由新 Turn 或 M5 触发。
 
 pixelflow:
   mysql_url: "" # 用途：可选兼容 MySQL 任务库 URL；影响：留空时使用 database 配置。

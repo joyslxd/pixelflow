@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 
-import { VideoWorkspaceSnapshotPanel } from "@/features/agent-runtime/VideoWorkspaceSnapshotPanel";
+import { VideoWorkspaceProjector } from "@/features/video/VideoWorkspaceProjector";
 import { useAgentConversation } from "@/features/agent-runtime/useAgentConversation";
 import { projectVisible } from "@/features/agent-runtime/state";
 import type { InterruptResponseV1 } from "@/api/contracts";
@@ -43,6 +43,8 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     cancelQuotaInterrupt,
     refreshActiveRun,
     cancelActiveRun,
+    updatePlanPublicGoal,
+    updateScript,
   } = useAgentConversation(conversationId);
   const snapshot = runtime.snapshot;
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
@@ -133,10 +135,12 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           ) : null}
           <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
           {runtime.videoWorkspace ? (
-            <VideoWorkspaceSnapshotPanel
+            <VideoWorkspaceProjector
               summary={runtime.videoWorkspace.summary}
               revision={runtime.videoWorkspace.revision}
               onCancelQuotaInterrupt={() => void cancelQuotaInterruptedPlan()}
+              onUpdateScript={updateScript}
+              onUpdatePlanPublicGoal={updatePlanPublicGoal}
             />
           ) : (
             <p className="mt-2 text-xs text-ink-soft">

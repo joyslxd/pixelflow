@@ -78,6 +78,7 @@ _ENV_KEY_MAP: dict[tuple[str, ...], str] = {
     ("harness", "sidecar_base_url"): "PIXELFLOW_HARNESS_SIDECAR_BASE_URL",
     ("harness", "gateway_instance_id"): "PIXELFLOW_GATEWAY_INSTANCE_ID",
     ("harness", "request_timeout_seconds"): "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS",
+    ("harness", "run_limit_profiles"): "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES",
     ("content_app", "base_url"): "BORGRISE_BASE_URL",
     ("content_app", "remote_verify_enabled"): "BORGRISE_REMOTE_VERIFY_ENABLED",
     ("content_app", "verify_timeout_seconds"): "BORGRISE_VERIFY_TIMEOUT_SECONDS",

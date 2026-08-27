@@ -21,13 +21,18 @@ class HarnessRunRequest(_StrictModel):
     workspace_id: str = Field(min_length=1, max_length=64)
     workspace_revision: int = Field(ge=1)
     trigger_id: str = Field(min_length=1, max_length=200)
-    trigger_type: Literal["user_turn", "run_recovery"] = "user_turn"
+    trigger_type: Literal["user_turn", "operation_resume", "confirmation_resume", "run_recovery"] = "user_turn"
     user_input: str = Field(min_length=1, max_length=32_000)
     system_instruction: str = Field(min_length=1, max_length=32_000)
     context_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     model_profile_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     context_budget_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     run_limits_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    limit_profile: str = Field(min_length=1, max_length=120)
+    max_model_steps: int = Field(ge=1, le=64)
+    max_business_tools: int = Field(ge=0, le=32)
+    max_billable_batch_starts: int = Field(ge=0, le=8)
+    deadline_seconds: int = Field(ge=1, le=3_600)
     model_profile_name: str = Field(default="deepseek-v4-pro", min_length=1, max_length=120)
     max_output_tokens: int = Field(default=256, ge=1, le=131_072)
     workspace_projection: dict[str, Any] = Field(default_factory=dict)
@@ -50,7 +55,7 @@ class HarnessRunEvent(_StrictModel):
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
     event_id: str = Field(pattern=r"^hevt_[a-f0-9]{32}$")
     sequence: int = Field(ge=1)
-    type: str = Field(pattern=r"^(run|tool|response)\.[a-z_]+$")
+    type: str = Field(pattern=r"^(run|tool|response|public_summary)\.[a-z_]+$")
     occurred_at: str = Field(min_length=1, max_length=64)
     payload: dict[str, Any]
 

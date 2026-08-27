@@ -77,8 +77,13 @@ async def test_gateway_does_not_retry_unknown_sidecar_create_failure() -> None:
             system_instruction="执行受控测试。",
             context_digest=_digest("context"),
             model_profile_digest=_digest("model"),
-            context_budget_digest=_digest("budget"),
-            run_limits_digest=_digest("limits"),
+                context_budget_digest=_digest("budget"),
+                run_limits_digest=_digest("limits"),
+                limit_profile="video_interactive_v1",
+                max_model_steps=12,
+                max_business_tools=6,
+                max_billable_batch_starts=1,
+                deadline_seconds=180,
         )
         with pytest.raises(GatewayHarnessSidecarError, match="拒绝 Run 创建"):
             await bridge.create_and_bind(request)
@@ -100,7 +105,12 @@ def test_harness_run_request_rejects_unknown_or_invalid_digest() -> None:
         "context_digest": _digest("context"),
         "model_profile_digest": _digest("model"),
         "context_budget_digest": _digest("budget"),
-        "run_limits_digest": _digest("limits"),
+            "run_limits_digest": _digest("limits"),
+            "limit_profile": "video_interactive_v1",
+            "max_model_steps": 12,
+            "max_business_tools": 6,
+            "max_billable_batch_starts": 1,
+            "deadline_seconds": 180,
     }
 
     request = HarnessRunRequest.model_validate(payload)

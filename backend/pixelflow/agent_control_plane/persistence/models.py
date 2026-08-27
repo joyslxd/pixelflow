@@ -631,12 +631,14 @@ class PixelFlowVideoAgentPlanRow(Base):
     workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
     conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     public_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False)
 
     __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_pf_video_agent_plans_revision"),
         Index(
             "ix_pf_video_agent_plans_owner_workspace",
             "user_id",

@@ -10,8 +10,9 @@ from fastapi import FastAPI, Request
 
 from app.gateway.content_app_auth import ContentAppUser
 from app.gateway.routers import pixelflow_conversations
+from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRecordConflictError
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
-from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.contracts import AgentPlan, AgentPlanStatus, VideoWorkspace
 
 
 class _WorkspaceRepository:
@@ -20,11 +21,40 @@ class _WorkspaceRepository:
     def __init__(self, workspace: VideoWorkspace) -> None:
         self.workspace = workspace
         self.cancel_calls = 0
+        self.plan = AgentPlan(
+            plan_id="plan-1",
+            workspace_id=workspace.workspace_id,
+            conversation_id=workspace.conversation_id,
+            revision=2,
+            status=AgentPlanStatus.RUNNING,
+            public_goal="初始目标",
+        )
 
     async def get_workspace(self, user_id: str, workspace_id: str) -> VideoWorkspace | None:
         if user_id != "workspace-owner" or workspace_id != self.workspace.workspace_id:
             return None
         return self.workspace
+
+    async def get_plan(self, user_id: str, plan_id: str) -> AgentPlan | None:
+        if user_id != "workspace-owner" or plan_id != self.plan.plan_id:
+            return None
+        return self.plan
+
+    async def update_plan_public_goal(
+        self,
+        user_id: str,
+        plan_id: str,
+        public_goal: str | None,
+        *,
+        expected_revision: int,
+        now,
+    ) -> AgentPlan:
+        if user_id != "workspace-owner" or plan_id != self.plan.plan_id or self.plan.revision != expected_revision:
+            raise AgentRuntimeRecordConflictError("plan revision conflict")
+        self.plan = self.plan.model_copy(
+            update={"public_goal": public_goal, "revision": self.plan.revision + 1, "updated_at": now}
+        )
+        return self.plan
 
     async def apply_workspace_patch(
         self,
@@ -165,6 +195,32 @@ async def test_workspace_command_requires_conversation_owner_revision_and_safe_p
         )
         assert stale.status_code == 409
         assert stale.json()["detail"]["code"] == "harness_workspace_revision_conflict"
+
+
+@pytest.mark.asyncio
+async def test_plan_public_goal_uses_independent_revision_and_returns_current_on_conflict() -> None:
+    """Plan API 不借用 Workspace revision，冲突响应必须可供前端明确提示。"""
+
+    app, _repository = await _app(
+        VideoWorkspace(
+            workspace_id="workspace-1",
+            conversation_id="conversation-1",
+            revision=7,
+            payload={},
+        )
+    )
+    transport = httpx.ASGITransport(app=app)
+    path = "/agent/conversations/conversation-1/plans/plan-1"
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.patch(path, json={"expected_revision": 2, "public_goal": "新目标"})
+        assert first.status_code == 200, first.text
+        assert first.json() == {"plan_id": "plan-1", "revision": 3, "public_goal": "新目标"}
+        stale = await client.patch(path, json={"expected_revision": 2, "public_goal": "过期目标"})
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["detail"] == {
+            "code": "video_plan_revision_conflict",
+            "current_revision": 3,
+        }
 
 
 @pytest.mark.asyncio

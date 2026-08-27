@@ -10,6 +10,7 @@ export class AgentApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    readonly currentRevision: number | null = null,
   ) {
     super(`PixelFlow 请求失败：${code}`);
     this.name = "AgentApiError";
@@ -40,6 +41,7 @@ export async function agentRequest<T>(path: string, init: RequestInit = {}): Pro
   });
   if (!response.ok) {
     let code = `http_${response.status}`;
+    let currentRevision: number | null = null;
     try {
       const body: unknown = await response.json();
       if (typeof body === "object" && body !== null && "detail" in body) {
@@ -47,12 +49,16 @@ export async function agentRequest<T>(path: string, init: RequestInit = {}): Pro
         if (typeof detail === "object" && detail !== null && "code" in detail) {
           const candidate = (detail as { code?: unknown }).code;
           if (typeof candidate === "string" && /^[a-z0-9_]{1,120}$/u.test(candidate)) code = candidate;
+          const revision = (detail as { current_revision?: unknown }).current_revision;
+          if (typeof revision === "number" && Number.isInteger(revision) && revision >= 1) {
+            currentRevision = revision;
+          }
         }
       }
     } catch {
       // 响应正文不是可靠合同；保留 HTTP 派生错误码即可。
     }
-    throw new AgentApiError(response.status, code);
+    throw new AgentApiError(response.status, code, currentRevision);
   }
   return response.json() as Promise<T>;
 }

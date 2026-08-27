@@ -15,6 +15,9 @@ from .repository import (
     ToolCallClaimState,
 )
 
+_OBSERVATION_MAX_BYTES = 8_192
+_OBSERVATION_FORBIDDEN = ("authorization", "credential", "secret", "token", "password", "api_key", "provider")
+
 
 class AgentToolBroker:
     """按 Run binding 调用真实领域 Tool；不信任 Sidecar 传入 owner 或工作区。"""
@@ -28,7 +31,9 @@ class AgentToolBroker:
     ) -> None:
         self._repository = repository
         self._video_repository = video_repository
-        self._video_tools = video_tools or runtime_video_tool_registry()
+        self._video_tools = video_tools or runtime_video_tool_registry(
+            plan_repository=video_repository,
+        )
         self._executor = VideoToolExecutor(
             repository=video_repository,  # type: ignore[arg-type]
             registry=self._video_tools,
@@ -110,6 +115,10 @@ class AgentToolBroker:
             workspace_revision = (
                 current_workspace.revision if current_workspace is not None else workspace.revision
             )
+            observation = _safe_model_observation(
+                result.model_observation,
+                allowed_keys=tool.spec.model_observation_keys,
+            )
             response = ToolCallResponse(
                 protocol_version="v1",
                 status="completed",
@@ -119,7 +128,7 @@ class AgentToolBroker:
                     "tool_name": result.tool_name,
                     "workspace_revision": workspace_revision,
                     "artifact_refs": list(result.artifact_refs),
-                    "pending_operation_job_ids": list(result.pending_operation_job_ids),
+                    **observation,
                 },
             )
         except Exception:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
@@ -149,3 +158,27 @@ class AgentToolBroker:
 
 
 __all__ = ["AgentToolBindingConflictError", "AgentToolBroker"]
+
+
+def _safe_model_observation(
+    value: object,
+    *,
+    allowed_keys: tuple[str, ...],
+) -> dict[str, object]:
+    """强制 Tool Response DTO 的字段白名单预算，禁止模型看到敏感或无限结果。"""
+
+    import json
+
+    if not isinstance(value, dict):
+        raise ValueError("Tool observation 必须是对象")
+    unexpected = set(value) - set(allowed_keys)
+    if unexpected:
+        raise ValueError("Tool observation 包含未声明字段")
+    for key in value:
+        normalized = str(key).casefold()
+        if any(fragment in normalized for fragment in _OBSERVATION_FORBIDDEN):
+            raise ValueError("Tool observation 包含敏感字段")
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > _OBSERVATION_MAX_BYTES:
+        raise ValueError("Tool observation 超过预算")
+    return dict(value)

@@ -59,6 +59,8 @@ class VideoWorkspaceRepository(Protocol):
         user_id: str,
         plan: AgentPlan,
         steps: list[AgentPlanStep],
+        *,
+        expected_revision: int | None = None,
     ) -> AgentPlan: ...
 
     async def update_plan_status(
@@ -69,6 +71,8 @@ class VideoWorkspaceRepository(Protocol):
         *,
         now: datetime,
     ) -> AgentPlan: ...
+
+    async def update_plan_public_goal(self, user_id: str, plan_id: str, public_goal: str | None, *, expected_revision: int, now: datetime) -> AgentPlan: ...
 
     async def start_step(
         self,

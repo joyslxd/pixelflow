@@ -78,6 +78,15 @@ class DeepSeekHarnessEngine:
 
         return snapshot_skill_root(self._settings.agent_home / "skills")
 
+    def validate_request(self, request: HarnessRunRequest) -> None:
+        """在持久化 accepted Run 前验证模型与限制快照，拒绝漂移请求。"""
+
+        if request.model.profile_name != self._settings.model_profile_name:
+            raise ValueError("模型档案与 Sidecar 启动配置不匹配")
+        if request.model.profile_digest != self._settings.model_profile_digest:
+            raise ValueError("模型档案摘要与 Sidecar 启动配置不匹配")
+        self._settings.validate_run_limits(request.limits)
+
     async def execute(
         self,
         run_id: str,
@@ -87,10 +96,7 @@ class DeepSeekHarnessEngine:
     ) -> DeepSeekEngineResult:
         """在工作线程运行阻塞 SDK，模型调用只使用进程注入的测试或生产 Secret。"""
 
-        if request.model.profile_name != self._settings.model_profile_name:
-            raise ValueError("模型档案与 Sidecar 启动配置不匹配")
-        if request.model.profile_digest != self._settings.model_profile_digest:
-            raise ValueError("模型档案摘要与 Sidecar 启动配置不匹配")
+        self.validate_request(request)
         return await asyncio.to_thread(
             self._execute_blocking, run_id, request, skill_snapshot, on_public_event,
         )

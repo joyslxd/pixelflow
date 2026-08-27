@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -718,6 +718,8 @@ class SQLVideoAgentRepository:
         user_id: str,
         plan: AgentPlan,
         steps: list[AgentPlanStep],
+        *,
+        expected_revision: int | None = None,
     ) -> AgentPlan:
         owner = _owner(user_id)
         if not steps:
@@ -738,11 +740,56 @@ class SQLVideoAgentRepository:
                 workspace = await session.get(PixelFlowVideoAgentWorkspaceRow, plan.workspace_id)
                 if workspace is None or workspace.user_id != owner:
                     raise AgentRuntimeRecordConflictError("VideoAgent workspace 不存在或不属于当前用户")
-                existing = await session.get(PixelFlowVideoAgentPlanRow, plan.plan_id)
+                existing = (
+                    await session.scalars(
+                        select(PixelFlowVideoAgentPlanRow)
+                        .where(PixelFlowVideoAgentPlanRow.plan_id == plan.plan_id)
+                        .with_for_update()
+                    )
+                ).one_or_none()
                 if existing is not None:
                     if existing.user_id != owner:
                         raise AgentRuntimeRecordConflictError("VideoAgent plan 已属于其他用户")
-                    return _plan_from_row(existing)
+                    if expected_revision is None or existing.revision != expected_revision:
+                        raise AgentRuntimeRecordConflictError("VideoAgent plan revision 已变化")
+                    if (
+                        existing.workspace_id != plan.workspace_id
+                        or existing.conversation_id != plan.conversation_id
+                    ):
+                        raise AgentRuntimeRecordConflictError("VideoAgent plan 不允许变更归属")
+                    existing.status = plan.status.value
+                    existing.public_goal = plan.public_goal
+                    existing.revision += 1
+                    existing.updated_at = _stored_time(plan.updated_at)
+                    await session.execute(
+                        delete(PixelFlowVideoAgentPlanStepRow).where(
+                            PixelFlowVideoAgentPlanStepRow.user_id == owner,
+                            PixelFlowVideoAgentPlanStepRow.plan_id == plan.plan_id,
+                        )
+                    )
+                    for step in steps:
+                        session.add(
+                            PixelFlowVideoAgentPlanStepRow(
+                                plan_id=step.plan_id,
+                                step_id=step.step_id,
+                                sequence=step.sequence,
+                                user_id=owner,
+                                tool_name=step.tool_name,
+                                title=step.title,
+                                status=step.status.value,
+                                arguments_json=step.arguments,
+                                confirmation_required=step.confirmation_required,
+                                public_summary=step.public_summary,
+                                artifact_refs_json=list(step.artifact_refs),
+                                started_at=step.started_at,
+                                completed_at=step.completed_at,
+                            )
+                        )
+                    await session.flush()
+                    stored = _plan_from_row(existing).model_copy(update={"steps": tuple(steps)})
+                    return stored
+                if expected_revision is not None:
+                    raise AgentRuntimeRecordConflictError("新建 VideoAgent plan 不接受 expected_revision")
                 stored = plan.model_copy(
                     update={
                         "steps": tuple(steps),
@@ -756,6 +803,7 @@ class SQLVideoAgentRepository:
                         workspace_id=stored.workspace_id,
                         conversation_id=stored.conversation_id,
                         user_id=owner,
+                        revision=stored.revision,
                         status=stored.status.value,
                         public_goal=stored.public_goal,
                         created_at=stored.created_at,
@@ -808,8 +856,34 @@ class SQLVideoAgentRepository:
                     )
                 _assert_plan_transition(AgentPlanStatus(row.status), status)
                 row.status = status.value
+                row.revision += 1
                 row.updated_at = now
                 await session.flush()
+                plan = _plan_from_row(row)
+        steps = await self.list_plan_steps(owner, plan_id)
+        return plan.model_copy(update={"steps": tuple(steps)})
+
+    async def update_plan_public_goal(self, user_id: str, plan_id: str, public_goal: str | None, *, expected_revision: int, now: datetime) -> AgentPlan:
+        owner = _owner(user_id)
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(PixelFlowVideoAgentPlanRow)
+                    .where(
+                        PixelFlowVideoAgentPlanRow.plan_id == plan_id,
+                        PixelFlowVideoAgentPlanRow.user_id == owner,
+                        PixelFlowVideoAgentPlanRow.revision == expected_revision,
+                    )
+                    .values(
+                        public_goal=public_goal,
+                        revision=PixelFlowVideoAgentPlanRow.revision + 1,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise AgentRuntimeRecordConflictError("VideoAgent plan revision 已变化")
+                row = await session.get(PixelFlowVideoAgentPlanRow, plan_id)
+                assert row is not None
                 plan = _plan_from_row(row)
         steps = await self.list_plan_steps(owner, plan_id)
         return plan.model_copy(update={"steps": tuple(steps)})
@@ -1690,6 +1764,7 @@ def _plan_from_row(row: PixelFlowVideoAgentPlanRow) -> AgentPlan:
         plan_id=row.plan_id,
         workspace_id=row.workspace_id,
         conversation_id=row.conversation_id,
+        revision=row.revision,
         status=AgentPlanStatus(row.status),
         public_goal=row.public_goal,
         created_at=_restore_utc(row.created_at),

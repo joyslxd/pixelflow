@@ -33,7 +33,7 @@ class PublicAgentEvent(_StrictModel):
 
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
     sequence: int = Field(ge=1)
-    type: str = Field(pattern=r"^(run|tool|response)\.[a-z_]+$")
+    type: str = Field(pattern=r"^(run|tool|response|public_summary)\.[a-z_]+$")
     payload: dict[str, Any]
 
 
@@ -44,7 +44,7 @@ class _SidecarRunEventEnvelope(_StrictModel):
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
     event_id: str = Field(pattern=r"^hevt_[a-f0-9]{32}$")
     sequence: int = Field(ge=1)
-    type: str = Field(pattern=r"^(run|tool|response)\.[a-z_]+$")
+    type: str = Field(pattern=r"^(run|tool|response|public_summary)\.[a-z_]+$")
     occurred_at: str = Field(min_length=1, max_length=64)
     payload: dict[str, Any]
 
@@ -357,7 +357,14 @@ class AgentHarnessSidecarClient:
                 "require_verified_model_profile": True,
                 "policy_digest": request.context_budget_digest,
             },
-            "limits": {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
+            "limits": {
+                "profile": request.limit_profile,
+                "digest": request.run_limits_digest,
+                "max_model_steps": request.max_model_steps,
+                "max_business_tools": request.max_business_tools,
+                "max_billable_batch_starts": request.max_billable_batch_starts,
+                "deadline_seconds": request.deadline_seconds,
+            },
             "toolset": {"version": "agent-tools-v1", "manifest_digest": manifest_digest},
             "context": {
                 "system_instruction": request.system_instruction,

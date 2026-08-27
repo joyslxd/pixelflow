@@ -265,6 +265,10 @@ DeepSeek Harness 支持 background job，但 PixelFlow 不使用它承载图片�
 
 Sidecar 的 suspension policy 看到 `pending_operation` 后必须关闭本轮 Agent Run，禁止模型继续启动其他付费任务。M06 完成事件到达后，PixelFlow 使用 `completion_event_id` 创建新的恢复 Run，并注入最新 Workspace 结果。
 
+因此，视频生成的分钟级等待时间不计入 Sidecar `deadline_seconds`：`generate_video` Tool 只负责校验、创建或回读 M06 Operation、返回 `pending_operation`，通常应在秒级完成；M06 Worker 在 Sidecar 之外按 Provider 轮询策略持续查询。完成、失败、额度暂停或超时后，M06 以持久化事件创建新的短 Agent Run，让模型基于最新 Workspace 决定审片、修订、重生成或交付。
+
+“导演式多步决策”也不等于在一个 Run 中连续启动多个计费批次。单个 Run 可以使用多个只读、规划和编辑 Tool，并启动一个计费批次 Tool Call；视频批次可包含多个 `scene × variant` 子 Operation。批次终态后才由一个新的 `operation_resume` Run 决定是否发起下一批。这样既支持一键并发生成多个镜头，又避免模型循环无限叠加批次和费用。
+
 ### 6.3 确认权仍归 PixelFlow
 
 Tool Broker 在以下情况返回 `awaiting_confirmation`：
@@ -1061,9 +1065,11 @@ Content-Type: application/json
     "policy_digest": "sha256:..."
   },
   "limits": {
-    "max_model_steps": 8,
-    "max_business_tools": 3,
-    "deadline_seconds": 600
+    "profile": "video_interactive_v1",
+    "max_model_steps": 12,
+    "max_business_tools": 6,
+    "max_billable_batch_starts": 1,
+    "deadline_seconds": 180
   },
   "toolset": {
     "version": "agent-tools-v1",
@@ -1309,7 +1315,7 @@ Sidecar Event Bridge 必须在类型层区分 `public_summary.*` 与内部 reaso
 
 Tool Plugin 使用 DeepSeek Harness `defineTool()` 注册独立工具，参数和 canonical result 都必须是结构化 JSON。`execute()` 只调用 PixelFlow Tool Broker，遵守 abort signal 和 deadline；不得在 Sidecar 内重试未知是否成功的计费 Tool。
 
-`pending_operation`、`awaiting_confirmation` 和 `authorization_required` 返回后，suspension policy 必须阻止下一次模型请求并结束本 Run。此能力是 M0 技术验证的硬门禁；如果当前 DeepSeek Harness 版本无法可靠实现，不进入生产接线。
+`pending_operation`、`awaiting_confirmation` 和 `authorization_required` 返回后，suspension policy 必须阻止下一次模型请求并结束本 Run。该能力归属 M5，是计费 Provider 接线和生产灰度的硬门禁；M0 只验证最小只读 Tool loop，不把它作为 M0 完成条件。
 
 ### 11.1 DeepSeek Harness 原生 Skill 组装
 
@@ -1427,7 +1433,7 @@ Sidecar 每次 Run 必须接收已经验证的 `context_budget` 快照、`policy
 
 ### 12.2 初期关闭 Harness 自动压缩
 
-由于每个触发事件使用独立 Harness Session，P0 关闭 DeepSeek Harness 自动压缩，避免和 PixelFlow 压缩形成双重摘要。一次 Run 最多 8 个模型 step、3 个业务 Tool，达到上限直接收口为安全失败或询问用户。
+由于每个触发事件使用独立 Harness Session，P0 关闭 DeepSeek Harness 自动压缩，避免和 PixelFlow 压缩形成双重摘要。每次 Run 使用 Gateway 冻结的 `run_limit_profile`：视频互动默认最多 12 个模型 step、6 个业务 Tool、180 秒；Operation/确认恢复和安全恢复使用各自更小的 profile。达到上限直接收口为安全失败或询问用户，但已经由 M06 接管的 Provider 任务继续在 Sidecar 之外轮询。
 
 如果未来需要跨 Turn 共享 Harness Session，必须先实现与 `ContextBudgetPolicyProvider` 对齐的自定义压缩插件，并完成附件完整、恢复专用 Plan 快照不重复入模、失败 30 秒退避等现有合同测试；不能直接开启默认 compaction。
 
@@ -1559,14 +1565,62 @@ agent_harness:
   connect_timeout_seconds: 3
   # 用途：检测事件流无进展的秒级预算；触发诊断但不取消已经创建的 Provider Operation。
   event_idle_timeout_seconds: 30
-  # 用途：限制一次 Agent Run 的总秒数；到期终止模型循环，不伪造外部任务终态。
-  run_deadline_seconds: 600
-  # 用途：限制一次 Run 的模型 step；达到上限后安全收口，只影响新 Run。
-  max_model_steps: 8
-  # 用途：限制一次 Run 的业务 Tool 次数；达到上限后安全收口，只影响新 Run。
-  max_business_tools: 3
+  run_limit_profiles:
+    video_interactive_v1:
+      # 用途：限制用户输入后的视频导演/规划 Agent Run 总秒数；默认 180 秒，到期只终止模型循环，不等待或取消已创建的 Provider Operation；修改后需重启，只影响新 Run。
+      deadline_seconds: 180
+      # 用途：限制视频导演/规划 Run 的模型决策轮次；默认 12，允许 1-64，达到上限后安全收口；修改后需重启，只影响新 Run。
+      max_model_steps: 12
+      # 用途：限制视频导演/规划 Run 的业务 Tool 调用次数；默认 6，允许 0-32，包含读取、规划和编辑 Tool，不等于可启动的视频任务数；修改后需重启，只影响新 Run。
+      max_business_tools: 6
+      # 用途：限制单个视频导演/规划 Run 可启动的计费批次 Tool Call 数；固定为 1，一个视频批次可含多个受 M06 调度的镜头子 Operation；修改后需重启，只影响新 Run，超限必须等待批次终态后由新的恢复 Run 决策。
+      max_billable_batch_starts: 1
+    operation_resume_v1:
+      # 用途：限制外部图片/视频/剪辑任务完成后恢复的 Agent Run 总秒数；默认 150 秒，只允许读取结果、审片和决定下一动作，不等待下游轮询；修改后需重启，只影响新 Run。
+      deadline_seconds: 150
+      # 用途：限制 Operation 完成恢复 Run 的模型决策轮次；默认 10，允许 1-64，达到上限后安全收口；修改后需重启，只影响新 Run。
+      max_model_steps: 10
+      # 用途：限制 Operation 完成恢复 Run 的业务 Tool 次数；默认 5，允许 0-32，支持审片、更新 Workspace 和一次后续动作选择；修改后需重启，只影响新 Run。
+      max_business_tools: 5
+      # 用途：限制 Operation 完成恢复 Run 可启动的下一计费批次 Tool Call 数；固定为 1，避免完成事件触发连续批次计费循环；修改后需重启，只影响新 Run。
+      max_billable_batch_starts: 1
+    confirmation_resume_v1:
+      # 用途：限制用户确认脚本、场景包、计费或交付后恢复的 Agent Run 总秒数；默认 150 秒，只允许依据最新确认事实决定并启动一个后续动作，不等待下游轮询；修改后需重启，只影响新 Run。
+      deadline_seconds: 150
+      # 用途：限制确认恢复 Run 的模型决策轮次；默认 10，允许 1-64，达到上限后安全收口；修改后需重启，只影响新 Run。
+      max_model_steps: 10
+      # 用途：限制确认恢复 Run 的业务 Tool 调用次数；默认 5，允许 0-32，支持读取确认结果、更新 Workspace 和一次后续动作选择；修改后需重启，只影响新 Run。
+      max_business_tools: 5
+      # 用途：限制确认恢复 Run 可启动的计费批次 Tool Call 数；固定为 1，避免一次确认触发多个付费批次；修改后需重启，只影响新 Run。
+      max_billable_batch_starts: 1
+    run_recovery_v1:
+      # 用途：限制 Sidecar 或 Gateway 中断后的安全恢复 Run 总秒数；默认 90 秒，只用于核对权威 Workspace 与说明恢复状态；修改后需重启，只影响新 Run。
+      deadline_seconds: 90
+      # 用途：限制安全恢复 Run 的模型决策轮次；默认 6，允许 1-64，达到上限后安全收口；修改后需重启，只影响新 Run。
+      max_model_steps: 6
+      # 用途：限制安全恢复 Run 的业务 Tool 调用次数；默认 3，允许 0-32，只允许只读或明确安全的核对 Tool；修改后需重启，只影响新 Run。
+      max_business_tools: 3
+      # 用途：禁止安全恢复 Run 自动启动新的计费批次 Tool Call；固定为 0，需由用户新输入或明确后续恢复事件重新决策；修改后需重启，只影响新 Run。
+      max_billable_batch_starts: 0
   # 用途：冻结 Capability Manifest 合同版本；不一致时 readiness 失败，升级需两端同时发布。
   toolset_version: "agent-tools-v1"
+
+external_operations:
+  video_generation:
+    # 用途：限制向视频 Provider 提交单次 start 请求的秒级网络预算；默认 45 秒，超时只进入未知提交保护，不将视频生成总时长算入该值；修改后需重启，只影响新 Operation。
+    start_request_timeout_seconds: 45
+    # 用途：限制一个视频 Provider Job 从成功提交到允许自动轮询的总秒数；默认 1800 秒，允许 60-7200，超过后由 M06 写入 timeout 终态并等待用户重试新 attempt；修改后需重启，只影响新 Operation。
+    provider_job_timeout_seconds: 1800
+    # 用途：设置视频 Job 首次轮询的秒级间隔；默认 5 秒，允许 1-60，过小会增加 Provider 压力；修改后需重启，只影响新 Operation。
+    poll_initial_interval_seconds: 5
+    # 用途：设置视频 Job 指数退避后的最大轮询间隔；默认 30 秒，允许 5-300，达到后保持该间隔直到终态或超时；修改后需重启，只影响新 Operation。
+    poll_max_interval_seconds: 30
+    # 用途：限制一次视频批次可包含的镜头版本子 Operation 数；默认 6，允许 1-20，按 scene_id × variant_index 计数，超过时要求 Agent 拆分为后续批次并重新确认费用；修改后需重启，只影响新批次。
+    max_child_operations_per_batch: 6
+    # 用途：限制同一视频批次内同时向 Provider 提交或处于 polling 的子 Operation 数；默认 6，允许 1-10，达到上限的子 Operation 留在 M06 队列等待，不占用 Sidecar Run；修改后需重启，只影响新批次。
+    max_concurrent_child_operations_per_batch: 6
+    # 用途：限制同一用户同时活跃的视频生成批次数；默认 1，允许 1-3，防止用户或模型并行创建多个高费用批次；修改后需重启，只影响新批次。
+    max_active_video_batches_per_user: 1
 
 long_term_memory:
   # 用途：控制是否读取和异步写入跨对话长期记忆；默认关闭，开启后只影响新请求，关闭不删除既有远端记忆，修改后需重启。
@@ -1593,10 +1647,19 @@ long_term_memory:
 - `sidecar_base_url`：内部地址；修改后需重启；
 - `connect_timeout_seconds`：建连预算，不包含模型运行；
 - `event_idle_timeout_seconds`：事件无进展检测，不等于取消 Provider；
-- `run_deadline_seconds`：一次 Harness Run 总预算；
-- `max_model_steps`：模型轮次上限；
-- `max_business_tools`：业务 Tool 上限；
+- `run_limit_profiles`：按稳定 Run 类型选择的决策预算；Gateway 在创建 Run 前确定 profile 并把 profile 名称、四项限制和 limits digest 冻结进请求，Sidecar 不接受模型自行提高限制；
+- `video_interactive_v1`：用户输入触发的视频导演/规划 Run，默认 `180 秒 / 12 step / 6 Tool / 1 计费批次`；一个 `generate_scenes(scene_ids=[...])` 批次可以包含最多 6 个镜头版本子 Operation，6 个 Tool 是给读取分镜、加载 Skill、审片、编辑与启动这一批次的空间；
+- `operation_resume_v1`、`confirmation_resume_v1`：M06 批次终态或用户确认触发的恢复 Run，默认均为 `150 秒 / 10 step / 5 Tool / 1 计费批次`；如果模型决定继续生成，仍只能启动一个下一阶段批次，随后立即挂起；
+- `run_recovery_v1`：进程中断后的安全恢复 Run，默认 `90 秒 / 6 step / 3 Tool / 0 计费 Operation`；它不能因恢复而自动重新扣费；
+- `deadline_seconds`：只覆盖 Sidecar 内模型和尚未提交的 Tool HTTP 总时间，不包含 M06 start 后的 Provider 排队、生成、轮询、合并或剪映任务时间；
+- `max_model_steps`、`max_business_tools`：只防止模型空转和异常循环，不替代业务级确认、revision、Operation 幂等或 Provider 并发策略；
+- `max_billable_batch_starts`：由 PixelFlow Tool Broker/M06 强制，而不是靠 Prompt 或 Sidecar 计数；它限制本 Run 的计费批次 Tool Call 数，不限制同一批次内已确认的子 Operation 数；达到上限后返回固定安全 Observation 并结束或挂起当前 Run；
 - `toolset_version`：必须与 Sidecar manifest 相同；
+- `external_operations.video_generation`：M06 对真实视频 Provider 的独立异步预算；`start_request_timeout_seconds` 只保护单次 HTTP/SDK 提交，`provider_job_timeout_seconds` 才是分钟级视频生成总时限，两个值都不延长 Sidecar Run；不同厂商/模型如有可靠能力档案，可在 Provider Profile 覆盖默认值，但覆盖值必须进入 Operation request hash 和审计快照；
+- `poll_initial_interval_seconds/poll_max_interval_seconds`：由 M06 lease Worker 使用的退避轮询预算，Sidecar、前端和 Skill 均不得自行轮询 Provider；
+- `max_child_operations_per_batch`：一次批量生成可包含的最大 `scene × variant` 子任务数；视频 6 镜头各生成 1 版时正好为 6，超过时由 Tool Broker 拒绝或显式拆分成后续批次并重新确认；
+- `max_concurrent_child_operations_per_batch`：批次内部的 Provider 并发上限；设为 6 时允许六个视频生成子任务同时执行，实际并发仍受 Provider 能力档案、租户额度和全局限流收紧；
+- `max_active_video_batches_per_user`：用户级批次并发与费用保护，不能由 Agent 通过增加 Tool 次数绕过；
 - `long_term_memory`：PixelFlow 数据层配置，不传给 Harness；本地结构化偏好始终可用，Mem0 只提供语义召回补充。
 
 不再提供 `backend=langchain`、`deepseek_shadow`、`primary_rollout_percent` 或 `fail_open_to_langchain`。试运行、灰度和回滚由隔离环境、入口流量、部署版本、启动准入配置及运行时准入状态控制，避免把已经删除的旧内核重新变成生产依赖。
@@ -1848,7 +1911,7 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [ ] 接入固定 DeepSeek Harness SDK/Runtime；
 - [ ] 挂载生产最小 Cordis composition；
 - [ ] 审核 M1 生成的首批视频 Skill，并发布到 `$PIXELFLOW_AGENT_HOME/skills`；该目录直接成为唯一活动 Skill 来源；
-- [ ] 实现管理员同名修改、新 Skill 新增、原子发布、历史回滚和第三方通知检查；
+- [x] 管理员仅通过受控运维脚本发布活动 Skill：临时文件校验 frontmatter/大小后原子 rename 为 `SKILL.md`；不提供 Skill API、版本历史或回滚。第三方内容不进入公共候选库，随 Skill 源码在引入时完成许可审查；
 - [ ] 使用官方 filesystem Skill Provider 动态发现共享 Skill 根；
 - [ ] 实现 Run 开始时的 catalog/content/version 快照、正文预算和 digest 门禁；
 - [ ] 接入并校验 V2 显式 `deepseek-v4-pro` 逻辑档案及 Sidecar 本地 Provider route；
@@ -1858,7 +1921,12 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [ ] 实现安全思考摘要的 schema、短文本预算、敏感内容过滤和确定性模板降级；摘要失败不得阻断最终回答；
 - [ ] 分别实现 thinking delta 和 response delta 的序号、持久化、节流、断点恢复与 completed 收口；
 - [ ] 屏蔽 reasoning、系统 Prompt 和伪 Tool markup；
-- [ ] 实现模型 step、业务 Tool 和 Run deadline；
+- [ ] 实现 `run_limit_profiles` 选择与 request/limits digest 冻结；`user_turn` 选用 `video_interactive_v1`，`run_recovery` 选用 `run_recovery_v1`，M5 新增的 `operation_resume/confirmation_resume` 分别选用 `operation_resume_v1/confirmation_resume_v1`；
+- [ ] 删除 `agent_harness/sidecar.py`、`agent_harness/recovery.py`、`pixelflow_conversations.py` 中写死的 `90 秒 / 8 step / 3 Tool`；所有 Run Request 必须由同一 Limit Profile Resolver 创建，测试夹具只可显式声明目标 profile；
+- [ ] 将 Gateway/Sidecar `RunLimits` DTO 扩展为 `profile + max_model_steps + max_business_tools + max_billable_batch_starts + deadline_seconds`，拒绝未知 profile、缺项、越界值或 Gateway/Sidecar limits digest 不一致；
+- [ ] 新建 `backend/pixelflow/agent_harness/limit_profiles.py` 的 `LimitProfileResolver`：只从 PixelFlow `platform/config` 读取 `agent_harness.run_limit_profiles`，按可信 `trigger_type` 选择 profile，规范序列化后计算 `run_limits_digest`；Router、Recovery、Operation Resume 和 Sidecar Client 均不得手写限制数值；
+- [ ] Gateway 把完整 `RunLimits` 冻结进 `HarnessRunRequest` 和 Sidecar HTTP `limits` 字段；Sidecar 只校验 profile/数值/digest 与允许上限并执行 Run Policy，禁止从 Sidecar 环境变量、Skill、Tool 参数或模型输出覆盖业务预算；
+- [ ] 在 Sidecar Run Policy 实现模型 step、业务 Tool 和 Run deadline；deadline 只作用于模型循环和未提交 Tool HTTP，不计入外部 Provider 异步等待；
 - [ ] 验证只有一个逻辑 `pixelflow-agent`，每个 trigger 创建独立原生 Session/Run，且 PixelFlow 没有 WorkflowCoordinator 或领域 Agent 路由决定 Tool 顺序；
 - [ ] 完成只读 `inspect_workspace/inspect_scene` 与脚本非计费 Tool 旅程；
 - [ ] 将视频脚本、计划、分镜和证据面板迁入新 `features/video/` projector，以同一 Snapshot/revision 渲染聊天 Artifact、看板和右侧 Workspace；
@@ -1869,7 +1937,9 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - Agent 可以根据 Tool Observation 再决定下一步；
 - Agent 从 Run 冻结的原生目录按需调用 `skill` Tool，运行中管理员修改不会替换已冻结正文；
 - Skill version、content SHA 和 catalog digest 可审计，正文超限不会进入模型；
-- 每个 Run 不超过 8 个模型 step、3 个业务 Tool；
+- 每个 Run 只能使用 Gateway 冻结的限制 profile；视频互动 Run 达到 `12 step / 6 Tool / 180 秒 / 1 计费批次` 时安全收口，恢复 Run 使用更小的安全预算；
+- `LimitProfileResolver` 是唯一预算来源：删除的三处旧硬编码、测试生产装配和恢复入口均无法绕过它；同一 `trigger_id` 使用不同 limits/profile 重试返回 409，不会创建第二个 Run；
+- Sidecar 不能将 deadline 用作 Provider Job 超时或取消信号；Provider Job 时限、轮询间隔、并发与恢复仍由 M06/Provider Adapter 独立控制；
 - 前端只看到业务进度和安全回复；
 - 安全思考摘要与最终回答可以独立流式展示、断线续传和刷新恢复，任一流结束或失败不会错误收口另一条流；
 - Sidecar Event Store、PixelFlow Outbox、Snapshot、SSE 和浏览器均不存在模型隐藏 reasoning/chain-of-thought；
@@ -1886,11 +1956,13 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 
 - [ ] Tool Broker 返回 `awaiting_confirmation` 并落库 interrupt；
 - [ ] suspension policy 收到确认状态后终止 Run；
-- [ ] 用户确认后创建新的 `confirmation_resume` Run；
-- [ ] 计费 Tool 复用 M06 创建/回读 Operation；
+- [ ] 扩展稳定 trigger 类型为 `operation_resume/confirmation_resume`，并在用户确认后创建冻结 `confirmation_resume_v1` 限制的新 Run；
+- [ ] 计费批次 Tool 复用 M06 创建/回读 `OperationBatch`，并为每个 `scene_id × variant_index` 创建稳定子 Operation；批次身份和每个子 Operation 身份均需独立幂等；
+- [ ] `generate_scenes` 等批次 Tool 支持至多 6 个子 Operation，M06 Dispatcher 按 `max_concurrent_child_operations_per_batch` 并发 start/poll；未取得并发槽位的子 Operation 保持队列状态，不在 Agent Run 内等待；
+- [ ] Tool Broker 按冻结 `max_billable_batch_starts` 统计当前 Run 已成功创建或回读的计费批次；视频互动和 Operation 恢复 Run 每次最多 1 个批次，安全恢复 Run 固定为 0；
 - [ ] `pending_operation` 后终止 Run；
-- [ ] Operation 完成 Outbox 创建 `operation_resume` Run；
-- [ ] `completion_event_id` 作为恢复幂等身份；
+- [ ] 全部子 Operation 进入终态后，批次完成 Outbox 才创建一个 `operation_resume` Run；单个子 Operation 完成只更新对应分镜与批次进度，不重复唤醒 Agent；
+- [ ] `completion_event_id` 使用批次终态事件作为恢复幂等身份；
 - [ ] status 402 保持现有额度中断；
 - [ ] start 402 不创建伪 Provider job；
 - [ ] 恢复无 Authorization 时返回 `authorization_required`；
@@ -1899,6 +1971,7 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - [ ] 验证 HTTP/SDK/MCP Adapter 都通过同一稳定 DTO 接入，`provider_id/profile_version` 进入请求摘要；
 - [ ] 验证 Provider Test Double 与真实 HTTP/SDK/MCP Adapter 均不修改 Harness Tool 名称、Skill、Workspace 和 M06 身份规则；Test Double 只服务 Port 合同负向测试；
 - [ ] 使用测试租户、真实 Provider 测试凭据和明确费用预算，至少完成一次真实生图、真实视频 start/poll、真实产物回写和真实合并/交付旅程；
+- [ ] 验证视频 Provider Job 在 Sidecar Run `pending_operation` 挂起后仍可跨越 180 秒继续由 M06 轮询，并在 `provider_job_timeout_seconds` 内完成或稳定 timeout；完成事件只能创建新的 `operation_resume_v1` Run；
 - [ ] 真实付费旅程记录内部 operation/provider job/Artifact 的稳定身份、usage/费用摘要和最终 Workspace revision，但不记录凭据、签名 URL 或 Provider raw；
 - [ ] 用统一 `InterruptHost` 替换视频确认/额度特例，接通澄清、需求表单、计费确认、额度和授权恢复；
 - [ ] 前端删除所有 Provider job 轮询与 `pending*Job` 持久化，只消费 `external_job.*`、`agent.operation.updated` 和 Snapshot；
@@ -1908,12 +1981,14 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 
 - 同一 Operation 不因 Sidecar retry/restart 重复 start；
 - Provider 轮询不在 Sidecar 执行；
-- Operation 完成事件重复投递只创建一个恢复 Run；
+- 6 个镜头各生成 1 版时，一个 `generate_scenes` 批次可创建 6 个独立且可并发的子 Operation；单个失败不覆盖其他镜头，前端显示 `completed/total/failed` 批次进度；
+- 子 Operation 完成事件重复投递不重复更新分镜；批次完成事件重复投递只创建一个恢复 Run；
 - 确认前不调用计费 Provider；
 - 取消 Agent Run 不伪造 Provider 取消；
 - 402 充值恢复查询原 provider job；
 - 404/expired 仍要求新 attempt；
 - Provider Router 切换不会改变 Tool/Skill 合同，同一 attempt 不会中途换厂商；
+- 单个导演 Run 可以完成多次只读/规划/编辑 Tool 调用并启动一个最多 6 子任务的计费视频批次，但无法连续创建第二个计费批次；超限不会重复扣费，必须等待当前批次终态并由新恢复 Run 或用户新 Turn 决策；
 - Provider Test Double 合同测试不能替代真实供应商旅程；没有真实媒体产物、真实 Provider job 和可核对 Operation 记录时 M5 不得验收；
 - 表单关闭会持久化 `form_cancelled`；按钮在服务端关闭事件前保持 submitting，409 时刷新 Snapshot 并保留未提交文本。
 
@@ -2033,11 +2108,26 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - `arguments_hash/request_digest`；
 - `status`；
 - `workspace_revision_before/after`；
-- `operation_job_id/interrupt_id`；
+- `operation_batch_id/interrupt_id`；
 - `result_hash`；
 - `created_at/updated_at`。
 
 用途：保证 Sidecar 重试和并发回调只执行一次业务 Tool。必须对 `(run_id, tool_call_id)` 建唯一约束；`tool_call_key` 只由该稳定身份生成，`request_digest` 用于发现相同身份下工具名或参数变化。真实参数、Authorization 和 Provider raw 不落库。
+
+### `pixelflow_operation_batches`
+
+- `batch_id`；
+- `user_id/conversation_id/workspace_id/plan_id/run_id/tool_call_id`；
+- `batch_request_hash/idempotency_key`；
+- `operation_kind/provider_profile_version`；
+- `expected_child_count/max_concurrent_children`；
+- `status/completed_child_count/failed_child_count`；
+- `completion_event_id/resume_run_id`；
+- `created_at/updated_at/completed_at`。
+
+用途：表示一次用户已确认的批量计费动作，例如“6 个镜头各生成 1 个视频”。`batch_id` 必须由 `run_id + tool_call_id + canonical(scene_id, variant_index)` 稳定派生；同一批次重试回读同一批次，不能新建第二批。每个子 Operation 额外保存 `batch_id + child_key`，并仍保持自己的 M06 identity、Provider job、lease、状态和独立完成投影。
+
+批次只在所有子 Operation 进入稳定终态后写一个 `batch.completed` Outbox 事件，作为唯一 `operation_resume` trigger；单个子任务终态只更新对应镜头和批次计数。这样 6 个视频可以并发执行，却不会让 Agent 被唤醒 6 次或把任一子任务失败误写成全批覆盖。
 
 ### `pixelflow_long_term_memory_writes`
 
@@ -2122,6 +2212,9 @@ runtime_admission_state = closed
 - DTO extra forbid；
 - canonical hash，以及 Run/Tool“稳定身份键 + 独立请求摘要”的拆分；
 - Run/Tool 幂等冲突；
+- `run_limit_profiles` 到 Run trigger 的固定映射、limits digest 冻结、同一触发身份不同限制 409，以及 Sidecar 不接受模型提高限制；
+- 视频互动 Run 的 `12 step / 6 Tool / 180 秒 / 1 计费批次`、Operation/确认恢复 Run 和安全恢复 Run 的边界合同；
+- 一个 `generate_scenes` 批次的 `batch_id` 幂等、6 个 `scene × variant` 子 Operation 身份、批次内并发上限、部分成功/失败投影与仅在全部终态后恢复一次 Agent 的合同；
 - `(trigger_type, trigger_id)`、`(run_id, tool_call_id)` 唯一约束和同身份不同摘要 409；
 - Sidecar/Python/TypeScript Tool schema 一致；
 - Skill catalog/content SHA、frontmatter version、调用策略、正文预算和第三方通知；
@@ -2179,6 +2272,8 @@ runtime_admission_state = closed
 - completion event 重复；
 - 402、404/expired、timeout；
 - 取消和 shutdown；
+- 视频 Provider 处于分钟级 `polling` 时 Sidecar Run 已终止，M06 仍按 lease 继续轮询；Provider 完成后只创建新的 `operation_resume` Run，不延长或复用旧 Run deadline；
+- 同一 Run 在读取/规划/编辑 Tool 后启动一个最多 6 子任务的计费批次成功，第二次计费批次被 Tool Broker 拒绝且不产生新的 Provider 请求；
 - Skill 目录可以在生产动态变更，但运行中 Run 不发生正文热切换，新 Run 使用新 digest；
 - Plugin 卸载后不残留 Tool、事件监听器、定时器和 Tool Broker HTTP 请求；
 - Provider Router 切换只影响新 attempt；运行中 operation 不换厂商、不重复 start；
@@ -2216,17 +2311,18 @@ runtime_admission_state = closed
 5. 场景包确认；
 6. 场景资产生成；
 7. 多镜头视频生成和部分失败；
-8. 单镜头自然语言修订并定向重生；
-9. 合并、QA 和修改循环；
-10. 最终确认与剪映交付；
-11. 额度不足、充值后恢复；
-12. 刷新、切换对话、SSE 重连和进程重启；
-13. 管理员更新同名 Skill 后新 Run 生效、旧 Run 继续使用旧快照并可回滚；
-14. 使用真实隔离数据的 `inspect_workbook/search_web/create_ppt_workspace` 证明同一原生 Agent 可自主跨能力调用，PixelFlow 没有固定 WorkflowCoordinator；付费 PPT 产物在 M5 真实预算旅程单独验证；
-15. 用户在对话 A 明确偏好后，对话 B 能召回安全摘要；关闭 Mem0 或制造超时后仍由本地偏好完成同一请求；
-16. 用户修改或撤回偏好后，本地权威值立即生效，Mem0 异步更新/删除不能把旧值重新覆盖回来；
-17. 当前工作台完整旅程不调用旧 `createTask/getTask/getResult`、LangGraph Run/Thread 或 DeerFlow API；
-18. SQLite/MySQL 既有 PixelFlow 表在迁移到自有 Base/engine 后可原样读取、写入和升级。
+8. 同一脚本选择 6 个镜头批量生成：一个计费批次、6 个独立子 Operation 并发、部分失败不覆盖成功镜头、全部终态后只恢复一次 Agent；
+9. 单镜头自然语言修订并定向重生；
+10. 合并、QA 和修改循环；
+11. 最终确认与剪映交付；
+12. 额度不足、充值后恢复；
+13. 刷新、切换对话、SSE 重连和进程重启；
+14. 管理员更新同名 Skill 后新 Run 生效、旧 Run 继续使用旧快照并可回滚；
+15. 使用真实隔离数据的 `inspect_workbook/search_web/create_ppt_workspace` 证明同一原生 Agent 可自主跨能力调用，PixelFlow 没有固定 WorkflowCoordinator；付费 PPT 产物在 M5 真实预算旅程单独验证；
+16. 用户在对话 A 明确偏好后，对话 B 能召回安全摘要；关闭 Mem0 或制造超时后仍由本地偏好完成同一请求；
+17. 用户修改或撤回偏好后，本地权威值立即生效，Mem0 异步更新/删除不能把旧值重新覆盖回来；
+18. 当前工作台完整旅程不调用旧 `createTask/getTask/getResult`、LangGraph Run/Thread 或 DeerFlow API；
+19. SQLite/MySQL 既有 PixelFlow 表在迁移到自有 Base/engine 后可原样读取、写入和升级。
 
 ### 18.6 建议门禁命令
 

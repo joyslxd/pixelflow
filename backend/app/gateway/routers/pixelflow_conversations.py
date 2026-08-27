@@ -69,6 +69,14 @@ class ConversationUpdateRequest(BaseModel):
     expected_revision: int | None = Field(default=None, ge=1)
 
 
+class PlanPublicGoalUpdateRequest(BaseModel):
+    """Plan 编辑仅允许修改公开目标，步骤与 Tool 参数不能由浏览器直写。"""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    public_goal: str | None = Field(default=None, max_length=2_000)
+
+
 class JianyingDraftConversationContextPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -314,7 +322,7 @@ async def _build_harness_context(
             {"memory_id": item.memory_id, "content": item.content, "category": item.category}
             for item in memories[:20]
         ]
-    return {
+    projection = {
         "workspace_projection": build_workspace_digest(workspace),
         "conversation_projection": {
             "title": conversation.title[:256],
@@ -325,6 +333,10 @@ async def _build_harness_context(
         "brand_profile_projection": {},
         "long_term_memory_projection": memory_projection,
     }
+    from pixelflow.agent_harness.context_builder import PixelFlowContextBuilder
+
+    # Context Builder 是 Sidecar 之前的最后一道预算与敏感字段门禁。
+    return PixelFlowContextBuilder().build(projection).projection
 
 
 async def _require_harness_admission(request: Request):
@@ -552,13 +564,17 @@ async def start_harness_turn(
         ),
         user_id=user_id,
     )
-    context = await _build_harness_context(
-        request,
-        user_id=user_id,
-        conversation=conversation,
-        workspace=workspace,
-        user_input=body.content,
-    )
+    try:
+        context = await _build_harness_context(
+            request,
+            user_id=user_id,
+            conversation=conversation,
+            workspace=workspace,
+            user_input=body.content,
+        )
+    except ValueError as error:
+        logger.warning("harness_context_rejected conversation_id=%s error_type=%s", conversation_id, type(error).__name__)
+        raise HTTPException(status_code=422, detail={"code": "harness_context_budget_rejected"}) from error
     context_digest = _harness_digest({
         "conversation_id": conversation_id,
         "message_id": message.message_id,
@@ -566,6 +582,9 @@ async def start_harness_turn(
         "workspace_revision": workspace.revision,
         "context": context,
     })
+    from pixelflow.agent_harness.limits import LimitProfileResolver
+
+    limits = LimitProfileResolver().resolve("user_turn")
     try:
         result = await _agent_run_bridge(request).start(
             HarnessRunRequest(
@@ -584,9 +603,12 @@ async def start_harness_turn(
                 context_budget_digest=_harness_digest(
                     {"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32},
                 ),
-                run_limits_digest=_harness_digest(
-                    {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
-                ),
+                run_limits_digest=limits.digest,
+                limit_profile=limits.profile,
+                max_model_steps=limits.max_model_steps,
+                max_business_tools=limits.max_business_tools,
+                max_billable_batch_starts=limits.max_billable_batch_starts,
+                deadline_seconds=limits.deadline_seconds,
                 max_output_tokens=body.max_output_tokens,
                 **context,
             ),
@@ -639,6 +661,37 @@ _PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEYS = frozenset(
         "scene_asset_job",
     }
 )
+
+
+@router.patch("/{conversation_id}/plans/{plan_id}")
+async def update_video_plan_public_goal(
+    conversation_id: str,
+    plan_id: str,
+    body: PlanPublicGoalUpdateRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """以独立 Plan revision 更新公开目标，不把 Plan 混入 Workspace patch。"""
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    repository = _harness_video_repository(request)
+    plan = await repository.get_plan(user_id, plan_id)
+    if plan is None or plan.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail={"code": "video_plan_not_found"})
+    try:
+        updated = await repository.update_plan_public_goal(
+            user_id, plan_id, body.public_goal,
+            expected_revision=body.expected_revision,
+            now=datetime.now(UTC),
+        )
+    except AgentRuntimeRecordConflictError as error:
+        current = await repository.get_plan(user_id, plan_id)
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "video_plan_revision_conflict", "current_revision": None if current is None else current.revision},
+        ) from error
+    return {"plan_id": updated.plan_id, "revision": updated.revision, "public_goal": updated.public_goal}
 _PUBLIC_WORKSPACE_COMMAND_FORBIDDEN_KEY_FRAGMENTS = frozenset(
     {"credential", "secret", "token", "password", "api_key", "apikey", "authorization", "provider"}
 )

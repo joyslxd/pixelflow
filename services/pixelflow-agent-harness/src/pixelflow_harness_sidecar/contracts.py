@@ -79,8 +79,11 @@ class ContextBudget(StrictModel):
 class RunLimits(StrictModel):
     """限定单次 Agent loop 的公开资源上限。"""
 
+    profile: str = Field(default="legacy_test_v1", min_length=1, max_length=120)
+    digest: str = Field(default="sha256:" + "0" * 64, pattern=r"^sha256:[a-f0-9]{64}$")
     max_model_steps: int = Field(gt=0, le=64)
     max_business_tools: int = Field(ge=0, le=32)
+    max_billable_batch_starts: int = Field(default=0, ge=0, le=8)
     deadline_seconds: int = Field(gt=0, le=3_600)
 
 
@@ -136,7 +139,7 @@ class HarnessRunEvent(StrictModel):
     run_id: str = Field(pattern=r"^hrun_", max_length=200)
     event_id: str = Field(pattern=r"^hevt_", max_length=200)
     sequence: int = Field(gt=0)
-    type: str = Field(min_length=1, max_length=120)
+    type: str = Field(pattern=r"^(run|tool|response|public_summary)\.[a-z_]+$", max_length=120)
     occurred_at: str = Field(min_length=1, max_length=64)
     payload: dict[str, Any]
 

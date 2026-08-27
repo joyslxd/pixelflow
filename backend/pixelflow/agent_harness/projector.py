@@ -309,6 +309,21 @@ class HarnessRunProjector:
             if not isinstance(tool_name, str) or not tool_name or len(tool_name) > 128:
                 raise HarnessEventProjectionError("Sidecar Tool 事件不符合公开合同")
             return AgentEventType.AGENT_TOOL_COMPLETED, {"tool_name": tool_name}
+        if source_event.type == "public_summary.delta":
+            delta = source_event.payload.get("delta")
+            if not isinstance(delta, str) or not delta.strip() or len(delta) > 512:
+                raise HarnessEventProjectionError("Sidecar 公开摘要增量不符合合同")
+            return AgentEventType.AGENT_THINKING_DELTA, {"delta": delta.strip()}
+        if source_event.type == "public_summary.completed":
+            summary = source_event.payload.get("summary")
+            if not isinstance(summary, str) or not summary.strip() or len(summary) > 1_536:
+                raise HarnessEventProjectionError("Sidecar 公开摘要终态不符合合同")
+            return AgentEventType.AGENT_THINKING_COMPLETED, {"summary": summary.strip()}
+        if source_event.type == "response.delta":
+            delta = source_event.payload.get("delta")
+            if not isinstance(delta, str) or not delta or len(delta) > 512:
+                raise HarnessEventProjectionError("Sidecar 回复增量不符合公开合同")
+            return AgentEventType.AGENT_RESPONSE_DELTA, {"delta": delta}
         if source_event.type == "response.completed":
             response = source_event.payload.get("response")
             if not isinstance(response, str) or not response.strip() or len(response) > 8_000:

@@ -81,7 +81,10 @@ class _TimeoutEngine:
 
         return self._snapshot
 
-    async def execute(self, *_args):
+    def validate_request(self, _request) -> None:
+        """测试替身只注入超时；真实请求校验由 DeepSeek Engine 覆盖。"""
+
+    async def execute(self, *_args, **_kwargs):
         """抛出不包含底层错误正文的结构化超时。"""
 
         await asyncio.sleep(0)

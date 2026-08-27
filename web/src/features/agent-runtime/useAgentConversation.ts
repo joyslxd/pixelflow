@@ -8,6 +8,7 @@ import {
   getHarnessSnapshot,
   respondToHarnessInterrupt,
   startHarnessTurn,
+  updateVideoPlanPublicGoal as requestVideoPlanPublicGoal,
 } from "@/api/agentRuntime";
 import type { InterruptResponseV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
 import {
@@ -251,13 +252,73 @@ export function useAgentConversation(initialConversationId?: string) {
 
     if (detail === null) throw new Error("conversation_unselected");
     try {
-      await applyHarnessWorkspaceCommand(detail.conversation.conversation_id, command);
+      const result = await applyHarnessWorkspaceCommand(detail.conversation.conversation_id, command);
+      setRuntime((current) => replaceVideoWorkspace(current, result.workspace));
       await refreshActiveRun();
     } catch {
       setError("工作区修改未完成，请刷新后确认当前版本。");
       throw new Error("workspace_command_failed");
     }
   }, [detail, refreshActiveRun]);
+
+  const updateScript = useCallback(async (content: string) => {
+    /** 脚本复用现有 Workspace Command，严格以当前 Workspace revision 写入。 */
+
+    const workspace = runtime.videoWorkspace;
+    if (workspace === null) throw new Error("harness_workspace_not_found");
+    await submitWorkspaceCommand({
+      client_command_id: crypto.randomUUID(),
+      workspace_id: workspace.workspace_id,
+      expected_workspace_revision: workspace.revision,
+      patch: { script: { content: content.trim(), status: "已编辑" } },
+    });
+  }, [runtime.videoWorkspace, submitWorkspaceCommand]);
+
+  const updatePlanPublicGoal = useCallback(async (
+    planId: string,
+    expectedRevision: number,
+    publicGoal: string | null,
+  ) => {
+    /** Plan 不混入 Workspace patch；成功响应只更新来自 Gateway 的同一投影。 */
+
+    if (detail === null) throw new Error("conversation_unselected");
+    try {
+      const updated = await requestVideoPlanPublicGoal(
+        detail.conversation.conversation_id,
+        planId,
+        { expected_revision: expectedRevision, public_goal: publicGoal },
+      );
+      setRuntime((current) => {
+        const workspace = current.videoWorkspace;
+        const activePlan = workspace?.summary.active_plan;
+        if (
+          workspace === null
+          || typeof activePlan !== "object"
+          || activePlan === null
+          || (activePlan as Record<string, unknown>).plan_id !== updated.plan_id
+        ) return current;
+        return replaceVideoWorkspace(current, {
+          ...workspace,
+          summary: {
+            ...workspace.summary,
+            active_plan: {
+              ...(activePlan as Record<string, unknown>),
+              revision: updated.revision,
+              goal: updated.public_goal,
+            },
+          },
+        });
+      });
+    } catch (caught) {
+      const apiError = caught instanceof AgentApiError ? caught : null;
+      if (apiError?.code === "video_plan_revision_conflict") {
+        setError(`执行计划已更新到版本 ${apiError.currentRevision ?? "新"}，请刷新后重试。`);
+      } else {
+        setError("执行计划修改未完成，请刷新后确认当前版本。");
+      }
+      throw caught;
+    }
+  }, [detail]);
 
   const cancelQuotaInterrupt = useCallback(async (
     workspaceId: string,
@@ -303,6 +364,8 @@ export function useAgentConversation(initialConversationId?: string) {
     openConversation,
     submitTurn,
     submitWorkspaceCommand,
+    updateScript,
+    updatePlanPublicGoal,
     cancelQuotaInterrupt,
     refreshActiveRun,
     cancelActiveRun,
