@@ -8,8 +8,8 @@ from .digest import (
     workspace_has_scene_asset_images,
 )
 from .ids import video_workspace_id_for_conversation
-from .projection import ensure_conversation_video_workspace
 from .memory_repository import MemoryVideoAgentRepository
+from .projection import ensure_conversation_video_workspace
 from .repository import VideoWorkspaceRepository
 from .sql_repository import SQLVideoAgentRepository
 
