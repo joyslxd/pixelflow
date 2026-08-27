@@ -26,6 +26,7 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.routers import internal_agent_tools, pixelflow_conversations
 from pixelflow.agent_control_plane.persistence import SQLCompactionQueueRepository
 from pixelflow.agent_control_plane.persistence.models import PixelFlowAgentHarnessToolCallRow
+from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
 from pixelflow.agent_harness import AgentHarnessSidecarClient
 from pixelflow.agent_harness.admission import SQLHarnessAdmissionRepository
 from pixelflow.agent_harness.projector import HarnessRunProjector
@@ -226,6 +227,10 @@ def test_real_authenticated_public_harness_turn_and_sse(
         repository=repository,
         timeout_seconds=10,
     )
+    gateway_app.state.pixelflow_agent_run_bridge = AgentRunBridge(
+        harness=gateway_app.state.pixelflow_harness_run_bridge,
+        projector=gateway_app.state.pixelflow_harness_run_projector,
+    )
     try:
         with httpx.Client(timeout=90) as http_client:
             for _ in range(50):
@@ -311,6 +316,10 @@ def test_real_authenticated_public_harness_turn_and_sse(
             gateway_instance_id="m0-public-gateway-restarted",
             repository=repository,
             timeout_seconds=10,
+        )
+        restarted_gateway_app.state.pixelflow_agent_run_bridge = AgentRunBridge(
+            harness=restarted_gateway_app.state.pixelflow_harness_run_bridge,
+            projector=restarted_gateway_app.state.pixelflow_harness_run_projector,
         )
         gateway_app = restarted_gateway_app
         gateway_server = uvicorn.Server(
