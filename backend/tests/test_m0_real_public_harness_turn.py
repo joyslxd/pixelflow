@@ -27,6 +27,7 @@ from app.gateway.routers import internal_agent_tools, pixelflow_conversations
 from pixelflow.agent_control_plane.persistence import SQLCompactionQueueRepository
 from pixelflow.agent_control_plane.persistence.models import PixelFlowAgentHarnessToolCallRow
 from pixelflow.agent_harness import AgentHarnessSidecarClient
+from pixelflow.agent_harness.admission import SQLHarnessAdmissionRepository
 from pixelflow.agent_harness.projector import HarnessRunProjector
 from pixelflow.agent_harness.recovery import HarnessRecoveryService
 from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
@@ -86,7 +87,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
     ).hexdigest()
     monkeypatch.setenv("PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES", json.dumps(limit_profiles))
 
-    async def prepare_gateway() -> tuple[object, SQLPixelFlowTaskStore, SQLAgentToolRepository, SQLVideoAgentRepository, SQLCompactionQueueRepository]:
+    async def prepare_gateway() -> tuple[object, SQLPixelFlowTaskStore, SQLAgentToolRepository, SQLVideoAgentRepository, SQLCompactionQueueRepository, SQLHarnessAdmissionRepository]:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'm0-public-turn.db'}")
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         async with engine.begin() as connection:
@@ -100,6 +101,8 @@ def test_real_authenticated_public_harness_turn_and_sse(
             ),
         )
         video_repository = SQLVideoAgentRepository(session_factory)
+        admission_repository = SQLHarnessAdmissionRepository(session_factory)
+        await admission_repository.initialize(initial_open=True, updated_by="m4-real-test")
         now = datetime.now(UTC)
         await video_repository.create_workspace(
             owner,
@@ -135,9 +138,10 @@ def test_real_authenticated_public_harness_turn_and_sse(
             SQLAgentToolRepository(session_factory),
             video_repository,
             SQLCompactionQueueRepository(session_factory),
+            admission_repository,
         )
 
-    engine, store, repository, video_repository, event_repository = asyncio.run(prepare_gateway())
+    engine, store, repository, video_repository, event_repository, admission_repository = asyncio.run(prepare_gateway())
     broker_jwt_key = "m0-public-tool-broker-jwt-signing-key-at-least-32-bytes"
     gateway_jwt_key = "m0-public-gateway-sidecar-jwt-signing-key-at-least-32-bytes"
     monkeypatch.setenv("PIXELFLOW_TOOL_BROKER_JWT_VERIFY_KEY", broker_jwt_key)
@@ -153,6 +157,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
         event_repository=event_repository,
         task_store=store,
     )
+    gateway_app.state.pixelflow_harness_admission_repository = admission_repository
     gateway_app.add_middleware(AuthMiddleware)
     gateway_app.include_router(internal_agent_tools.router)
     gateway_app.include_router(pixelflow_conversations.router)
@@ -296,6 +301,7 @@ def test_real_authenticated_public_harness_turn_and_sse(
             event_repository=event_repository,
             task_store=store,
         )
+        restarted_gateway_app.state.pixelflow_harness_admission_repository = admission_repository
         restarted_gateway_app.add_middleware(AuthMiddleware)
         restarted_gateway_app.include_router(internal_agent_tools.router)
         restarted_gateway_app.include_router(pixelflow_conversations.router)
