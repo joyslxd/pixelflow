@@ -18,8 +18,9 @@ ENV UV_HTTP_TIMEOUT=$UV_HTTP_TIMEOUT
 COPY pyproject.toml uv.lock README.md ./
 # 用途：从固定官方镜像复制 uv；影响：不依赖仓库中不存在的本地 wheel 才能启动构建。
 COPY --from=uv-source /uv /uvx /usr/local/bin/
-# 用途：冻结已提交 lock 同步生产依赖；影响：版本与哈希固定，但允许构建期切换受控包镜像而不重写 lock。
-RUN uv sync --frozen --no-dev
+# 用途：将锁定 wheel 的官方文件域名映射到受控镜像；影响：仅改变构建下载路径，保留 lock 中的版本与 SHA-256 校验。
+RUN sed -i 's#https://files.pythonhosted.org/packages/#https://mirrors.aliyun.com/pypi/packages/#g' uv.lock \
+    && uv sync --frozen --no-dev
 
 # 用途：复制 Sidecar 源码和官方 Composition/Plugin；影响：镜像内 Skill 根仍由运行时卷挂载提供。
 COPY src ./src
