@@ -57,7 +57,7 @@ interface BrokerObservation {
   status: "completed" | SuspensionKind;
   public_summary: string;
   model_observation: Record<string, unknown>;
-  suspension?: { kind: SuspensionKind };
+  suspension?: { kind: SuspensionKind; interrupt_id?: string };
 }
 
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
@@ -227,11 +227,18 @@ function canonicalObservation(payload: unknown): BrokerObservation {
   if (!isRecord(payload.suspension) || payload.suspension.kind !== payload.status) {
     throw new Error("PixelFlow Tool Broker 返回了无效挂起合同");
   }
+  const interruptId = payload.status === "awaiting_confirmation" && typeof payload.suspension.interrupt_id === "string"
+    && /^[a-zA-Z0-9_-]{1,128}$/u.test(payload.suspension.interrupt_id)
+    ? payload.suspension.interrupt_id
+    : undefined;
+  if (payload.status === "awaiting_confirmation" && !interruptId) {
+    throw new Error("PixelFlow Tool Broker 返回的确认中断身份无效");
+  }
   return {
     status: payload.status,
     public_summary: payload.public_summary,
     model_observation: payload.model_observation,
-    suspension: { kind: payload.status },
+    suspension: { kind: payload.status, ...(interruptId ? { interrupt_id: interruptId } : {}) },
   };
 }
 

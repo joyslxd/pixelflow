@@ -57,6 +57,7 @@ class DeepSeekEngineResult:
     finish_reason: str | None
     tool_names: tuple[str, ...]
     suspension_kind: str | None = None
+    suspension_interrupt_id: str | None = None
     response_deltas: tuple[str, ...] = field(default_factory=tuple)
     public_summaries: tuple[str, ...] = field(default_factory=tuple)
     notification_events_emitted: bool = False
@@ -303,13 +304,14 @@ def _project_harness_result(
         and isinstance((data := event.get("data")), dict)
         and isinstance(data.get("name"), str)
     )
-    suspension_kind = _suspension_from_tool_events(events)
-    if suspension_kind is not None:
+    suspension = _suspension_from_tool_events(events)
+    if suspension is not None:
         return DeepSeekEngineResult(
             final_response="",
             finish_reason="suspended",
             tool_names=tool_names,
-            suspension_kind=suspension_kind,
+            suspension_kind=suspension[0],
+            suspension_interrupt_id=suspension[1],
             notification_events_emitted=notification_events_emitted,
         )
     final_response = getattr(result, "final_response", None)
@@ -342,7 +344,7 @@ def _project_harness_result(
     )
 
 
-def _suspension_from_tool_events(events: list[object]) -> str | None:
+def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None] | None:
     """只识别 Tool Runtime 返回的结构化挂起结果，绝不从模型文本推断业务状态。"""
 
     allowed = {"pending_operation", "awaiting_confirmation", "authorization_required"}
@@ -359,7 +361,12 @@ def _suspension_from_tool_events(events: list[object]) -> str | None:
             status = candidate.get("status")
             suspension = candidate.get("suspension")
             if status in allowed and isinstance(suspension, dict) and suspension.get("kind") == status:
-                return status
+                interrupt_id = suspension.get("interrupt_id")
+                if status == "awaiting_confirmation":
+                    if not isinstance(interrupt_id, str) or not interrupt_id.strip() or len(interrupt_id) > 128:
+                        raise HarnessProjectionError("confirmation_interrupt_id_invalid")
+                    return status, interrupt_id
+                return status, None
     return None
 
 

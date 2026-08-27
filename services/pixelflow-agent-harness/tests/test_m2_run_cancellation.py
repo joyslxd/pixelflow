@@ -98,6 +98,7 @@ class _SuspendingEngine(_BlockingEngine):
             finish_reason="suspended",
             tool_names=("compose_or_export_video",),
             suspension_kind="awaiting_confirmation",
+            suspension_interrupt_id="interrupt-test-confirmation",
         )
 
 

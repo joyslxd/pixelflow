@@ -13,6 +13,8 @@ from pixelflow.agent_harness import (
     GatewayHarnessSidecarError,
     HarnessRunRequest,
 )
+from pixelflow.agent_harness.contracts import HarnessRunEvent
+from pixelflow.agent_harness.projector import HarnessRunProjector
 
 
 def _digest(value: str) -> str:
@@ -212,3 +214,27 @@ def test_harness_run_request_rejects_unknown_or_invalid_digest() -> None:
         pass
     else:
         raise AssertionError("无效摘要不应通过稳定 DTO")
+
+
+def test_confirmation_suspension_projects_interrupt_id_for_public_host() -> None:
+    """浏览器必须从公开 Run 事件取得确认 API 所需的中断身份。"""
+
+    event_type, payload = HarnessRunProjector._public_event(  # noqa: SLF001 - 锁定公开投影合同。
+        HarnessRunEvent(
+            run_id="hrun_" + "c" * 32,
+            event_id="hevt_" + "d" * 32,
+            sequence=3,
+            type="run.suspended",
+            occurred_at="2026-08-27T00:00:00Z",
+            payload={
+                "status": "suspended_confirmation",
+                "interrupt_id": "interrupt-confirmation-1",
+            },
+        )
+    )
+
+    assert event_type.value == "run.state_changed"
+    assert payload == {
+        "status": "suspended_confirmation",
+        "interrupt_id": "interrupt-confirmation-1",
+    }

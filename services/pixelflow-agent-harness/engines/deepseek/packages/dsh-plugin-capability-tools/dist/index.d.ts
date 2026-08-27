@@ -30,6 +30,7 @@ interface BrokerObservation {
     model_observation: Record<string, unknown>;
     suspension?: {
         kind: SuspensionKind;
+        interrupt_id?: string;
     };
 }
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */

@@ -309,6 +309,15 @@ class HarnessRunProjector:
                 "suspended_authorization",
             }:
                 raise HarnessEventProjectionError("Sidecar 挂起状态不符合公开合同")
+            if payload["status"] == "suspended_confirmation":
+                interrupt_id = source_event.payload.get("interrupt_id")
+                if (
+                    not isinstance(interrupt_id, str)
+                    or not interrupt_id.strip()
+                    or len(interrupt_id) > 128
+                ):
+                    raise HarnessEventProjectionError("Sidecar 确认中断身份不符合公开合同")
+                payload["interrupt_id"] = interrupt_id
             if source_event.type == "run.failed":
                 code = source_event.payload.get("code")
                 if isinstance(code, str) and code in {
