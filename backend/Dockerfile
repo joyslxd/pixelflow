@@ -44,13 +44,16 @@ COPY --from=uv-source /uv /uvx /usr/local/bin/
 # Set working directory
 WORKDIR /app
 
-# Copy backend source code
-COPY backend ./backend
+# 用途：先复制锁文件与项目元数据形成稳定依赖层；影响：仅业务源码变更时复用已解析依赖，避免重新访问 Python 包源。
+COPY backend/pyproject.toml backend/uv.lock backend/README.md ./backend/
 
-# Install dependencies with cache mount
-# When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
+# 用途：依据锁文件安装 Gateway 生产依赖并复用 BuildKit 缓存；影响：锁文件未变化时构建不重新下载 Python 包。
+# 当设置 UV_EXTRAS（例如 "postgres"）时，安装对应可选依赖。
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+
+# 用途：在依赖层完成后复制 Gateway 源码；影响：源码变更只重建应用层，不使依赖下载层失效。
+COPY backend ./backend
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.

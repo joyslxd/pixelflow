@@ -8,6 +8,8 @@ DEPLOY_DIR="$ROOT_DIR/services/pixelflow-agent-harness/deploy"
 COMPOSE_FILE="$DEPLOY_DIR/docker-compose.linux.yml"
 # 用途：为网络较慢的服务器增加 wheel 下载等待；影响：仅在构建阶段生效，默认 300 秒。
 UV_HTTP_TIMEOUT_SECONDS="${PIXELFLOW_UV_HTTP_TIMEOUT:-300}"
+# 用途：指定 Gateway 构建期 Python 包索引；影响：网络受限服务器可切换镜像源，未设置时保持 PyPI 默认源。
+UV_INDEX_URL_VALUE="${PIXELFLOW_UV_INDEX_URL:-https://pypi.org/simple}"
 # 用途：指定 Debian 构建依赖镜像源；影响：仅替换镜像构建期 apt 下载地址，默认使用已验证可达的阿里云源。
 APT_MIRROR_HOST="${PIXELFLOW_APT_MIRROR:-mirrors.aliyun.com}"
 
@@ -25,6 +27,7 @@ SIDECAR_IMAGE="${IMAGES[1]}"
 # 用途：构建 Gateway 当前源码镜像；影响：复用 Docker/uv 缓存，下载超时由上方变量控制。
 docker build \
   --build-arg "APT_MIRROR=$APT_MIRROR_HOST" \
+  --build-arg "UV_INDEX_URL=$UV_INDEX_URL_VALUE" \
   --build-arg "UV_HTTP_TIMEOUT=$UV_HTTP_TIMEOUT_SECONDS" \
   -t "$GATEWAY_IMAGE" \
   -f "$ROOT_DIR/backend/Dockerfile" \
@@ -33,6 +36,7 @@ docker build \
 # 用途：构建离线 Runtime Sidecar 镜像；影响：官方 Runtime 只从服务目录的已校验 wheel 安装。
 docker build \
   -t "$SIDECAR_IMAGE" \
+  -f "$ROOT_DIR/services/pixelflow-agent-harness/Dockerfile" \
   "$ROOT_DIR/services/pixelflow-agent-harness"
 
 # 用途：只重建两个新架构服务；影响：不停止同一 Compose 项目中的其他服务。
