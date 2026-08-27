@@ -243,6 +243,12 @@ def _project_harness_result(result: object) -> DeepSeekEngineResult:
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
         raise HarnessProjectionError("finish_reason_invalid")
+    # Runtime 直接透传 ``turn/end.reason.kind``；不同 Provider 对正常文本收束分别
+    # 使用 completed、complete、stop 或 end_turn。统一为 PixelFlow 的 completed，
+    # 未知结束值仍由 RunService fail-closed，不能被静默当作成功。
+    normal_finish_reasons = {"completed", "complete", "stop", "end_turn"}
+    if finish_reason in normal_finish_reasons:
+        finish_reason = "completed"
     return DeepSeekEngineResult(
         final_response=response[:8_000],
         finish_reason=finish_reason,

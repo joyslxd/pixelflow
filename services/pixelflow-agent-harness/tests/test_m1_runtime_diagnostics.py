@@ -156,6 +156,33 @@ def test_result_projection_does_not_depend_on_harness_private_sequence() -> None
     assert projected.tool_names == ("inspect_video_workspace",)
 
 
+@pytest.mark.parametrize("runtime_finish_reason", ["completed", "complete", "stop", "end_turn"])
+def test_result_projection_normalizes_known_runtime_completion_reasons(
+    runtime_finish_reason: str,
+) -> None:
+    """Provider 正常结束值必须统一为 Sidecar 的 completed，未知值仍不能放行。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[],
+            final_response="已完成",
+            finish_reason=runtime_finish_reason,
+        )
+    )
+
+    assert projected.finish_reason == "completed"
+
+
+def test_result_projection_keeps_unknown_runtime_finish_reason() -> None:
+    """未知 Runtime 结束值不得被误判为成功，RunService 应保持失败关闭。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(events=[], final_response="已完成", finish_reason="unexpected_reason")
+    )
+
+    assert projected.finish_reason == "unexpected_reason"
+
+
 def test_result_projection_failure_uses_fixed_reason_code() -> None:
     """投影失败只能暴露固定原因码，不能包含 SDK 的异常正文。"""
 
