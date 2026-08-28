@@ -394,6 +394,10 @@ def _outcome(status: str):
     mapping = {
         "queued": ProviderJobOutcome.POLLING,
         "pending": ProviderJobOutcome.POLLING,
+        "created": ProviderJobOutcome.POLLING,
+        "submitted": ProviderJobOutcome.POLLING,
+        "waiting": ProviderJobOutcome.POLLING,
+        "in_progress": ProviderJobOutcome.POLLING,
         "running": ProviderJobOutcome.POLLING,
         "processing": ProviderJobOutcome.POLLING,
         "succeeded": ProviderJobOutcome.SUCCEEDED,
@@ -413,10 +417,22 @@ def _outcome(status: str):
 
 def _reason_code(status: str) -> str:
     return {
-        "queued": "provider_polling", "pending": "provider_polling", "running": "provider_polling", "processing": "provider_polling",
-        "succeeded": "provider_succeeded", "success": "provider_succeeded", "completed": "provider_succeeded", "done": "provider_succeeded",
-        "failed": "provider_business_failed", "error": "provider_business_failed",
-        "timeout": "provider_timeout", "timed_out": "provider_timeout",
+        "queued": "provider_polling",
+        "pending": "provider_polling",
+        "created": "provider_polling",
+        "submitted": "provider_polling",
+        "waiting": "provider_polling",
+        "in_progress": "provider_polling",
+        "running": "provider_polling",
+        "processing": "provider_polling",
+        "succeeded": "provider_succeeded",
+        "success": "provider_succeeded",
+        "completed": "provider_succeeded",
+        "done": "provider_succeeded",
+        "failed": "provider_business_failed",
+        "error": "provider_business_failed",
+        "timeout": "provider_timeout",
+        "timed_out": "provider_timeout",
     }[status]
 
 

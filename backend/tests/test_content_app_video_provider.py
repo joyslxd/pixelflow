@@ -127,3 +127,38 @@ async def test_402_and_expired_map_to_stable_outcomes(monkeypatch) -> None:
     assert paused.provider_job_id is None
     assert expired.outcome is ProviderJobOutcome.EXPIRED
     assert expired.provider_job_id == "task-missing"
+
+
+@pytest.mark.asyncio
+async def test_submitted_start_status_maps_to_polling() -> None:
+    """content-app 已提交类状态不是终态，M06 必须持续轮询而非丢弃已扣费任务。"""
+
+    provider = _provider(
+        lambda _request: httpx.Response(
+            200,
+            json={"success": True, "data": {"taskId": "task-submitted", "status": "submitted"}},
+        )
+    )
+    request = provider.prepare_operation_request(
+        {
+            "generation_mode": "text_to_video",
+            "prompt": "测试视频",
+            "model": "seedance-2.0",
+            "ratio": "16:9",
+            "size": "720p",
+            "duration": 5,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        }
+    )
+    started = await provider.start(
+        request,
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:test-submitted",
+    )
+    await provider.aclose()
+
+    assert started.outcome is ProviderJobOutcome.POLLING
+    assert started.provider_job_id == "task-submitted"
