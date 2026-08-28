@@ -1,6 +1,6 @@
 /** F1 输入框：不接手填 workspace_id；旧对话只读，运行中新输入显示已排队。 */
 
-import { type FormEvent, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { InputStatus } from "@/features/agent-runtime/state";
 
@@ -40,10 +40,18 @@ export function Composer({
     }
   };
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void submitContent(event.currentTarget);
-  };
+  useEffect(() => {
+    /** 直接监听原生 submit，兼容浏览器恢复表单和 React 委托事件不可达的场景。 */
+
+    const form = formRef.current;
+    if (form === null) return undefined;
+    const handleSubmit = (event: SubmitEvent) => {
+      event.preventDefault();
+      void submitContent(form);
+    };
+    form.addEventListener("submit", handleSubmit);
+    return () => form.removeEventListener("submit", handleSubmit);
+  }, [submitContent]);
 
   if (!canSend) {
     return (
@@ -54,7 +62,7 @@ export function Composer({
   }
 
   return (
-    <form ref={formRef} onSubmit={submit}>
+    <form ref={formRef}>
       {inputStatus === "queued" ? (
         <p className="mb-2 text-xs text-ink-soft" aria-live="polite">新输入已排队</p>
       ) : null}
@@ -67,12 +75,9 @@ export function Composer({
           className="min-w-0 flex-1 rounded border border-line px-3 py-2"
         />
         <button
-          type="button"
+          type="submit"
           disabled={sending}
           className="rounded bg-accent px-4 text-white disabled:opacity-50"
-          onClick={() => {
-            if (formRef.current !== null) void submitContent(formRef.current);
-          }}
         >
           发送
         </button>
