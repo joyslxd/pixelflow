@@ -330,6 +330,12 @@ def _project_harness_result(
     if not response:
         response = _public_text_from_final_messages(events).strip()
     if not response:
+        logger.warning(
+            "harness_final_response_missing result_event_types=%s notification_event_types=%s finish_reason=%s",
+            _safe_event_types(runtime_events),
+            _safe_event_types(notification_events or []),
+            getattr(result, "finish_reason", None),
+        )
         raise HarnessProjectionError("final_response_missing")
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
@@ -361,6 +367,18 @@ def _public_text_from_result(result: object) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _safe_event_types(events: list[object]) -> tuple[str, ...]:
+    """诊断仅保留有限事件类型，不把模型内容或 Tool 参数写入日志。"""
+
+    return tuple(
+        event_type
+        for event in events[:128]
+        if isinstance(event, dict)
+        and isinstance((event_type := event.get("type")), str)
+        and 0 < len(event_type) <= 128
+    )
 
 
 def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None] | None:
