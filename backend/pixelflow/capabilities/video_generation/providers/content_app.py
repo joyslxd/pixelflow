@@ -27,6 +27,31 @@ _MODE_ENDPOINTS = {
     "edit_video": "/video/edit-video",
 }
 _STATUS_ENDPOINT = "/task/{provider_job_id}/status"
+_KNOWN_PROVIDER_STATUSES = frozenset(
+    {
+        "queued",
+        "pending",
+        "created",
+        "submitted",
+        "waiting",
+        "in_progress",
+        "running",
+        "processing",
+        "succeeded",
+        "success",
+        "completed",
+        "done",
+        "failed",
+        "error",
+        "timeout",
+        "timed_out",
+        "not_found",
+        "expired",
+        "quota_insufficient",
+        "payment_required",
+        "paused_quota",
+    }
+)
 
 
 class _ContentAppHTTPError(RuntimeError):
@@ -323,6 +348,10 @@ def _to_snapshot(payload: Mapping[str, object], *, expected_job_id: str | None) 
     status = _first_text(source, "status", "taskStatus", "state").lower()
     if not status:
         status = "succeeded" if _result_value(source) is not None else "polling"
+    elif expected_job_id is None and status not in _KNOWN_PROVIDER_STATUSES:
+        # 创建接口已返回 taskId 代表供应商已经受理；厂商新增的异步启动
+        # 枚举不能让 M06 丢失已扣费任务，后续 status 查询仍严格校验。
+        status = "polling"
     if status in {"not_found", "expired"}:
         raise _ContentAppHTTPError(404)
     if status in {"quota_insufficient", "payment_required", "paused_quota"}:
@@ -392,6 +421,7 @@ def _outcome(status: str):
     from pixelflow.operations.jobs.providers import ProviderJobOutcome
 
     mapping = {
+        "polling": ProviderJobOutcome.POLLING,
         "queued": ProviderJobOutcome.POLLING,
         "pending": ProviderJobOutcome.POLLING,
         "created": ProviderJobOutcome.POLLING,
@@ -417,6 +447,7 @@ def _outcome(status: str):
 
 def _reason_code(status: str) -> str:
     return {
+        "polling": "provider_polling",
         "queued": "provider_polling",
         "pending": "provider_polling",
         "created": "provider_polling",

@@ -162,3 +162,38 @@ async def test_submitted_start_status_maps_to_polling() -> None:
 
     assert started.outcome is ProviderJobOutcome.POLLING
     assert started.provider_job_id == "task-submitted"
+
+
+@pytest.mark.asyncio
+async def test_unknown_start_status_with_task_id_maps_to_polling() -> None:
+    """厂商新增启动枚举时，只要 taskId 已存在就交给严格 status 轮询恢复。"""
+
+    provider = _provider(
+        lambda _request: httpx.Response(
+            200,
+            json={"success": True, "data": {"taskId": "task-new-state", "status": "vendor_accepted"}},
+        )
+    )
+    request = provider.prepare_operation_request(
+        {
+            "generation_mode": "text_to_video",
+            "prompt": "测试视频",
+            "model": "seedance-2.0",
+            "ratio": "16:9",
+            "size": "720p",
+            "duration": 5,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        }
+    )
+    started = await provider.start(
+        request,
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:test-new-state",
+    )
+    await provider.aclose()
+
+    assert started.outcome is ProviderJobOutcome.POLLING
+    assert started.provider_job_id == "task-new-state"
