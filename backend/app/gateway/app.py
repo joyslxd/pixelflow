@@ -190,6 +190,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             agent_runtime_repository = SQLCompactionQueueRepository(
                 task_store.session_factory,
             )
+            app.state.pixelflow_agent_runtime_repository = agent_runtime_repository
             video_agent_repository = SQLVideoAgentRepository(
                 task_store.session_factory,
             )
@@ -253,6 +254,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 else None
             )
             app.state.pixelflow_video_generation_provider = video_provider
+            from pixelflow.capabilities.video_understanding import ContentAppVideoUnderstandingAdapter
+            video_understanding_adapter = (
+                ContentAppVideoUnderstandingAdapter(base_url=provider_settings.base_url)
+                if provider_settings is not None
+                else None
+            )
             if video_provider is not None:
                 from pixelflow.video.adapters.operations import (
                     M06SceneGenerationBatchDispatcher,
@@ -290,11 +297,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 video_tools = runtime_video_tool_registry(
                     plan_repository=video_agent_repository,
                     scene_generation_batch_operation_port=scene_batch_port,
+                    video_understanding_port=video_understanding_adapter,
                 )
             else:
                 app.state.pixelflow_operation_batch_dispatcher_worker = None
                 video_tools = runtime_video_tool_registry(
                     plan_repository=video_agent_repository,
+                    video_understanding_port=video_understanding_adapter,
                 )
             tool_manifest = manifest(video_tools)
             app.state.pixelflow_agent_tool_broker = AgentToolBroker(
@@ -412,6 +421,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.pixelflow_operation_batch_resume_worker = None
         elif isinstance(task_store, MemoryPixelFlowTaskStore):
             agent_runtime_repository = MemoryCompactionQueueRepository()
+            app.state.pixelflow_agent_runtime_repository = agent_runtime_repository
             video_agent_repository = MemoryVideoAgentRepository(
                 event_repository=agent_runtime_repository,
             )
@@ -433,6 +443,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             # MySQL 对话 Store 尚无同事务 Runtime Repository，保持 R1 压缩并固定关闭V2执行。
             agent_runtime_repository = MemoryCompactionQueueRepository()
+            app.state.pixelflow_agent_runtime_repository = agent_runtime_repository
             video_agent_repository = None
             app.state.pixelflow_agent_tool_broker = None
             app.state.pixelflow_harness_run_bridge = None

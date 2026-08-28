@@ -1,5 +1,6 @@
 """Harness 已发布视频 Capability Tool 的稳定公开边界。"""
 
+from .analyze import AnalyzeVideoInput, AnalyzeVideoTool
 from .contracts import (
     VideoTool,
     VideoToolContext,
@@ -45,6 +46,8 @@ __all__ = [
     "VideoToolRegistry",
     "InspectVideoWorkspaceInput",
     "InspectVideoWorkspaceTool",
+    "AnalyzeVideoInput",
+    "AnalyzeVideoTool",
     "InspectScriptInput",
     "InspectScriptTool",
     "InspectVideoPlanInput",
