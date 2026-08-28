@@ -314,8 +314,7 @@ def _project_harness_result(
             suspension_interrupt_id=suspension[1],
             notification_events_emitted=notification_events_emitted,
         )
-    final_response = getattr(result, "final_response", None)
-    response = final_response.strip() if isinstance(final_response, str) else ""
+    response = _public_text_from_result(result)
     if not response:
         response = _public_text_from_chunks(events).strip()
     if not response:
@@ -344,6 +343,16 @@ def _project_harness_result(
     )
 
 
+def _public_text_from_result(result: object) -> str:
+    """兼容 Harness 版本的最终公开文本字段，绝不从 reasoning 或任意对象字符串化。"""
+
+    for field in ("final_response", "response", "output", "final_output", "text"):
+        value = getattr(result, field, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None] | None:
     """只识别 Tool Runtime 返回的结构化挂起结果，绝不从模型文本推断业务状态。"""
 
@@ -362,9 +371,9 @@ def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None]
             suspension = candidate.get("suspension")
             if status in allowed and isinstance(suspension, dict) and suspension.get("kind") == status:
                 interrupt_id = suspension.get("interrupt_id")
-                if status == "awaiting_confirmation":
+                if status in {"awaiting_confirmation", "authorization_required"}:
                     if not isinstance(interrupt_id, str) or not interrupt_id.strip() or len(interrupt_id) > 128:
-                        raise HarnessProjectionError("confirmation_interrupt_id_invalid")
+                        raise HarnessProjectionError("suspension_interrupt_id_invalid")
                     return status, interrupt_id
                 return status, None
     return None
