@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -125,6 +126,16 @@ class ContentAppVideoGenerationProvider:
                 headers={
                     "Authorization": user_authorization,
                     "Idempotency-Key": _required_identifier(idempotency_key),
+                    # content-app 按这些请求头解析视频模型计费档案；只在 body
+                    # 传 model/size 会被服务端判为模型配置缺失。
+                    "modelType": _required_text(normalized, "model"),
+                    "billType": "3",
+                    "duration": str(_required_video_duration(normalized)),
+                    "apiModelParamObj": json.dumps(
+                        {"size": _required_text(normalized, "size")},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                 },
                 json=body,
             )
@@ -252,9 +263,9 @@ def _start_payload(request: Mapping[str, JsonValue]) -> tuple[str, dict[str, Jso
         "size": _required_text(request, "size"),
         "duration": request.get("duration"),
         "videoCount": 1,
-        # Workspace 创作合同沿用 on/off，content-app 视频 DTO 固定使用 yes/no。
-        # 在 Adapter 边界归一化，避免把厂商枚举泄漏回 Harness Tool 合同。
-        "sound": _content_app_sound(_required_text(request, "sound")),
+        # content-app 视频 body 与稳定 Workspace 合同都使用 on/off；模型计费
+        # 路由信息则由上层 start 的专用请求头携带。
+        "sound": _required_video_sound(_required_text(request, "sound")),
     }
     images = _string_list(request.get("image_urls"))
     videos = _string_list(request.get("video_urls"))
@@ -281,15 +292,22 @@ def _start_payload(request: Mapping[str, JsonValue]) -> tuple[str, dict[str, Jso
     return endpoint, common
 
 
-def _content_app_sound(value: str) -> str:
-    """把稳定视频声音开关映射为 content-app 的 yes/no 枚举。"""
+def _required_video_sound(value: str) -> str:
+    """校验 content-app 视频 body 的稳定 on/off 声音枚举。"""
 
     normalized = value.strip().casefold()
-    if normalized in {"on", "yes"}:
-        return "yes"
-    if normalized in {"off", "no"}:
-        return "no"
+    if normalized in {"on", "off"}:
+        return normalized
     raise ProviderJobMappingError("video_sound_unsupported")
+
+
+def _required_video_duration(request: Mapping[str, JsonValue]) -> int:
+    """校验并返回 content-app 计费路由需要的单镜整数时长。"""
+
+    duration = request.get("duration")
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= 15:
+        raise ProviderJobMappingError("video_duration_unsupported")
+    return duration
 
 
 def _to_snapshot(payload: Mapping[str, object], *, expected_job_id: str | None) -> ProviderJobSnapshot:

@@ -84,10 +84,14 @@ async def test_start_and_status_use_separate_authorizations(monkeypatch) -> None
     assert completed.result["video_url"] == "https://cdn.example.invalid/video.mp4"
     assert requests[0].headers["Authorization"] == "Bearer user-start-token"
     assert requests[0].headers["Idempotency-Key"] == "operation:v1:test"
+    assert requests[0].headers["modelType"] == "seedance-2.0"
+    assert requests[0].headers["billType"] == "3"
+    assert requests[0].headers["duration"] == "5"
+    assert json.loads(requests[0].headers["apiModelParamObj"]) == {"size": "720p"}
     assert requests[1].headers["Authorization"] == "Bearer service-status-token"
     body = json.loads(requests[0].content)
     assert body["videoCount"] == 1
-    assert body["sound"] == "yes"
+    assert body["sound"] == "on"
 
 
 @pytest.mark.asyncio
