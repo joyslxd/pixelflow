@@ -336,6 +336,10 @@ def _project_harness_result(
             _safe_event_types(notification_events or []),
             getattr(result, "finish_reason", None),
         )
+        logger.warning(
+            "harness_final_response_missing_chunk_types=%s",
+            _safe_assistant_chunk_types(events),
+        )
         raise HarnessProjectionError("final_response_missing")
     finish_reason = getattr(result, "finish_reason", None)
     if finish_reason is not None and not isinstance(finish_reason, str):
@@ -379,6 +383,31 @@ def _safe_event_types(events: list[object]) -> tuple[str, ...]:
         and isinstance((event_type := event.get("type")), str)
         and 0 < len(event_type) <= 128
     )
+
+
+def _safe_assistant_chunk_types(events: list[object]) -> tuple[str, ...]:
+    """仅记录 chunk 的 type 路径，排查 Runtime 漂移时不泄漏模型文本。"""
+
+    found: list[str] = []
+    for event in events[:256]:
+        if not isinstance(event, dict) or event.get("type") != "assistant/chunk":
+            continue
+        data = event.get("data")
+        for chunk in _type_nodes(data):
+            found.append(chunk)
+            if len(found) >= 64:
+                return tuple(found)
+    return tuple(found)
+
+
+def _type_nodes(value: object) -> tuple[str, ...]:
+    if isinstance(value, dict):
+        current = value.get("type")
+        nested = tuple(item for child in value.values() for item in _type_nodes(child))
+        return ((current,) if isinstance(current, str) and len(current) <= 128 else ()) + nested
+    if isinstance(value, list):
+        return tuple(item for child in value for item in _type_nodes(child))
+    return ()
 
 
 def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None] | None:
