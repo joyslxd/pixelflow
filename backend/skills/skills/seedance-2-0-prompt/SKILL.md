@@ -1,5 +1,5 @@
 ---
-name: seedance2.0-prompt
+name: seedance-2-0-prompt
 description: 为 PixelFlow 已确认的视频创作合同编写、检查或修订 Seedance 2.0 分镜提示词；覆盖镜头时长、素材引用、声音与连续性，不执行生成。
 metadata:
   skill_version: 1.1.0
