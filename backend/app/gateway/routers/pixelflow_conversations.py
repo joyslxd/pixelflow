@@ -690,6 +690,10 @@ async def start_harness_turn(
                     "根据当前工作区和用户目标自主决定下一步：信息不足时先追问或完善脚本、"
                     "分镜与计划；条件齐备且用户明确同意计费时才调用生成 Tool。"
                     "不得把自然语言生成请求强制改造成固定工作流。"
+                    "最终回复只面向用户，直接给出本轮结论或下一步所需信息；不要复述内部推理、"
+                    "Skill 加载、Tool Broker、运行配置或错误名称。公开进度由系统单独展示。"
+                    "信息不足时最多列出四项需要用户确认的事实；除非用户明确要求，否则不要在"
+                    "同一回复中展开多套完整创意方案、分镜和 Prompt。"
                 ),
                 context_digest=context_digest,
                 model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
