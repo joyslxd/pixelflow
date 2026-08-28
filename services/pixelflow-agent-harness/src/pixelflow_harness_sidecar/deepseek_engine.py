@@ -145,9 +145,14 @@ class DeepSeekHarnessEngine:
             )
             phase = "model_execution"
             emitted_notification_event = False
+            notification_events: list[object] = []
 
             def on_notification(notification: object) -> None:
                 nonlocal emitted_notification_event
+                payload = getattr(notification, "payload", None)
+                source_event = payload.get("event") if isinstance(payload, dict) else None
+                if isinstance(source_event, dict):
+                    notification_events.append(source_event)
                 for event_type, payload in _public_events_from_notification(notification):
                     emitted_notification_event = True
                     if on_public_event is not None:
@@ -161,6 +166,7 @@ class DeepSeekHarnessEngine:
             return _project_harness_result(
                 result,
                 notification_events_emitted=emitted_notification_event,
+                notification_events=notification_events,
             )
         except Exception as error:
             diagnostic = _execution_diagnostic(error, phase)
@@ -290,12 +296,16 @@ def _project_harness_result(
     result: object,
     *,
     notification_events_emitted: bool = False,
+    notification_events: list[object] | None = None,
 ) -> DeepSeekEngineResult:
     """投影 SDK 公开结果，不依赖不会暴露给 PixelFlow 的 Session 内部序号。"""
 
-    events = getattr(result, "events", None)
-    if not isinstance(events, list):
+    runtime_events = getattr(result, "events", None)
+    if not isinstance(runtime_events, list):
         raise HarnessProjectionError("events_invalid")
+    # 某些已部署 Runtime 只经 Session notification 发送最终 message；与 run() 返回
+    # 的同一 Run 事件合并后再按既有白名单投影，不把 notification 私有字段公开。
+    events = [*runtime_events, *(notification_events or [])]
     tool_names = tuple(
         str(data.get("name"))
         for event in events

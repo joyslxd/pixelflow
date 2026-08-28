@@ -226,6 +226,19 @@ def test_result_projection_accepts_deployed_runtime_response_field() -> None:
     assert projected.final_response == "已兼容最终回复"
 
 
+def test_result_projection_uses_public_final_message_from_notification() -> None:
+    """通知流的最终 message 与 run() 返回事件同样受公开文本白名单约束。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(events=[], final_response="", finish_reason="completed"),
+        notification_events=[
+            {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "通知最终回复"}]}}},
+        ],
+    )
+
+    assert projected.final_response == "通知最终回复"
+
+
 def test_result_projection_uses_public_final_message_when_chunks_absent() -> None:
     """Runtime 仅在最终消息携带文本时，仍必须投影公开文本且排除 reasoning 块。"""
 
