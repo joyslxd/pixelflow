@@ -5,7 +5,7 @@
     "workspace_id": "workspace_demo",
     "expected_workspace_revision": 3,
     "content": "请检查当前视频工作区并给出下一步建议。",
-    "max_output_tokens": 1024
+    "max_output_tokens": 8192
   },
   "workspace_command": {
     "client_command_id": "33333333-3333-4333-8333-333333333333",
