@@ -21,11 +21,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
 from app.gateway.deps import get_current_user
-from pixelflow.agent_control_plane.contracts import (
-    AgentAction,
-    InterruptResponseRequest,
-    WorkspaceCommandRequest,
-)
+from pixelflow.agent_control_plane.contracts import WorkspaceCommandRequest
+from pixelflow.agent_control_plane.contracts.enums import AgentEventType
+from pixelflow.agent_control_plane.contracts.events import AgentEvent
 from pixelflow.agent_control_plane.persistence.repositories import (
     AgentRuntimeRecordConflictError,
 )
@@ -161,12 +159,52 @@ class HarnessConfirmationResponseRequest(BaseModel):
     expected_workspace_revision: int = Field(ge=1)
 
 
+class HarnessQuotaCancellationRequest(BaseModel):
+    """额度中断的专用取消合同；不复用 Graph 或通用人工响应 DTO。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_response_id: uuid.UUID
+    expected_workspace_revision: int = Field(ge=1)
+
+
 class HarnessConfirmationResponse(BaseModel):
     """返回唯一 confirmation_resume Run，重复点击只回读同一身份。"""
 
     interrupt_id: str = Field(min_length=1, max_length=64)
     run_id: str = Field(pattern=r"^hrun_[a-f0-9]{32}$")
     status: Literal["accepted"]
+    workspace_revision: int = Field(ge=1)
+
+
+class HarnessInterruptSubmissionRequest(BaseModel):
+    """统一人工中断输入；只保存公开表单值，授权始终只来自本次 HTTP Header。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_response_id: uuid.UUID
+    expected_workspace_revision: int = Field(ge=1)
+    action: Literal["submit", "confirm", "form_cancelled"]
+    content: str | None = Field(default=None, min_length=1, max_length=4_000)
+    fields: dict[str, str] = Field(default_factory=dict, max_length=32)
+
+    @model_validator(mode="after")
+    def validate_submission(self) -> HarnessInterruptSubmissionRequest:
+        if self.action == "form_cancelled" and (self.content is not None or self.fields):
+            raise ValueError("关闭表单不能携带提交内容")
+        if self.action == "submit" and self.content is None and not self.fields:
+            raise ValueError("表单提交至少需要一项内容")
+        if any(not key or len(key) > 80 or len(value) > 2_000 for key, value in self.fields.items()):
+            raise ValueError("表单字段不符合长度限制")
+        return self
+
+
+class HarnessInterruptSubmissionResponse(BaseModel):
+    """中断响应的稳定回读；取消表单不会创建恢复 Run。"""
+
+    interrupt_id: str = Field(min_length=1, max_length=64)
+    run_id: str | None = Field(default=None, pattern=r"^hrun_[a-f0-9]{32}$")
+    status: Literal["accepted", "cancelled"]
     workspace_revision: int = Field(ge=1)
 
 
@@ -532,6 +570,40 @@ async def get_or_create_video_workspace(
 
 
 @router.post(
+    "/{conversation_id}/workspaces/{workspace_id}/interrupts/{interrupt_id}/quota-cancellations",
+    response_model=HarnessInterruptResponseResponse,
+)
+async def cancel_harness_quota_interrupt(
+    conversation_id: str, workspace_id: str, interrupt_id: str,
+    body: HarnessQuotaCancellationRequest, request: Request,
+) -> HarnessInterruptResponseResponse:
+    """取消权威 Workspace 中的额度暂停；不创建 Harness 恢复 Run。"""
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    workspace = await _require_conversation_workspace(request, user_id=user_id, conversation_id=conversation_id, workspace_id=workspace_id)
+    interrupt = workspace.payload.get("quota_interrupt")
+    resolution = workspace.payload.get("last_quota_resolution")
+    if interrupt is None and isinstance(resolution, dict) and resolution.get("event_id") == interrupt_id:
+        return HarnessInterruptResponseResponse(client_response_id=body.client_response_id, interrupt_id=interrupt_id, status="cancelled", workspace=_workspace_projection(workspace))
+    if workspace.revision != body.expected_workspace_revision:
+        raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
+    if not isinstance(interrupt, dict) or interrupt.get("quota_interrupt_id") != interrupt_id:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_not_open"})
+    plan_id, step_id, job_id = (interrupt.get(key) for key in ("plan_id", "step_id", "job_id"))
+    pause_revision = interrupt.get("quota_pause_revision")
+    if not all(isinstance(value, str) and value for value in (plan_id, step_id, job_id)) or isinstance(pause_revision, bool) or not isinstance(pause_revision, int) or pause_revision < 0:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_payload_invalid"})
+    try:
+        await _harness_video_repository(request).cancel_quota_interrupted_plan(user_id, plan_id, step_id, quota_interrupt_id=interrupt_id, job_id=job_id, quota_pause_revision=pause_revision, now=datetime.now(UTC))
+    except AgentRuntimeRecordConflictError as error:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_state_conflict"}) from error
+    updated = await _require_conversation_workspace(request, user_id=user_id, conversation_id=conversation_id, workspace_id=workspace_id)
+    return HarnessInterruptResponseResponse(client_response_id=body.client_response_id, interrupt_id=interrupt_id, status="cancelled", workspace=_workspace_projection(updated))
+
+
+@router.post(
     "/{conversation_id}/harness-turns/start",
     response_model=HarnessTurnStartResponse,
 )
@@ -615,6 +687,9 @@ async def start_harness_turn(
                 system_instruction=(
                     "你是 PixelFlow 视频 Agent。当前工作区事实必须先遵循已加载 Skill 的指令，"
                     "并使用受控 Tool 获取证据；不得猜测、编造或绕过 Tool Broker。"
+                    "当用户明确要求生成、制作或输出视频时，不得只返回方案文字：先调用"
+                    " inspect_video_workspace 获取证据，随后必须调用 generate_scenes 进入受控确认和"
+                    " M06 Operation 流程；只有用户明确要求分析已有视频时才调用 analyze_video。"
                 ),
                 context_digest=context_digest,
                 model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
@@ -827,6 +902,7 @@ async def confirm_harness_interrupt(
     except (LookupError, AgentToolBindingConflictError) as error:
         raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
     if confirmed.resumed_run_id is not None:
+        await _publish_harness_interrupt_event(request, confirmed, closed=False)
         return HarnessConfirmationResponse(
             interrupt_id=interrupt_id,
             run_id=confirmed.resumed_run_id,
@@ -875,85 +951,267 @@ async def confirm_harness_interrupt(
         if grant_id is not None and isinstance(credential_store, TransientRunCredentialStore):
             await credential_store.discard_grant(grant_id)
         raise HTTPException(status_code=503, detail={"code": "harness_confirmation_resume_unavailable"}) from error
+    await _publish_harness_interrupt_event(request, confirmed, closed=False)
     return HarnessConfirmationResponse(interrupt_id=interrupt_id, run_id=confirmed.resumed_run_id or handle.run_id, status="accepted", workspace_revision=workspace.revision)
 
 
 @router.post(
     "/{conversation_id}/workspaces/{workspace_id}/interrupts/{interrupt_id}/responses",
-    response_model=HarnessInterruptResponseResponse,
+    response_model=HarnessInterruptSubmissionResponse,
 )
 async def respond_to_harness_interrupt(
     conversation_id: str,
     workspace_id: str,
     interrupt_id: str,
-    body: InterruptResponseRequest,
+    body: HarnessInterruptSubmissionRequest,
     request: Request,
-) -> HarnessInterruptResponseResponse:
-    """仅取消当前额度中断；继续/重试需由后续受控 Harness Tool 创建新的 M06 Operation。"""
+) -> HarnessInterruptSubmissionResponse:
+    """提交表单或内容确认；每个响应身份最多创建一个冻结恢复 Run。"""
+
+    from pixelflow.agent_tools.repository import AgentToolBindingConflictError, SQLAgentToolRepository
 
     user_id = await get_current_user(request)
     if not user_id:
         raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
-    action = body.value.explicit_action
-    if action is None or action.action is not AgentAction.CANCEL_WORKFLOW:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "harness_interrupt_action_not_supported"},
-        )
     workspace = await _require_conversation_workspace(
         request,
         user_id=user_id,
         conversation_id=conversation_id,
         workspace_id=workspace_id,
     )
-    interrupt = workspace.payload.get("quota_interrupt")
-    resolution = workspace.payload.get("last_quota_resolution")
-    if interrupt is None and isinstance(resolution, dict) and resolution.get("event_id") == interrupt_id:
-        return HarnessInterruptResponseResponse(
-            client_response_id=body.client_response_id,
-            interrupt_id=interrupt_id,
-            status="cancelled",
-            workspace=_workspace_projection(workspace),
-        )
-    if not isinstance(interrupt, dict) or interrupt.get("quota_interrupt_id") != interrupt_id:
-        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_not_open"})
-    plan_id = interrupt.get("plan_id")
-    step_id = interrupt.get("step_id")
-    job_id = interrupt.get("job_id")
-    quota_pause_revision = interrupt.get("quota_pause_revision")
-    if (
-        not all(isinstance(value, str) and value for value in (plan_id, step_id, job_id))
-        or not isinstance(quota_pause_revision, int)
-        or isinstance(quota_pause_revision, bool)
-        or quota_pause_revision < 0
-    ):
-        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_payload_invalid"})
+    if workspace.revision != body.expected_workspace_revision:
+        raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
+    repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
+    if not isinstance(repository, SQLAgentToolRepository):
+        raise HTTPException(status_code=503, detail={"code": "harness_interrupt_repository_unavailable"})
+    original = await repository.get_run_binding_by_interrupt(interrupt_id)
+    interrupt = await repository.get_interrupt(interrupt_id)
+    if original is None or interrupt is None:
+        raise HTTPException(status_code=404, detail={"code": "harness_interrupt_not_found"})
     try:
-        from datetime import UTC, datetime
-
-        await _harness_video_repository(request).cancel_quota_interrupted_plan(
-            user_id,
-            plan_id,
-            step_id,
-            quota_interrupt_id=interrupt_id,
-            job_id=job_id,
-            quota_pause_revision=quota_pause_revision,
-            now=datetime.now(UTC),
+        if body.action == "form_cancelled":
+            cancelled = await repository.cancel_interrupt(
+                interrupt_id=interrupt_id,
+                binding=original,
+                client_response_id=str(body.client_response_id),
+                expected_workspace_revision=body.expected_workspace_revision,
+            )
+            await _publish_harness_interrupt_event(request, cancelled, closed=True)
+            return HarnessInterruptSubmissionResponse(
+                interrupt_id=interrupt_id,
+                status="cancelled",
+                workspace_revision=workspace.revision,
+            )
+        if body.action == "confirm" and interrupt.kind != "awaiting_confirmation":
+            raise HTTPException(status_code=422, detail={"code": "harness_interrupt_action_not_supported"})
+        if body.action == "submit" and interrupt.kind != "form":
+            raise HTTPException(status_code=422, detail={"code": "harness_interrupt_action_not_supported"})
+        payload = {
+            "action": body.action,
+            **({"content": body.content} if body.content is not None else {}),
+            **({"fields": dict(body.fields)} if body.fields else {}),
+        }
+        responded = await repository.respond_interrupt(
+            interrupt_id=interrupt_id,
+            binding=original,
+            client_response_id=str(body.client_response_id),
+            expected_workspace_revision=body.expected_workspace_revision,
+            response_payload=payload,
         )
-    except AgentRuntimeRecordConflictError as error:
-        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_state_conflict"}) from error
-    updated = await _require_conversation_workspace(
-        request,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        workspace_id=workspace_id,
-    )
-    return HarnessInterruptResponseResponse(
-        client_response_id=body.client_response_id,
+    except (LookupError, AgentToolBindingConflictError) as error:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
+    if responded.resumed_run_id is None:
+        resumed_run_id = await _start_harness_interrupt_resume(
+            request=request,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            workspace=workspace,
+            interrupt=responded,
+            trigger_type=("confirmation_resume" if responded.kind == "awaiting_confirmation" else "form_resume"),
+            user_input=(body.content or "用户已提交所需补充信息。"),
+            system_instruction=(
+                "用户已确认上一项受控操作。仅依据当前权威工作区继续，不得重复确认。"
+                if responded.kind == "awaiting_confirmation"
+                else "用户已提交中断表单。仅依据当前权威工作区和该公开响应继续。"
+            ),
+        )
+        responded = await repository.bind_interrupt_resume_run(
+            interrupt_id=interrupt_id,
+            client_response_id=str(body.client_response_id),
+            resumed_run_id=resumed_run_id,
+        )
+    await _publish_harness_interrupt_event(request, responded, closed=False)
+    return HarnessInterruptSubmissionResponse(
         interrupt_id=interrupt_id,
-        status="cancelled",
-        workspace=_workspace_projection(updated),
+        run_id=responded.resumed_run_id,
+        status="accepted",
+        workspace_revision=workspace.revision,
     )
+
+
+@router.post(
+    "/{conversation_id}/workspaces/{workspace_id}/interrupts/{interrupt_id}/authorizations",
+    response_model=HarnessInterruptSubmissionResponse,
+)
+async def resume_harness_interrupt_authorization(
+    conversation_id: str,
+    workspace_id: str,
+    interrupt_id: str,
+    body: HarnessConfirmationResponseRequest,
+    request: Request,
+) -> HarnessInterruptSubmissionResponse:
+    """只借用本次 Authorization 创建授权恢复 Run，绝不写入 SQL、事件或 Sidecar 请求。"""
+
+    from pixelflow.agent_tools.repository import AgentToolBindingConflictError, SQLAgentToolRepository
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    authorization = request.headers.get("Authorization", "").strip()
+    if not authorization:
+        raise HTTPException(status_code=401, detail={"code": "harness_authorization_required"})
+    workspace = await _require_conversation_workspace(
+        request, user_id=user_id, conversation_id=conversation_id, workspace_id=workspace_id,
+    )
+    if workspace.revision != body.expected_workspace_revision:
+        raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
+    repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
+    if not isinstance(repository, SQLAgentToolRepository):
+        raise HTTPException(status_code=503, detail={"code": "harness_interrupt_repository_unavailable"})
+    original = await repository.get_run_binding_by_interrupt(interrupt_id)
+    interrupt = await repository.get_interrupt(interrupt_id)
+    if original is None or interrupt is None or interrupt.kind != "authorization_required":
+        raise HTTPException(status_code=404, detail={"code": "harness_interrupt_not_found"})
+    try:
+        responded = await repository.respond_interrupt(
+            interrupt_id=interrupt_id,
+            binding=original,
+            client_response_id=str(body.client_response_id),
+            expected_workspace_revision=body.expected_workspace_revision,
+        )
+    except (LookupError, AgentToolBindingConflictError) as error:
+        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
+    if responded.resumed_run_id is None:
+        resumed_run_id = await _start_harness_interrupt_resume(
+            request=request,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            workspace=workspace,
+            interrupt=responded,
+            trigger_type="authorization_resume",
+            user_input="用户已完成重新授权，请继续上一项受控操作。",
+            system_instruction="这是一次授权恢复。仅使用本次瞬时凭据执行已确认的受控操作。",
+            authorization=authorization,
+        )
+        responded = await repository.bind_interrupt_resume_run(
+            interrupt_id=interrupt_id,
+            client_response_id=str(body.client_response_id),
+            resumed_run_id=resumed_run_id,
+        )
+    await _publish_harness_interrupt_event(request, responded, closed=False)
+    return HarnessInterruptSubmissionResponse(
+        interrupt_id=interrupt_id,
+        run_id=responded.resumed_run_id,
+        status="accepted",
+        workspace_revision=workspace.revision,
+    )
+
+
+async def _start_harness_interrupt_resume(
+    *,
+    request: Request,
+    user_id: str,
+    conversation_id: str,
+    workspace: Any,
+    interrupt: Any,
+    trigger_type: Literal["confirmation_resume", "authorization_resume", "form_resume"],
+    user_input: str,
+    system_instruction: str,
+    authorization: str = "",
+) -> str:
+    """创建可由稳定 trigger 回读的恢复 Run；授权只暂存为进程内 grant。"""
+
+    from pixelflow.agent_harness import GatewayHarnessSidecarError, HarnessRunRequest
+    from pixelflow.agent_harness.limits import LimitProfileResolver
+    from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
+
+    conversation = await _task_store(request).get_conversation(conversation_id, user_id=user_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    context = await _build_harness_context(
+        request, user_id=user_id, conversation=conversation, workspace=workspace, user_input=user_input,
+    )
+    limits = LimitProfileResolver().resolve(trigger_type)
+    credential_store = getattr(request.app.state, "pixelflow_transient_run_credential_store", None)
+    grant_id: str | None = None
+    if authorization and isinstance(credential_store, TransientRunCredentialStore):
+        grant_id = f"credential-grant:{uuid.uuid4()}"
+        await credential_store.put_grant(grant_id=grant_id, authorization=authorization)
+    try:
+        handle = await _harness_run_bridge(request).start(HarnessRunRequest(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            workspace_id=workspace.workspace_id,
+            workspace_revision=workspace.revision,
+            trigger_id=interrupt.interrupt_id + ":" + str(interrupt.response_id),
+            trigger_type=trigger_type,
+            user_input=user_input,
+            system_instruction=system_instruction,
+            context_digest=_harness_digest({
+                "interrupt_id": interrupt.interrupt_id,
+                "workspace_revision": workspace.revision,
+                "response": interrupt.response_payload,
+                "context": context,
+            }),
+            model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+            context_budget_digest=_harness_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
+            run_limits_digest=limits.digest,
+            limit_profile=limits.profile,
+            max_model_steps=limits.max_model_steps,
+            max_business_tools=limits.max_business_tools,
+            max_billable_batch_starts=limits.max_billable_batch_starts,
+            deadline_seconds=limits.deadline_seconds,
+            max_output_tokens=192,
+            **context,
+            transient_credential_grant_id=grant_id,
+        ))
+    except GatewayHarnessSidecarError as error:
+        if grant_id is not None and isinstance(credential_store, TransientRunCredentialStore):
+            await credential_store.discard_grant(grant_id)
+        raise HTTPException(status_code=503, detail={"code": "harness_interrupt_resume_unavailable"}) from error
+    return handle.run_id
+
+
+async def _publish_harness_interrupt_event(request: Request, interrupt: Any, *, closed: bool) -> None:
+    """恢复 Run 已绑定后再写公开 Outbox；重放按稳定 event_id 回读。"""
+
+    events = getattr(request.app.state, "pixelflow_agent_runtime_repository", None)
+    if events is None:
+        raise HTTPException(status_code=503, detail={"code": "harness_event_outbox_unavailable"})
+    event_id = "hinterruptevt_" + hashlib.sha256(
+        f"v1:{interrupt.interrupt_id}:{interrupt.response_id}:{'closed' if closed else 'responded'}".encode(),
+    ).hexdigest()[:32]
+    if await events.get_event(interrupt.user_id, event_id) is not None:
+        return
+    for _ in range(8):
+        prior = await events.list_events(interrupt.user_id, interrupt.conversation_id)
+        event = AgentEvent(
+            event_id=event_id,
+            sequence=1 if not prior else prior[-1].sequence + 1,
+            cursor=event_id,
+            conversation_id=interrupt.conversation_id,
+            run_id=interrupt.run_id,
+            occurred_at=datetime.now(UTC),
+            type=(AgentEventType.INTERRUPT_CLOSED if closed else AgentEventType.INTERRUPT_RESPONDED),
+            payload={"interrupt_id": interrupt.interrupt_id, "kind": interrupt.kind},
+        )
+        try:
+            await events.create_event(interrupt.user_id, event)
+            return
+        except AgentRuntimeRecordConflictError:
+            if await events.get_event(interrupt.user_id, event_id) is not None:
+                return
+    raise HTTPException(status_code=503, detail={"code": "harness_event_outbox_unavailable"})
 
 
 @router.get("/{conversation_id}/harness-runs/{run_id}/events")
