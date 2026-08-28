@@ -366,8 +366,8 @@ def _project_harness_result(
 def _public_text_from_result(result: object) -> str:
     """兼容 Harness 版本的最终公开文本字段，绝不从 reasoning 或任意对象字符串化。"""
 
-    for field in ("final_response", "response", "output", "final_output", "text"):
-        value = getattr(result, field, None)
+    for attribute_name in ("final_response", "response", "output", "final_output", "text"):
+        value = getattr(result, attribute_name, None)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""

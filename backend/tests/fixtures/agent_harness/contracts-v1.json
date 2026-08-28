@@ -5,26 +5,7 @@
     "workspace_id": "workspace_demo",
     "expected_workspace_revision": 3,
     "content": "请检查当前视频工作区并给出下一步建议。",
-    "max_output_tokens": 192
-  },
-  "interrupt_response": {
-    "client_response_id": "22222222-2222-4222-8222-222222222222",
-    "value": {
-      "content": "确认这个方案。",
-      "materials": [],
-      "reply_to_message_id": "message_plan_v1",
-      "artifact_refs": ["artifact:video-plan:workspace_demo:v1"],
-      "explicit_action": {
-        "action": "continue_workflow",
-        "intent": "video",
-        "workflow_id": "workflow_demo",
-        "stage": "plan_review",
-        "artifact_ref": "artifact:video-plan:workspace_demo:v1",
-        "patch": {
-          "approved": true
-        }
-      }
-    }
+    "max_output_tokens": 1024
   },
   "workspace_command": {
     "client_command_id": "33333333-3333-4333-8333-333333333333",

@@ -687,9 +687,9 @@ async def start_harness_turn(
                 system_instruction=(
                     "你是 PixelFlow 视频 Agent。当前工作区事实必须先遵循已加载 Skill 的指令，"
                     "并使用受控 Tool 获取证据；不得猜测、编造或绕过 Tool Broker。"
-                    "当用户明确要求生成、制作或输出视频时，不得只返回方案文字：先调用"
-                    " inspect_video_workspace 获取证据，随后必须调用 generate_scenes 进入受控确认和"
-                    " M06 Operation 流程；只有用户明确要求分析已有视频时才调用 analyze_video。"
+                    "根据当前工作区和用户目标自主决定下一步：信息不足时先追问或完善脚本、"
+                    "分镜与计划；条件齐备且用户明确同意计费时才调用生成 Tool。"
+                    "不得把自然语言生成请求强制改造成固定工作流。"
                 ),
                 context_digest=context_digest,
                 model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
