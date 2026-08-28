@@ -48,6 +48,12 @@ logger = logging.getLogger(__name__)
 _CONVERSATION_MESSAGE_JOBS: dict[str, dict[str, Any]] = {}
 _CONVERSATION_MESSAGE_JOB_KEYS: dict[tuple[str, str, str], str] = {}
 _MAX_CONVERSATION_MESSAGE_JOBS = 300
+# 用途：限制每个新 Harness Run 携带的当前会话历史；影响：保留多轮已确认事实，避免历史正文挤占模型输入预算。
+_HARNESS_CONTEXT_HISTORY_MESSAGE_LIMIT = 16
+# 用途：限制单条公开消息注入模型的字符数；影响：超长回复只保留最新前缀，避免单次创意正文淹没后续用户确认。
+_HARNESS_CONTEXT_HISTORY_MESSAGE_CHAR_LIMIT = 6_000
+# 用途：限制当前会话历史总字符数；影响：优先保留最新 Turn，长期偏好仍由独立 Memory 投影提供。
+_HARNESS_CONTEXT_HISTORY_TOTAL_CHAR_LIMIT = 48_000
 
 
 class ConversationCreateRequest(BaseModel):
@@ -378,12 +384,17 @@ async def _build_harness_context(
             {"memory_id": item.memory_id, "content": item.content, "category": item.category}
             for item in memories[:20]
         ]
+    messages = await _task_store(request).list_conversation_messages(
+        conversation.conversation_id,
+        user_id=user_id,
+    )
     projection = {
         "workspace_projection": build_workspace_digest(workspace),
         "conversation_projection": {
             "title": conversation.title[:256],
             "last_phase": conversation.last_phase[:80],
             "revision": conversation.revision,
+            "recent_messages": _harness_context_history(messages),
         },
         "preference_projection": preference_projection,
         "brand_profile_projection": {},
@@ -393,6 +404,31 @@ async def _build_harness_context(
 
     # Context Builder 是 Sidecar 之前的最后一道预算与敏感字段门禁。
     return PixelFlowContextBuilder().build(projection).projection
+
+
+def _harness_context_history(
+    messages: list[PixelFlowConversationMessageRecord],
+) -> list[dict[str, str]]:
+    """投影当前会话最近公开消息，禁止把 payload、用户身份或内部事件交给 Sidecar。"""
+
+    selected: list[dict[str, str]] = []
+    remaining_chars = _HARNESS_CONTEXT_HISTORY_TOTAL_CHAR_LIMIT
+    for message in reversed(messages):
+        if message.role not in {"user", "assistant"}:
+            continue
+        content = message.content.strip()
+        if not content:
+            continue
+        content = content[:_HARNESS_CONTEXT_HISTORY_MESSAGE_CHAR_LIMIT]
+        if len(content) > remaining_chars:
+            content = content[:remaining_chars]
+        if not content:
+            break
+        selected.append({"role": message.role, "content": content})
+        remaining_chars -= len(content)
+        if len(selected) >= _HARNESS_CONTEXT_HISTORY_MESSAGE_LIMIT or remaining_chars <= 0:
+            break
+    return list(reversed(selected))
 
 
 async def _require_harness_admission(request: Request):

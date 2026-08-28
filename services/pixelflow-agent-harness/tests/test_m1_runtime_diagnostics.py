@@ -13,6 +13,7 @@ from pixelflow_harness_sidecar.deepseek_engine import (
     HarnessExecutionDiagnostic,
     HarnessExecutionError,
     HarnessProjectionError,
+    _build_model_input,
     _execution_diagnostic,
     _project_harness_result,
 )
@@ -157,6 +158,31 @@ def test_result_projection_does_not_depend_on_harness_private_sequence() -> None
     assert projected.final_response == "已完成"
     assert projected.finish_reason == "completed"
     assert projected.tool_names == ("inspect_video_workspace",)
+
+
+def test_model_input_includes_gateway_frozen_conversation_and_workspace_context() -> None:
+    """独立 Sidecar Session 必须接收 Gateway 组装的多轮事实，而非仅当前用户句子。"""
+
+    request = _request()
+    context = request.context.model_copy(
+        update={
+            "conversation_projection": {
+                "recent_messages": [
+                    {"role": "user", "content": "型号为 M20，画幅为 16:9。"},
+                    {"role": "assistant", "content": "已确认使用家庭温情风格。"},
+                ]
+            },
+            "workspace_projection": {"revision": 3, "script_status": "已确认"},
+        }
+    )
+
+    model_input = _build_model_input(request.model_copy(update={"context": context}))
+
+    assert "【冻结上下文】" in model_input
+    assert "型号为 M20，画幅为 16:9。" in model_input
+    assert "家庭温情风格" in model_input
+    assert '"revision":3' in model_input
+    assert model_input.index("型号为 M20") < model_input.index("【用户请求】")
 
 
 @pytest.mark.parametrize("runtime_finish_reason", ["completed", "complete", "stop", "end_turn"])
