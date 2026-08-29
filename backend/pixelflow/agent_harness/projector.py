@@ -21,6 +21,14 @@ from .contracts import HarnessRunEvent
 from .port import AgentHarnessPort
 from .sidecar import GatewayHarnessSidecarError
 
+_SNAPSHOT_EVENT_LIMIT = 256
+
+
+def _bounded_snapshot_events(events: list[AgentEvent]) -> list[AgentEvent]:
+    """保留 Snapshot 尾部事件，完整历史仍由 Outbox 与 SSE 游标提供。"""
+
+    return events[-_SNAPSHOT_EVENT_LIMIT:]
+
 
 class _EventRepository(Protocol):
     """描述 Harness 投影复用既有 Agent Event Outbox 所需的最小能力。"""
@@ -78,7 +86,7 @@ class HarnessRunProjector:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def snapshot(self, *, user_id: str, conversation_id: str, run_id: str) -> AgentSnapshotV1:
-        """从同一 Outbox 与消息表生成可刷新恢复的最小 Harness Snapshot。"""
+        """从同一 Outbox 与消息表生成可刷新恢复的有界 Harness Snapshot。"""
 
         binding = await self._require_binding(
             user_id=user_id,
@@ -117,7 +125,10 @@ class HarnessRunProjector:
             last_sequence=0 if last_event is None else last_event.sequence,
             last_cursor="" if last_event is None else last_event.cursor,
             context_version=0,
-            events=[self._to_public_event(event) for event in events],
+            # 历史事件仍完整保留在 Gateway Outbox；首屏只回放尾部，避免重复 Tool
+            # 进度把 Snapshot 撑大。last_sequence/last_cursor 仍指向完整 Outbox 尾部，
+            # 后续 SSE 从该位置继续，不会重复拉取历史。
+            events=[self._to_public_event(event) for event in _bounded_snapshot_events(events)],
             messages=response_messages,
             workspace=workspace,
         )
@@ -309,14 +320,14 @@ class HarnessRunProjector:
                 "suspended_authorization",
             }:
                 raise HarnessEventProjectionError("Sidecar 挂起状态不符合公开合同")
-            if payload["status"] == "suspended_confirmation":
+            if payload["status"] in {"suspended_confirmation", "suspended_authorization"}:
                 interrupt_id = source_event.payload.get("interrupt_id")
                 if (
                     not isinstance(interrupt_id, str)
                     or not interrupt_id.strip()
                     or len(interrupt_id) > 128
                 ):
-                    raise HarnessEventProjectionError("Sidecar 确认中断身份不符合公开合同")
+                    raise HarnessEventProjectionError("Sidecar 人工中断身份不符合公开合同")
                 payload["interrupt_id"] = interrupt_id
             if source_event.type == "run.failed":
                 code = source_event.payload.get("code")

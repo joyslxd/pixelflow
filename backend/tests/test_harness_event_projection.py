@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
-from pixelflow.agent_control_plane.contracts import AgentEventType
+from datetime import UTC, datetime
+
+from pixelflow.agent_control_plane.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_harness.contracts import HarnessRunEvent
-from pixelflow.agent_harness.projector import HarnessRunProjector
+from pixelflow.agent_harness.projector import HarnessRunProjector, _bounded_snapshot_events
+
+
+def test_snapshot_event_tail_is_bounded_without_changing_public_sequence() -> None:
+    """Snapshot 只携带尾部事件，完整序号仍由 Gateway SSE 游标维护。"""
+
+    events = [
+        AgentEvent(
+            event_id=f"hevt_{index:032x}",
+            sequence=index + 1,
+            cursor=f"cursor-{index}",
+            conversation_id="conv-1",
+            run_id="hrun_0123456789abcdef0123456789abcdef",
+            occurred_at=datetime.now(UTC),
+            type=AgentEventType.AGENT_RESPONSE_DELTA,
+            payload={"delta": "x"},
+        )
+        for index in range(300)
+    ]
+    tail = _bounded_snapshot_events(events)
+
+    assert len(tail) == 256
+    assert tail[0].sequence == 45
+    assert tail[-1].sequence == 300
 
 
 def test_cancelled_sidecar_run_is_a_terminal_public_state() -> None:
