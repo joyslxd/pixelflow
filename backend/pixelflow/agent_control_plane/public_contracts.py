@@ -59,6 +59,18 @@ class AgentSnapshotV1(_ControlPlaneModel):
     last_cursor: str = Field(default="", max_length=128)
 
 
+class TurnMaterialV1(_ControlPlaneModel):
+    """本次用户输入引用的已上传材料；二进制始终留在 content-app/TOS。"""
+
+    material_id: UUID
+    kind: Literal["image", "video", "audio", "file"]
+    name: str = Field(min_length=1, max_length=255)
+    reference_label: str = Field(min_length=1, max_length=80)
+    content_type: str = Field(min_length=1, max_length=120)
+    url: str = Field(pattern=r"^https?://", max_length=4_096)
+    asset_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class HarnessTurnStartRequestV1(_ControlPlaneModel):
     """公开 Turn 入参：工作区归属由 Gateway 回查，浏览器不得自造业务副本。"""
 
@@ -66,6 +78,7 @@ class HarnessTurnStartRequestV1(_ControlPlaneModel):
     workspace_id: str = Field(min_length=1, max_length=64)
     expected_workspace_revision: int = Field(ge=1)
     content: str = Field(min_length=1, max_length=32_000)
+    materials: list[TurnMaterialV1] = Field(default_factory=list, max_length=9)
     # 用途：允许浏览器为多 Tool 旅程申请足够的最终回复预算；影响：上限与 Gateway/Sidecar Harness DTO 一致，仍受模型档案与上下文预算约束。
     max_output_tokens: int = Field(default=8192, ge=1, le=131_072)
 
@@ -94,5 +107,6 @@ __all__ = [
     "HarnessTurnStartResponseV1",
     "PublicAgentEventV1",
     "PublicMessageV1",
+    "TurnMaterialV1",
     "VideoWorkspaceProjectionV1",
 ]

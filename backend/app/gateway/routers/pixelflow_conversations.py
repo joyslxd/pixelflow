@@ -679,6 +679,14 @@ async def start_harness_turn(
                 "current_revision": workspace.revision,
             },
         )
+    if body.materials:
+        workspace = await VideoWorkspaceMutationService(_harness_video_repository(request)).apply_patch(
+            user_id=user_id,
+            workspace_id=workspace.workspace_id,
+            patch={"materials_append": [material.model_dump(mode="json") for material in body.materials]},
+            expected_revision=workspace.revision,
+            now=datetime.now(UTC),
+        )
     message = await _append_conversation_message(
         store,
         conversation_id,
@@ -688,6 +696,7 @@ async def start_harness_turn(
             payload={
                 "client_message_id": str(body.client_input_id),
                 "source": "harness_turn",
+                "materials": [material.model_dump(mode="json") for material in body.materials],
             },
         ),
         user_id=user_id,
