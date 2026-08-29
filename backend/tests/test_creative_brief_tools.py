@@ -8,6 +8,7 @@ from pixelflow.agent_tools.video.creative_brief import (
     SelectCreativeOptionTool,
     UpdateCreativeBriefTool,
 )
+from pixelflow.agent_tools.video.storyboard import ReviseStoryboardTool
 from pixelflow.video.contracts import VideoWorkspace
 
 
@@ -76,3 +77,46 @@ async def test_inspect_creative_brief_returns_bounded_options() -> None:
     )
     assert result.model_observation["active_option_id"] == "option-a"
     assert result.model_observation["options"][0]["title"] == "温情版"
+
+
+@pytest.mark.asyncio
+async def test_revise_storyboard_updates_multiple_segments_and_marks_assets_stale() -> None:
+    result = await ReviseStoryboardTool().execute(
+        _context(
+            {
+                "creative_brief": {"active_option_id": "option-a"},
+                "scenes": [
+                    {
+                        "scene_id": "A",
+                        "segment_id": "A",
+                        "prompt": "旧开场",
+                        "duration_sec": 20,
+                        "variants": [{"video_url": "https://example.com/a.mp4"}],
+                    },
+                    {
+                        "scene_id": "B",
+                        "segment_id": "B",
+                        "prompt": "旧结尾",
+                        "duration_sec": 20,
+                    },
+                ],
+                "prompt_packages": [
+                    {"segment_id": "A", "sequence": 1, "duration_sec": 20, "prompt": "旧开场"},
+                    {"segment_id": "B", "sequence": 2, "duration_sec": 20, "prompt": "旧结尾"},
+                ],
+            }
+        ),
+        {
+            "option_id": "option-a",
+            "revisions": [
+                {"segment_id": "A", "prompt": "新开场", "duration_sec": 26},
+                {"segment_id": "B", "sound": "加入门锁声"},
+            ],
+        },
+    )
+    assert result.model_observation["affected_segment_ids"] == ["A", "B"]
+    assert result.model_observation["stale_video_count"] == 1
+    assert result.workspace_patch["dirty_scene_ids"] == ["A", "B"]
+    assert result.workspace_patch["scenes"][0]["prompt"] == "新开场"
+    assert result.workspace_patch["scenes"][0]["video_asset_state"] == "stale"
+    assert result.workspace_patch["prompt_packages"][1]["sound"] == "加入门锁声"

@@ -46,6 +46,8 @@ from .storyboard import (
     CreateStoryboardTool,
     PrepareScenePackagesInput,
     PrepareScenePackagesTool,
+    ReviseStoryboardInput,
+    ReviseStoryboardTool,
     StoryboardSceneInput,
 )
 
@@ -83,6 +85,8 @@ __all__ = [
     "PrepareScenePackagesTool",
     "CreateStoryboardTool",
     "StoryboardSceneInput",
+    "ReviseStoryboardInput",
+    "ReviseStoryboardTool",
     "VideoToolSpec",
     "VideoToolValidationError",
     "CreativeBriefOptionPatch",

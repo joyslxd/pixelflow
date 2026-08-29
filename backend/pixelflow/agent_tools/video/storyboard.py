@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -64,6 +65,47 @@ class PrepareScenePackagesInput(BaseModel):
         scene_ids = [scene.scene_id.strip() for scene in self.scenes]
         if len(set(scene_ids)) != len(scene_ids):
             raise ValueError("分镜 scene_id 不能重复")
+        return self
+
+
+class StoryboardRevisionPatch(BaseModel):
+    """单个分镜的局部修订字段；未提供字段保持原值。"""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    segment_id: str = Field(min_length=1, max_length=128)
+    prompt: str | None = Field(default=None, max_length=20_000)
+    duration_sec: int | None = Field(default=None, ge=4, le=30)
+    generation_mode: Literal["independent", "extend", "reference"] | None = None
+    reference_asset_ids: tuple[str, ...] | None = Field(default=None, max_length=32)
+    continuity_from: str | None = Field(default=None, max_length=128)
+    transition_out: str | None = Field(default=None, max_length=2_000)
+    era: str | None = Field(default=None, max_length=512)
+    camera: str | None = Field(default=None, max_length=2_000)
+    sound: str | None = Field(default=None, max_length=2_000)
+    hard_constraints: tuple[str, ...] | None = Field(default=None, max_length=64)
+    title: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_non_empty(self) -> StoryboardRevisionPatch:
+        if not self.model_fields_set - {"segment_id"}:
+            raise ValueError("分镜修订不能为空")
+        return self
+
+
+class ReviseStoryboardInput(BaseModel):
+    """批量局部修订分镜，不触发图片或视频生成。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    option_id: str | None = Field(default=None, max_length=128)
+    revisions: tuple[StoryboardRevisionPatch, ...] = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_unique_segments(self) -> ReviseStoryboardInput:
+        ids = [item.segment_id.strip() for item in self.revisions]
+        if len(set(ids)) != len(ids):
+            raise ValueError("分镜修订 segment_id 不能重复")
         return self
 
 
@@ -160,6 +202,93 @@ class PrepareScenePackagesTool:
             model_observation={
                 "scene_count": len(scenes),
                 "total_duration_sec": total,
+                "workspace_revision_required": True,
+            },
+        )
+
+
+class ReviseStoryboardTool:
+    """批量修改已存在分镜，并将受影响的旧视频标记为 stale。"""
+
+    spec = VideoToolSpec(
+        name="revise_storyboard",
+        description="批量局部修订分镜 Prompt 和生产字段；保留旧资产并标记待重新生成，不自动触发生成。",
+        input_model=ReviseStoryboardInput,
+        cost_level=VideoToolCostLevel.NONE,
+        confirmation_required=False,
+        idempotency_mode=VideoToolIdempotencyMode.REQUEST,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("scenes", "scene_packages", "prompt_packages", "dirty_scene_ids"),
+        model_observation_keys=("affected_segment_ids", "stale_video_count", "workspace_revision_required"),
+    )
+
+    async def execute(
+        self,
+        context: VideoToolContext,
+        arguments: Mapping[str, object],
+    ) -> VideoToolResult:
+        request = ReviseStoryboardInput.model_validate(dict(arguments))
+        payload = migrate_workspace_payload(context.workspace.payload)
+        brief = payload.get("creative_brief")
+        if request.option_id is not None:
+            active_option = str(brief.get("active_option_id") or "") if isinstance(brief, Mapping) else ""
+            if active_option and active_option != request.option_id:
+                raise VideoToolValidationError("分镜修订版本不是当前选中的创意版本")
+
+        raw_scenes = payload.get("scenes") or payload.get("scene_packages")
+        scenes = [dict(item) for item in raw_scenes if isinstance(item, Mapping)] if isinstance(raw_scenes, list) else []
+        packages_raw = payload.get("prompt_packages")
+        packages = [dict(item) for item in packages_raw if isinstance(item, Mapping)] if isinstance(packages_raw, list) else []
+        by_segment = {
+            str(item.get("segment_id") or item.get("scene_id") or "").strip(): item
+            for item in scenes
+        }
+        package_by_segment = {
+            str(item.get("segment_id") or item.get("scene_id") or "").strip(): item
+            for item in packages
+        }
+        missing = [item.segment_id for item in request.revisions if item.segment_id not in by_segment]
+        if missing:
+            raise VideoToolValidationError(f"分镜不存在：{', '.join(missing[:4])}")
+
+        stale_count = 0
+        affected: list[str] = []
+        for revision in request.revisions:
+            segment_id = revision.segment_id
+            changes = revision.model_dump(mode="json", exclude_unset=True)
+            changes.pop("segment_id", None)
+            scene = by_segment[segment_id]
+            scene.update(changes)
+            scene["segment_id"] = scene.get("segment_id") or segment_id
+            scene["edit_status"] = "待重新生成"
+            scene["video_asset_state"] = "stale"
+            variants = scene.get("variants")
+            if isinstance(variants, list):
+                stale_count += len(variants)
+            package = package_by_segment.get(segment_id)
+            if package is not None:
+                package.update(changes)
+                package["segment_id"] = package.get("segment_id") or segment_id
+                package["state"] = "planned"
+            affected.append(segment_id)
+
+        dirty = payload.get("dirty_scene_ids")
+        dirty_ids = [str(item) for item in dirty] if isinstance(dirty, list) else []
+        for segment_id in affected:
+            if segment_id not in dirty_ids:
+                dirty_ids.append(segment_id)
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary=f"已修订 {len(affected)} 个分镜，保留旧视频并标记为待重新生成。",
+            workspace_patch={
+                "scenes": scenes,
+                "scene_packages": scenes,
+                "prompt_packages": packages,
+                "dirty_scene_ids": dirty_ids,
+            },
+            model_observation={
+                "affected_segment_ids": affected,
+                "stale_video_count": stale_count,
                 "workspace_revision_required": True,
             },
         )

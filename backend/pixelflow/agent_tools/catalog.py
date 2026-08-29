@@ -14,6 +14,7 @@ from .video import (
     PatchSceneTool,
     PrepareScenePackagesTool,
     ReplaceSceneAssetTool,
+    ReviseStoryboardTool,
     SelectCreativeOptionTool,
     UpdateCreativeBriefTool,
     UpdateScriptTool,
@@ -42,6 +43,7 @@ def runtime_video_tool_registry(
             ReplaceSceneAssetTool(),
             PrepareScenePackagesTool(),
             CreateStoryboardTool(),
+            ReviseStoryboardTool(),
             UpdateCreativeBriefTool(),
             SelectCreativeOptionTool(),
     ]
