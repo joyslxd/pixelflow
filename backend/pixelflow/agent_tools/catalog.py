@@ -6,6 +6,7 @@ from .video import (
     AnalyzeVideoTool,
     CreateStoryboardTool,
     GenerateScenesTool,
+    InspectCreativeBriefTool,
     InspectSceneTool,
     InspectScriptTool,
     InspectVideoPlanTool,
@@ -13,6 +14,8 @@ from .video import (
     PatchSceneTool,
     PrepareScenePackagesTool,
     ReplaceSceneAssetTool,
+    SelectCreativeOptionTool,
+    UpdateCreativeBriefTool,
     UpdateScriptTool,
     UpdateVideoPlanTool,
     VideoToolRegistry,
@@ -29,6 +32,7 @@ def runtime_video_tool_registry(
 
     tools = [
             InspectVideoWorkspaceTool(),
+            InspectCreativeBriefTool(),
             InspectScriptTool(),
             UpdateScriptTool(),
             InspectVideoPlanTool(plan_repository=plan_repository),
@@ -38,6 +42,8 @@ def runtime_video_tool_registry(
             ReplaceSceneAssetTool(),
             PrepareScenePackagesTool(),
             CreateStoryboardTool(),
+            UpdateCreativeBriefTool(),
+            SelectCreativeOptionTool(),
     ]
     if scene_generation_batch_operation_port is not None:
         # 仅在 Gateway 已装配真实 Provider/M06 Port 时发布计费 Tool，避免空实现被模型选择。

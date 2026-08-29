@@ -11,6 +11,14 @@ from .contracts import (
     VideoToolSpec,
     VideoToolValidationError,
 )
+from .creative_brief import (
+    CreativeBriefOptionPatch,
+    InspectCreativeBriefInput,
+    InspectCreativeBriefTool,
+    SelectCreativeOptionInput,
+    SelectCreativeOptionTool,
+    UpdateCreativeBriefTool,
+)
 from .credential_store import TransientBatchCredentialStore, TransientRunCredentialStore
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
 from .registry import VideoToolRegistry
@@ -22,6 +30,7 @@ from .scene import (
     PatchSceneTool,
     ReplaceSceneAssetInput,
     ReplaceSceneAssetTool,
+    SceneGenerationBatchResult,
 )
 from .script_plan import (
     InspectScriptInput,
@@ -61,6 +70,7 @@ __all__ = [
     "InspectSceneTool",
     "GenerateScenesInput",
     "GenerateScenesTool",
+    "SceneGenerationBatchResult",
     "PatchSceneInput",
     "PatchSceneTool",
     "ReplaceSceneAssetInput",
@@ -75,4 +85,10 @@ __all__ = [
     "StoryboardSceneInput",
     "VideoToolSpec",
     "VideoToolValidationError",
+    "CreativeBriefOptionPatch",
+    "InspectCreativeBriefInput",
+    "InspectCreativeBriefTool",
+    "SelectCreativeOptionInput",
+    "SelectCreativeOptionTool",
+    "UpdateCreativeBriefTool",
 ]
