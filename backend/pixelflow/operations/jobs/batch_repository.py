@@ -120,13 +120,22 @@ class MemoryOperationBatchRepository:
                 self._records[plan.batch_idempotency_key] = candidate
                 return candidate
             if (
+                existing.user_id != candidate.user_id
+                or
                 existing.batch_id != candidate.batch_id
                 or existing.workspace_id != candidate.workspace_id
                 or existing.run_id != candidate.run_id
                 or existing.tool_call_id != candidate.tool_call_id
                 or existing.attempt != candidate.attempt
                 or existing.source_workspace_revision != candidate.source_workspace_revision
-                or existing.children != candidate.children
+                or tuple(
+                    (child.operation_idempotency_key, child.scene_id, child.variant_index)
+                    for child in existing.children
+                )
+                != tuple(
+                    (child.operation_idempotency_key, child.scene_id, child.variant_index)
+                    for child in candidate.children
+                )
             ):
                 raise AgentRuntimeRecordConflictError("OperationBatch 幂等键被不同请求占用")
             return existing

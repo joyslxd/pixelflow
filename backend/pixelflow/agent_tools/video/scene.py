@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 from urllib.parse import urlparse
@@ -165,8 +166,8 @@ class ReplaceSceneAssetInput(BaseModel):
 class GenerateScenesInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # M06 一个批次最多 6 个 scene × variant 子 Operation；输入层先做硬限制。
-    scene_ids: tuple[str, ...] = Field(default=(), max_length=6)
+    # Agent 可以选择任意已规划镜头；M06 Port 在 Gateway 内部拆为最多 6 个子 Operation 的批次。
+    scene_ids: tuple[str, ...] = Field(default=(), max_length=120)
     variant_count: int = Field(default=1, ge=1, le=3)
     attempt: int = Field(default=1, ge=1, le=10)
 
@@ -174,8 +175,6 @@ class GenerateScenesInput(BaseModel):
     def validate_unique_ids(self) -> GenerateScenesInput:
         if len(set(self.scene_ids)) != len(self.scene_ids):
             raise ValueError("scene_ids 不能重复")
-        if len(self.scene_ids) * self.variant_count > 6:
-            raise ValueError("单次镜头生成最多包含 6 个 scene × variant 子任务")
         return self
 
 
@@ -229,6 +228,14 @@ class SceneGenerationJob(VideoAgentContract):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class SceneGenerationBatchResult:
+    """一次 generate_scenes 调用内部一个 M06 批次的稳定结果。"""
+
+    batch_id: str
+    jobs: tuple[SceneGenerationJob, ...]
+
+
 class SceneGenerationOperationPort(Protocol):
     """隔离工具与M06 Operation、一次性凭据及供应商Client。"""
 
@@ -253,6 +260,15 @@ class SceneGenerationBatchOperationPort(Protocol):
         variant_count: int,
         attempt: int,
     ) -> tuple[str, tuple[SceneGenerationJob, ...]]: ...
+
+    async def create_or_read_batches(
+        self,
+        context: VideoToolContext,
+        *,
+        scenes: Sequence[Mapping[str, JsonValue]],
+        variant_count: int,
+        attempt: int,
+    ) -> tuple[SceneGenerationBatchResult, ...]: ...
 
 
 class InspectSceneTool:
@@ -662,22 +678,34 @@ class GenerateScenesTool:
         scene_ids = list(request.scene_ids) or _text_list(payload.get("dirty_scene_ids"))
         if not scene_ids:
             raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
-        if len(scene_ids) * request.variant_count > 6:
-            raise VideoToolValidationError("单次镜头生成最多包含 6 个 scene × variant 子任务")
         selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
         if self._batch_operation_port is None:
             raise VideoToolExecutionError("镜头生成Operation尚未装配")
         jobs_by_scene: dict[str, list[SceneGenerationJob]] = {
             scene_id: [] for scene_id in scene_ids
         }
-        batch_id, jobs = await self._batch_operation_port.create_or_read_batch(
-            context,
-            scenes=tuple(selected),
-            variant_count=request.variant_count,
-            attempt=request.attempt,
-        )
-        if not batch_id.startswith("operation-batch-"):
+        batch_creator = getattr(self._batch_operation_port, "create_or_read_batches", None)
+        if callable(batch_creator):
+            batch_results = await batch_creator(
+                context,
+                scenes=tuple(selected),
+                variant_count=request.variant_count,
+                attempt=request.attempt,
+            )
+        else:
+            # 兼容尚未升级的测试/插件 Port；正式 Gateway Port 始终走内部拆批实现。
+            batch_id, jobs = await self._batch_operation_port.create_or_read_batch(
+                context,
+                scenes=tuple(selected),
+                variant_count=request.variant_count,
+                attempt=request.attempt,
+            )
+            batch_results = (SceneGenerationBatchResult(batch_id=batch_id, jobs=jobs),)
+        if not batch_results or any(
+            not result.batch_id.startswith("operation-batch-") for result in batch_results
+        ):
             raise VideoToolExecutionError("镜头生成批次身份无效")
+        jobs = tuple(job for result in batch_results for job in result.jobs)
         if len(jobs) != len(selected) * request.variant_count:
             raise VideoToolExecutionError("镜头生成批次子任务数量不一致")
         for job in jobs:
@@ -867,7 +895,10 @@ class GenerateScenesTool:
         }
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=f"已创建批次 {batch_id}，包含 {len(jobs)} 个镜头生成子任务",
+            public_summary=(
+                f"已创建 {len(batch_results)} 个生成批次，"
+                f"包含 {len(jobs)} 个镜头生成子任务"
+            ),
             workspace_patch=workspace_patch,
             artifact_refs=tuple(
                 job.artifact_ref

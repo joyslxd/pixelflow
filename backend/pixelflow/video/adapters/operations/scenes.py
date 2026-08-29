@@ -16,8 +16,9 @@ from pixelflow.agent_control_plane.contracts import ExternalJobStatus
 from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRepository
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
 from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
-from pixelflow.agent_tools.video.scene import SceneGenerationJob
+from pixelflow.agent_tools.video.scene import SceneGenerationBatchResult, SceneGenerationJob
 from pixelflow.operations.jobs import (
+    MAX_CHILD_OPERATIONS_PER_BATCH,
     OperationBatchRecord,
     OperationBatchRepository,
     OperationStartCoordinator,
@@ -335,7 +336,53 @@ class M06SceneGenerationBatchOperationPort:
         variant_count: int,
         attempt: int,
     ) -> tuple[str, tuple[SceneGenerationJob, ...]]:
-        """创建或回读 scene × variant 批次；Tool 本身不再循环启动 Provider。"""
+        """创建或回读一个 M06 批次；兼容只选择一个批次的既有调用方。"""
+
+        return await self._create_or_read_batch(
+            context,
+            scenes=scenes,
+            variant_count=variant_count,
+            attempt=attempt,
+            batch_index=1,
+        )
+
+    async def create_or_read_batches(
+        self,
+        context: VideoToolContext,
+        *,
+        scenes: Sequence[Mapping[str, JsonValue]],
+        variant_count: int,
+        attempt: int,
+    ) -> tuple[SceneGenerationBatchResult, ...]:
+        """按 M06 子 Operation 上限拆批；Agent 不必知道批次数或拆分规则。"""
+
+        if not scenes:
+            raise VideoToolExecutionError("镜头生成批次缺少镜头")
+        batch_scene_capacity = MAX_CHILD_OPERATIONS_PER_BATCH // variant_count
+        if batch_scene_capacity < 1:
+            raise VideoToolExecutionError("镜头生成批次版本数无效")
+        results: list[SceneGenerationBatchResult] = []
+        for offset in range(0, len(scenes), batch_scene_capacity):
+            batch_id, jobs = await self._create_or_read_batch(
+                context,
+                scenes=scenes[offset : offset + batch_scene_capacity],
+                variant_count=variant_count,
+                attempt=attempt,
+                batch_index=(offset // batch_scene_capacity) + 1,
+            )
+            results.append(SceneGenerationBatchResult(batch_id=batch_id, jobs=jobs))
+        return tuple(results)
+
+    async def _create_or_read_batch(
+        self,
+        context: VideoToolContext,
+        *,
+        scenes: Sequence[Mapping[str, JsonValue]],
+        variant_count: int,
+        attempt: int,
+        batch_index: int,
+    ) -> tuple[str, tuple[SceneGenerationJob, ...]]:
+        """创建或回读一个已按上层稳定顺序切分的 M06 批次。"""
 
         if context.run_id is None or context.tool_call_id is None:
             raise VideoToolExecutionError("镜头生成批次缺少冻结 Run 绑定")
@@ -347,6 +394,7 @@ class M06SceneGenerationBatchOperationPort:
                 scene_ids=scene_ids,
                 variant_count=variant_count,
                 attempt=attempt,
+                batch_index=batch_index,
             )
         except (ValueError, OperationConflictError) as exc:
             raise VideoToolExecutionError("镜头生成批次参数无效") from exc

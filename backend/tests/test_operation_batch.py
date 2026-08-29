@@ -69,6 +69,20 @@ def test_batch_and_child_identities_are_stable_and_distinct() -> None:
         attempt=1,
         provider_request={"scene_id": "scene-1"},
     ).idempotency_key
+    assert build_operation_batch_plan(
+        run_id="hrun_" + "a" * 32,
+        tool_call_id="tool-call-1",
+        scene_ids=("scene-1",),
+        variant_count=1,
+        attempt=1,
+        batch_index=1,
+    ).batch_id == build_operation_batch_plan(
+        run_id="hrun_" + "a" * 32,
+        tool_call_id="tool-call-1",
+        scene_ids=("scene-1",),
+        variant_count=1,
+        attempt=1,
+    ).batch_id
 
 
 @pytest.mark.asyncio
@@ -341,6 +355,72 @@ async def test_scene_batch_port_uses_dispatcher_slots_instead_of_tool_loop() -> 
     assert len(child_port.started) == 2
     assert sum(job.status == "queued" for job in jobs) == 2
     assert sum(job.status == "polling" for job in jobs) == 2
+
+
+@pytest.mark.asyncio
+async def test_scene_batch_port_splits_arbitrary_selection_into_m06_batches() -> None:
+    """Agent 可一次选择任意镜头，Gateway 按 6 个子项在 M06 内部拆批。"""
+
+    class FakeSceneOperationPort:
+        async def start_scene_variant(
+            self,
+            context,
+            *,
+            scene,
+            variant_index,
+            attempt,
+            workflow_id=None,
+            expected_operation_idempotency_key=None,
+        ):
+            del context, attempt, workflow_id, expected_operation_idempotency_key
+            return SceneGenerationJob(
+                job_id=f"job-{scene['scene_id']}-v{variant_index}",
+                scene_id=str(scene["scene_id"]),
+                variant_index=variant_index,
+                status="polling",
+            )
+
+    repository = MemoryOperationBatchRepository()
+    dispatcher = M06SceneGenerationBatchDispatcher(
+        batch_repository=repository,
+        operation_port=FakeSceneOperationPort(),  # type: ignore[arg-type]
+        max_concurrent_child_operations_per_batch=6,
+    )
+    port = M06SceneGenerationBatchOperationPort(
+        batch_repository=repository,
+        dispatcher=dispatcher,
+    )
+    workspace = VideoWorkspace(
+        workspace_id="workspace-long",
+        conversation_id="conversation-long",
+        revision=1,
+        payload={},
+    )
+    context = VideoToolContext(
+        user_id="user",
+        workspace=workspace,
+        run_id="hrun_" + "m" * 32,
+        tool_call_id="tool-call-long",
+    )
+    results = await port.create_or_read_batches(
+        context,
+        scenes=tuple({"scene_id": str(index)} for index in range(1, 18)),
+        variant_count=1,
+        attempt=1,
+    )
+
+    assert [len(result.jobs) for result in results] == [6, 6, 5]
+    assert len({result.batch_id for result in results}) == 3
+    assert [job.scene_id for result in results for job in result.jobs] == [
+        str(index) for index in range(1, 18)
+    ]
+    replay = await port.create_or_read_batches(
+        context,
+        scenes=tuple({"scene_id": str(index)} for index in range(1, 18)),
+        variant_count=1,
+        attempt=1,
+    )
+    assert replay == results
 
 
 @pytest.mark.asyncio

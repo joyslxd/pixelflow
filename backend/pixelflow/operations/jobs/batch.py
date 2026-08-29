@@ -39,6 +39,7 @@ def build_operation_batch_plan(
     scene_ids: tuple[str, ...],
     variant_count: int,
     attempt: int,
+    batch_index: int = 1,
 ) -> OperationBatchPlan:
     """由冻结 Run/Tool 身份生成批次及子 Operation 的双重幂等键。"""
 
@@ -48,6 +49,8 @@ def build_operation_batch_plan(
         raise ValueError("variant_count 必须在 1 到 3 之间")
     if isinstance(attempt, bool) or attempt < 1:
         raise ValueError("attempt 必须为正整数")
+    if isinstance(batch_index, bool) or batch_index < 1:
+        raise ValueError("batch_index 必须为正整数")
     normalized_scenes = tuple(scene_id.strip() for scene_id in scene_ids)
     if not normalized_scenes or any(not scene_id for scene_id in normalized_scenes):
         raise ValueError("计费批次至少需要一个非空 scene_id")
@@ -60,7 +63,18 @@ def build_operation_batch_plan(
     )
     if len(child_pairs) > MAX_CHILD_OPERATIONS_PER_BATCH:
         raise OperationConflictError("单个计费批次最多包含 6 个子 Operation")
-    batch_identity = _digest({"run_id": run_id, "tool_call_id": tool_call_id, "attempt": attempt})
+    # 一个 Tool Call 可选择很多镜头；拆分后的每个批次都必须有稳定且不同的身份。
+    # batch_index 只由 Gateway 按用户选择镜头的稳定顺序派生，模型不参与身份生成。
+    batch_identity_payload: dict[str, Any] = {
+        "run_id": run_id,
+        "tool_call_id": tool_call_id,
+        "attempt": attempt,
+    }
+    # 第 1 批沿用 M06 原有身份，升级部署后重放旧 Tool Call 不会重复计费；
+    # 只有拆出的后续批次才把索引纳入身份。
+    if batch_index > 1:
+        batch_identity_payload["batch_index"] = batch_index
+    batch_identity = _digest(batch_identity_payload)
     batch_id = "operation-batch-" + batch_identity[:32]
     children = tuple(
         OperationBatchChild(
