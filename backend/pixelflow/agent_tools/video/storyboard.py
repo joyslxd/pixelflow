@@ -7,6 +7,13 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from pixelflow.video.contracts import VideoToolResult
+from pixelflow.video.workspace.payload import (
+    WORKSPACE_SCHEMA_VERSION,
+    WorkspaceAssetRecord,
+    WorkspaceCreativeBrief,
+    WorkspacePromptPackage,
+    migrate_workspace_payload,
+)
 
 from .contracts import (
     VideoToolContext,
@@ -48,6 +55,9 @@ class PrepareScenePackagesInput(BaseModel):
         min_length=1,
         max_length=MAX_STORYBOARD_SCENE_COUNT,
     )
+    creative_brief: WorkspaceCreativeBrief | None = None
+    narrative_plan: dict[str, JsonValue] = Field(default_factory=dict)
+    asset_registry: tuple[WorkspaceAssetRecord, ...] = ()
 
     @model_validator(mode="after")
     def validate_duration_and_ids(self) -> PrepareScenePackagesInput:
@@ -88,20 +98,59 @@ class PrepareScenePackagesTool:
         except Exception as exc:
             raise VideoToolValidationError("脚本或分镜参数无效") from exc
 
-        previous_script = context.workspace.payload.get("script")
+        payload = migrate_workspace_payload(context.workspace.payload)
+        previous_script = payload.get("script")
         script_data = dict(previous_script) if isinstance(previous_script, Mapping) else {}
         script_data.update({"content": request.script.strip(), "status": "已编辑"})
         scenes: list[dict[str, JsonValue]] = []
         for scene in request.scenes:
             item = scene.model_dump(mode="json", exclude_none=True)
-            item.update({"edit_status": "待生成", "generation_jobs": [], "variants": []})
+            item.update(
+                {
+                    "segment_id": item.get("segment_id") or item["scene_id"],
+                    "sequence": item.get("sequence") or len(scenes) + 1,
+                    "generation_mode": item.get("generation_mode") or "independent",
+                    "edit_status": "待生成",
+                    "generation_jobs": [],
+                    "variants": [],
+                }
+            )
             scenes.append(item)
         scene_ids = [str(item["scene_id"]) for item in scenes]
         total = sum(int(item["duration_sec"]) for item in scenes)
+        prompt_packages = [
+            WorkspacePromptPackage.model_validate(item).model_dump(mode="json")
+            for item in scenes
+        ]
+        existing_assets = payload.get("asset_registry")
+        asset_registry = (
+            [dict(item) for item in existing_assets if isinstance(item, Mapping)]
+            if isinstance(existing_assets, list)
+            else []
+        )
+        asset_by_id = {
+            str(item.get("asset_id")): item
+            for item in asset_registry
+            if str(item.get("asset_id") or "").strip()
+        }
+        for asset in request.asset_registry:
+            asset_by_id[asset.asset_id] = asset.model_dump(mode="json")
+        brief = payload.get("creative_brief")
+        creative_brief = dict(brief) if isinstance(brief, Mapping) else {}
+        if request.creative_brief is not None:
+            creative_brief.update(request.creative_brief.model_dump(mode="json", exclude_none=True))
+        narrative_plan = dict(payload.get("narrative_plan") or {})
+        narrative_plan.update(request.narrative_plan)
+        narrative_plan["script"] = request.script.strip()
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"已准备 {len(scenes)} 个分镜，总时长 {total} 秒；长片将按 M06 批次拆分，下一步可请求生成确认。",
             workspace_patch={
+                "workspace_schema_version": WORKSPACE_SCHEMA_VERSION,
+                "creative_brief": creative_brief,
+                "narrative_plan": narrative_plan,
+                "asset_registry": list(asset_by_id.values()),
+                "prompt_packages": prompt_packages,
                 "script": script_data,
                 "scenes": scenes,
                 "scene_packages": scenes,

@@ -9,6 +9,14 @@ from .digest import (
 )
 from .ids import video_workspace_id_for_conversation
 from .memory_repository import MemoryVideoAgentRepository
+from .payload import (
+    WORKSPACE_SCHEMA_VERSION,
+    WorkspaceAssetRecord,
+    WorkspaceCreativeBrief,
+    WorkspacePayloadV2,
+    WorkspacePromptPackage,
+    migrate_workspace_payload,
+)
 from .projection import ensure_conversation_video_workspace
 from .repository import VideoWorkspaceRepository
 from .sql_repository import SQLVideoAgentRepository
@@ -24,4 +32,10 @@ __all__ = [
     "MemoryVideoAgentRepository",
     "SQLVideoAgentRepository",
     "workspace_has_scene_asset_images",
+    "WORKSPACE_SCHEMA_VERSION",
+    "WorkspaceAssetRecord",
+    "WorkspaceCreativeBrief",
+    "WorkspacePayloadV2",
+    "WorkspacePromptPackage",
+    "migrate_workspace_payload",
 ]

@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import pytest
+
+from pixelflow.agent_tools.video.contracts import VideoToolContext
+from pixelflow.agent_tools.video.storyboard import PrepareScenePackagesTool
+from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.workspace import MemoryVideoAgentRepository
+from pixelflow.video.workspace.payload import (
+    WORKSPACE_SCHEMA_VERSION,
+    migrate_workspace_payload,
+)
+
+
+def test_legacy_workspace_payload_migrates_without_dropping_old_projection() -> None:
+    migrated = migrate_workspace_payload(
+        {
+            "product_info": {"brand": "美的", "name": "可爱多"},
+            "video_ratio": "9:16",
+            "script": {"content": "时间胶囊", "status": "已编辑"},
+            "scenes": [{"scene_id": "A", "prompt": "洗衣房", "duration_sec": 26}],
+        }
+    )
+    assert migrated["workspace_schema_version"] == WORKSPACE_SCHEMA_VERSION
+    assert migrated["product_info"] == {"brand": "美的", "name": "可爱多"}
+    assert migrated["creative_brief"]["aspect_ratio"] == "9:16"
+    assert migrated["narrative_plan"]["script"] == "时间胶囊"
+    assert migrated["prompt_packages"][0]["segment_id"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_writes_four_layers_and_legacy_projections_together() -> None:
+    workspace = VideoWorkspace(
+        workspace_id="workspace-v2",
+        conversation_id="conversation-v2",
+        revision=3,
+        payload={"product_info": {"brand": "美的", "name": "可爱多"}},
+    )
+    context = VideoToolContext(user_id="user", workspace=workspace)
+    result = await PrepareScenePackagesTool().execute(
+        context,
+        {
+            "script": "母女与时间胶囊",
+            "creative_brief": {"platform": "douyin", "aspect_ratio": "9:16"},
+            "narrative_plan": {"concept": "把爱变成分担"},
+            "asset_registry": [
+                {"asset_id": "image-1", "kind": "character", "role": "母亲"}
+            ],
+            "scenes": [
+                {
+                    "scene_id": "A",
+                    "prompt": "滚筒内部向外看",
+                    "duration_sec": 26,
+                    "generation_mode": "reference",
+                    "reference_asset_ids": ["image-1"],
+                    "continuity_from": None,
+                    "transition_out": "衣物遮挡",
+                    "era": "2015",
+                    "camera": "水平舷窗视角",
+                    "sound": "门锁咔哒声",
+                    "hard_constraints": ["不生成字幕"],
+                }
+            ],
+        },
+    )
+    assert result.workspace_patch["workspace_schema_version"] == 2
+    assert result.workspace_patch["creative_brief"]["platform"] == "douyin"
+    assert result.workspace_patch["narrative_plan"]["concept"] == "把爱变成分担"
+    assert result.workspace_patch["asset_registry"][0]["asset_id"] == "image-1"
+    package = result.workspace_patch["prompt_packages"][0]
+    assert package["segment_id"] == "A"
+    assert package["generation_mode"] == "reference"
+    assert result.workspace_patch["scenes"][0]["scene_id"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_memory_repository_migrates_payload_on_first_cas_write() -> None:
+    repository = MemoryVideoAgentRepository()
+    workspace = await repository.create_workspace(
+        "user",
+        VideoWorkspace(
+            workspace_id="workspace-migrate",
+            conversation_id="conversation-migrate",
+            revision=1,
+            payload={"script": {"content": "旧脚本"}},
+        ),
+    )
+    updated = await repository.apply_workspace_patch(
+        "user",
+        workspace.workspace_id,
+        {"latest_input": "继续规划"},
+        expected_revision=1,
+        now=workspace.updated_at,
+    )
+    assert updated.payload["workspace_schema_version"] == 2
+    assert updated.payload["narrative_plan"]["script"] == "旧脚本"
