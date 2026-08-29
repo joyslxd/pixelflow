@@ -330,7 +330,7 @@ def _required_video_duration(request: Mapping[str, JsonValue]) -> int:
     """校验并返回 content-app 计费路由需要的单镜整数时长。"""
 
     duration = request.get("duration")
-    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= 15:
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= 30:
         raise ProviderJobMappingError("video_duration_unsupported")
     return duration
 

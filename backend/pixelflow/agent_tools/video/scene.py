@@ -57,8 +57,9 @@ class SceneMutablePatch(BaseModel):
     transition: str | None = Field(default=None, max_length=512)
     shot_type: str | None = Field(default=None, max_length=256)
     camera_movement: str | None = Field(default=None, max_length=512)
-    duration_sec: float | None = Field(default=None, gt=0, le=15)
-    duration_ms: int | None = Field(default=None, ge=1_000, le=15_000)
+    # Seedance 单镜最长 30 秒；整条视频的总时长由分镜编排合同另行限制。
+    duration_sec: float | None = Field(default=None, gt=0, le=30)
+    duration_ms: int | None = Field(default=None, ge=1_000, le=30_000)
     title: str | None = Field(default=None, max_length=256)
     # FE 分镜面板编辑镜头描述文本；落库时同步到 shot_description.text 与 prompt。
     # 允许模型误传 {text, mentions} 对象，只取 text。

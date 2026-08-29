@@ -33,6 +33,12 @@ from .script_plan import (
     UpdateVideoPlanInput,
     UpdateVideoPlanTool,
 )
+from .storyboard import (
+    CreateStoryboardTool,
+    PrepareScenePackagesInput,
+    PrepareScenePackagesTool,
+    StoryboardSceneInput,
+)
 
 __all__ = [
     "VideoTool",
@@ -63,6 +69,10 @@ __all__ = [
     "UpdateScriptTool",
     "UpdateVideoPlanInput",
     "UpdateVideoPlanTool",
+    "PrepareScenePackagesInput",
+    "PrepareScenePackagesTool",
+    "CreateStoryboardTool",
+    "StoryboardSceneInput",
     "VideoToolSpec",
     "VideoToolValidationError",
 ]

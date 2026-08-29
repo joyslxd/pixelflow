@@ -682,14 +682,14 @@ def _resolve_duration_sec(scene: Mapping[str, Any]) -> int | None:
         return None
     if isinstance(raw, (int, float)):
         value = int(raw)
-        return value if 4 <= value <= 15 else None
+        return value if 4 <= value <= 30 else None
     duration_ms = scene.get("duration_ms")
     if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
         return None
     if int(duration_ms) % 1000 != 0:
         return None
     value = int(duration_ms) // 1000
-    return value if 4 <= value <= 15 else None
+    return value if 4 <= value <= 30 else None
 
 
 def _infer_generation_mode(

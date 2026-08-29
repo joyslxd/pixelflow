@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from .video import (
     AnalyzeVideoTool,
+    CreateStoryboardTool,
     GenerateScenesTool,
     InspectSceneTool,
     InspectScriptTool,
     InspectVideoPlanTool,
     InspectVideoWorkspaceTool,
     PatchSceneTool,
+    PrepareScenePackagesTool,
     ReplaceSceneAssetTool,
     UpdateScriptTool,
     UpdateVideoPlanTool,
@@ -34,6 +36,8 @@ def runtime_video_tool_registry(
             InspectSceneTool(),
             PatchSceneTool(),
             ReplaceSceneAssetTool(),
+            PrepareScenePackagesTool(),
+            CreateStoryboardTool(),
     ]
     if scene_generation_batch_operation_port is not None:
         # 仅在 Gateway 已装配真实 Provider/M06 Port 时发布计费 Tool，避免空实现被模型选择。
