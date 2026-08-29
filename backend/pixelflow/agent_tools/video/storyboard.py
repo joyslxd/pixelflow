@@ -17,7 +17,7 @@ from .contracts import (
     VideoToolValidationError,
 )
 
-MAX_STORYBOARD_DURATION_SEC = 180
+MAX_STORYBOARD_SCENE_COUNT = 120
 MAX_SCENE_DURATION_SEC = 30
 MIN_SCENE_DURATION_SEC = 4
 
@@ -39,21 +39,21 @@ class StoryboardSceneInput(BaseModel):
 
 
 class PrepareScenePackagesInput(BaseModel):
-    """脚本与分镜一次性准备；总时长上限是 3 分钟而非 6 个分镜。"""
+    """脚本与分镜一次性准备；长片总时长由业务计划和 Provider 能力决定。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     script: str = Field(min_length=1, max_length=8_000)
-    scenes: tuple[StoryboardSceneInput, ...] = Field(min_length=1, max_length=45)
+    scenes: tuple[StoryboardSceneInput, ...] = Field(
+        min_length=1,
+        max_length=MAX_STORYBOARD_SCENE_COUNT,
+    )
 
     @model_validator(mode="after")
     def validate_duration_and_ids(self) -> PrepareScenePackagesInput:
         scene_ids = [scene.scene_id.strip() for scene in self.scenes]
         if len(set(scene_ids)) != len(scene_ids):
             raise ValueError("分镜 scene_id 不能重复")
-        total = sum(scene.duration_sec for scene in self.scenes)
-        if total > MAX_STORYBOARD_DURATION_SEC:
-            raise ValueError("分镜总时长不能超过 180 秒")
         return self
 
 
@@ -62,7 +62,7 @@ class PrepareScenePackagesTool:
 
     spec = VideoToolSpec(
         name="prepare_scene_packages",
-        description="写入脚本和分镜包；单镜最长 30 秒、总时长最长 180 秒，完成后再请求生成确认。",
+        description="写入脚本和分镜包；单镜最长 30 秒，长片生成由 M06 批次拆分，完成后再请求生成确认。",
         input_model=PrepareScenePackagesInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,
@@ -100,7 +100,7 @@ class PrepareScenePackagesTool:
         total = sum(int(item["duration_sec"]) for item in scenes)
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=f"已准备 {len(scenes)} 个分镜，总时长 {total} 秒；下一步可请求生成确认。",
+            public_summary=f"已准备 {len(scenes)} 个分镜，总时长 {total} 秒；长片将按 M06 批次拆分，下一步可请求生成确认。",
             workspace_patch={
                 "script": script_data,
                 "scenes": scenes,
@@ -123,7 +123,7 @@ class CreateStoryboardTool(PrepareScenePackagesTool):
         **{
             **PrepareScenePackagesTool.spec.__dict__,
             "name": "create_storyboard",
-            "description": "创建或覆盖当前项目分镜；单镜最长 30 秒、总时长最长 180 秒。",
+            "description": "创建或覆盖当前项目分镜；单镜最长 30 秒，长片生成由 M06 批次拆分。",
         }
     )
 
@@ -131,7 +131,7 @@ class CreateStoryboardTool(PrepareScenePackagesTool):
 __all__ = [
     "CreateStoryboardTool",
     "MAX_SCENE_DURATION_SEC",
-    "MAX_STORYBOARD_DURATION_SEC",
+    "MAX_STORYBOARD_SCENE_COUNT",
     "PrepareScenePackagesInput",
     "PrepareScenePackagesTool",
     "StoryboardSceneInput",

@@ -38,12 +38,12 @@ def test_storyboard_contract_allows_six_thirty_second_scenes() -> None:
     assert CreateStoryboardTool.spec.name == "create_storyboard"
 
 
-def test_storyboard_contract_rejects_more_than_three_minutes() -> None:
-    with pytest.raises(ValidationError):
-        PrepareScenePackagesInput(
-            script="超长片",
-            scenes=tuple(
-                {"scene_id": str(index), "prompt": "场景", "duration_sec": 30}
-                for index in range(1, 8)
-            ),
-        )
+def test_storyboard_contract_allows_long_form_plan_for_batch_splitting() -> None:
+    request = PrepareScenePackagesInput(
+        script="长片",
+        scenes=tuple(
+            {"scene_id": str(index), "prompt": "场景", "duration_sec": 26}
+            for index in range(1, 18)
+        ),
+    )
+    assert sum(scene.duration_sec for scene in request.scenes) == 442
