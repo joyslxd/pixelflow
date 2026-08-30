@@ -69,8 +69,6 @@ class AgentToolBroker:
             return self._rejected("Tool Call 与冻结 Run binding 不一致")
         if binding.tool_manifest_digest != self._manifest_snapshot.digest:
             return self._rejected("Tool Manifest 与冻结 Run 不一致")
-        if request.expected_workspace_revision != binding.workspace_revision:
-            return self._rejected("工作区 revision 与冻结 Run 不一致")
         digest = self._repository.request_digest(
             binding=binding,
             tool_name=request.tool_name,
@@ -136,9 +134,17 @@ class AgentToolBroker:
             binding.workspace_id,
         )
         if workspace is None or workspace.conversation_id != binding.conversation_id:
-            return self._rejected("工作区不存在或不属于当前 Run")
+            return await self._complete_rejection(
+                tool_call_key=tool_call_key,
+                request_digest=digest,
+                summary="工作区不存在或不属于当前 Run",
+            )
         if workspace.revision != request.expected_workspace_revision:
-            return self._rejected("工作区 revision 已变化")
+            return await self._complete_rejection(
+                tool_call_key=tool_call_key,
+                request_digest=digest,
+                summary="工作区 revision 已变化",
+            )
         credential = None
         if tool.spec.cost_level.value != "none":
             if self._credential_store is None:
@@ -221,6 +227,23 @@ class AgentToolBroker:
             public_summary=summary,
             model_observation={"code": "tool_call_rejected"},
         )
+
+    async def _complete_rejection(
+        self,
+        *,
+        tool_call_key: str,
+        request_digest: str,
+        summary: str,
+    ) -> ToolCallResponse:
+        """将领取后的拒绝也收口到 Ledger，避免后续重试永久停在 executing。"""
+
+        response = self._rejected(summary)
+        persisted = await self._repository.complete_tool_call(
+            tool_call_key=tool_call_key,
+            request_digest=request_digest,
+            response=response.model_dump(mode="json"),
+        )
+        return ToolCallResponse.model_validate(persisted)
 
     @staticmethod
     def _authorization_required() -> ToolCallResponse:

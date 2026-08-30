@@ -25,13 +25,15 @@ process.env.PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON = JSON.stringify({
 });
 
 let requestedUrl = "";
-globalThis.fetch = async (url) => {
+const requestedBodies = [];
+globalThis.fetch = async (url, init) => {
   requestedUrl = String(url);
+  requestedBodies.push(JSON.parse(String(init.body)));
   return new Response(JSON.stringify({
     protocol_version: "v1",
     status: "completed",
     public_summary: "已读取工作区。",
-    model_observation: {},
+    model_observation: { workspace_revision: 2 },
   }), { status: 200, headers: { "Content-Type": "application/json" } });
 };
 
@@ -46,12 +48,17 @@ const result = await registered[0].execute({}, { callId: "call-1" });
 assert.equal(requestedUrl, "http://gateway:8001/agent/internal/agent-tools/calls");
 assert.equal(result.status, "completed");
 
-globalThis.fetch = async () => new Response(JSON.stringify({
+globalThis.fetch = async (_url, init) => {
+  requestedBodies.push(JSON.parse(String(init.body)));
+  return new Response(JSON.stringify({
   protocol_version: "v1",
   status: "failed",
   public_summary: "该 Tool 调用未完成，请基于当前工作区继续",
   model_observation: { code: "tool_call_failed" },
-}), { status: 200, headers: { "Content-Type": "application/json" } });
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+};
 const failedResult = await registered[0].execute({}, { callId: "call-2" });
 assert.equal(failedResult.status, "completed");
 assert.equal(failedResult.model_observation.code, "tool_call_failed");
+assert.equal(requestedBodies[0].expected_workspace_revision, 1);
+assert.equal(requestedBodies[1].expected_workspace_revision, 2);

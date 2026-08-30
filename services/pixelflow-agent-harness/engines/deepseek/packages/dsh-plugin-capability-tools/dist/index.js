@@ -7,6 +7,10 @@ export const inject = ["tools", "pixelflowRunPolicy"];
 /** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
 export function apply(ctx) {
     const manifest = frozenManifestFromEnvironment();
+    // 配置只在模型真正选择 Capability Tool 时读取。这样 Manifest 加载仍可独立验证，
+    // 同时 Run 内的 revision 状态不会跨 Plugin/Session 共享。
+    let settings;
+    let workspaceRevision;
     for (const tool of manifest.tools) {
         ctx.tools.register({
             name: tool.name,
@@ -33,7 +37,10 @@ export function apply(ctx) {
                 render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
             },
             async execute(args, exec) {
-                const observation = await callBroker(tool, args, String(exec.callId));
+                const activeSettings = settings ??= settingsFromEnvironment();
+                const expectedRevision = workspaceRevision ??= activeSettings.workspaceRevision;
+                const observation = await callBroker(tool, args, String(exec.callId), activeSettings, expectedRevision);
+                workspaceRevision = nextWorkspaceRevision(observation, expectedRevision);
                 if (tool.cost_level === "billable" && observation.status === "pending_operation") {
                     ctx.pixelflowRunPolicy.assertBillableBatchStart();
                 }
@@ -112,8 +119,7 @@ function isCostLevel(value) {
     return value === "none" || value === "billable";
 }
 /** 通过唯一 Gateway Broker 执行调用，Sidecar 不直连 Repository、Provider 或文件系统。 */
-async function callBroker(tool, args, toolCallId) {
-    const settings = settingsFromEnvironment();
+async function callBroker(tool, args, toolCallId, settings, workspaceRevision) {
     const response = await fetch(`${settings.baseUrl}/agent/internal/agent-tools/calls`, {
         method: "POST",
         headers: {
@@ -128,7 +134,7 @@ async function callBroker(tool, args, toolCallId) {
             tool_call_id: toolCallId,
             tool_name: tool.name,
             arguments: args,
-            expected_workspace_revision: settings.workspaceRevision,
+            expected_workspace_revision: workspaceRevision,
             context_digest: settings.contextDigest,
             toolset_version: settings.toolsetVersion,
         }),
@@ -137,6 +143,12 @@ async function callBroker(tool, args, toolCallId) {
     if (!response.ok)
         throw new Error("PixelFlow Tool Broker 拒绝了 Tool 调用");
     return canonicalObservation(await response.json());
+}
+function nextWorkspaceRevision(observation, current) {
+    const candidate = observation.model_observation.workspace_revision;
+    return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= current
+        ? candidate
+        : current;
 }
 /** 生成仅用于 Sidecar→Broker 的五分钟 HS256 服务 JWT。 */
 function serviceJwt(settings) {

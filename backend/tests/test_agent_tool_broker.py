@@ -276,6 +276,20 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
         )
         first = await broker.call(request, idempotency_key=idempotency_key)
         replay = await broker.call(request, idempotency_key=idempotency_key)
+        second_request = request.model_copy(
+            update={
+                "tool_call_id": "m0-patch-scene-call-second",
+                "arguments": {"scene_id": "scene-1", "patch": {"title": "再次修订"}},
+                "expected_workspace_revision": 2,
+            },
+        )
+        second = await broker.call(
+            second_request,
+            idempotency_key=repository.tool_call_key(
+                run_id=second_request.run_id,
+                tool_call_id=second_request.tool_call_id,
+            ),
+        )
         current = await video_repository.get_workspace("m0-tool-user", workspace.workspace_id)
     finally:
         await engine.dispose()
@@ -286,12 +300,13 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
         "patch_scene",
         "replace_scene_asset",
     }
-    assert first.status == replay.status == "completed"
+    assert first.status == replay.status == second.status == "completed"
     assert first == replay
     assert first.model_observation["workspace_revision"] == 2
+    assert second.model_observation["workspace_revision"] == 3
     assert current is not None
-    assert current.revision == 2
-    assert current.payload["scenes"][0]["title"] == "新镜头"
+    assert current.revision == 3
+    assert current.payload["scenes"][0]["title"] == "再次修订"
 
 
 @pytest.mark.asyncio
