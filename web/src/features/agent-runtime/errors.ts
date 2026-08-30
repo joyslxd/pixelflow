@@ -6,6 +6,7 @@ const PUBLIC_ERROR_MESSAGES: Record<string, string> = {
   conversation_read_only: "旧对话仅供查看，请基于产物创建新对话。",
   harness_workspace_not_found: "当前对话还没有可用的工作区。",
   harness_workspace_revision_conflict: "工作区已更新，请基于最新版本重新发送。",
+  harness_context_budget_rejected: "当前工作区内容正在整理，请刷新后重试。",
   harness_run_unavailable_retryable: "Agent 暂时不可用，请稍后重试。",
   harness_run_protocol_invalid: "当前运行协议无效，请刷新后重试。",
   harness_event_stream_unavailable: "公开进度暂时中断，正在尝试重连。",

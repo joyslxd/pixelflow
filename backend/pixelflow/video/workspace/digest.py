@@ -149,7 +149,6 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 for reference in _as_list(item.get("reference_asset_ids"))[:32]
                 if isinstance(reference, str) and reference.strip()
             ],
-            "provider_artifact_ref": _bounded_text(item.get("provider_artifact_ref"), maximum=256),
             "usable_for_video": item.get("usable_for_video") is True,
         }
         result.append({key: value for key, value in entry.items() if value is not None})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pixelflow.agent_harness.context_builder import PixelFlowContextBuilder
 from pixelflow.video.contracts import VideoWorkspace
 from pixelflow.video.workspace import build_workspace_digest
 
@@ -141,3 +142,40 @@ def test_workspace_digest_exposes_v2_workspace_details_without_media_urls() -> N
     assert "private-material" not in rendered
     assert "asset-private" not in rendered
     assert "provider-private" not in rendered
+
+
+def test_workspace_digest_with_ready_material_asset_is_safe_for_harness_context() -> None:
+    """内部 Artifact 仅供 Gateway 解析，不以 provider 字段进入 Sidecar 上下文。"""
+
+    digest = build_workspace_digest(
+        VideoWorkspace(
+            workspace_id="workspace-ready-asset",
+            conversation_id="conversation-ready-asset",
+            payload={
+                "workspace_schema_version": 2,
+                "asset_registry": [{
+                    "asset_id": "asset_material_product",
+                    "slot": "@产品图1",
+                    "kind": "reference_image",
+                    "role": "M20 产品图",
+                    "origin": "existing_material",
+                    "source_material_id": "material-product",
+                    "state": "ready",
+                    "provider_artifact_ref": "artifact:material:material-product",
+                    "usable_for_video": True,
+                }],
+            },
+        )
+    )
+
+    assert digest["asset_registry"] == [{
+        "asset_id": "asset_material_product",
+        "slot": "@产品图1",
+        "kind": "reference_image",
+        "role": "M20 产品图",
+        "origin": "existing_material",
+        "state": "ready",
+        "reference_asset_ids": [],
+        "usable_for_video": True,
+    }]
+    PixelFlowContextBuilder().build({"workspace_projection": digest})
