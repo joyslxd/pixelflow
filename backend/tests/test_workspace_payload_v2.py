@@ -188,6 +188,45 @@ async def test_prepare_tool_registers_uploaded_material_and_canonicalizes_its_re
 
 
 @pytest.mark.asyncio
+async def test_prepare_tool_keeps_uploaded_material_and_allows_agent_to_enrich_its_role() -> None:
+    material_id = "material-product-2"
+    result = await PrepareScenePackagesTool().execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-material-role",
+                conversation_id="conversation-material-role",
+                payload={"materials": [{
+                    "material_id": material_id,
+                    "kind": "image",
+                    "name": "冰箱图",
+                    "url": "https://example.invalid/m20.jpg",
+                }]},
+            ),
+        ),
+        {
+            "script": "产品展示",
+            "asset_registry": [{
+                "asset_id": f"asset_material_{material_id}",
+                "kind": "product_reference",
+                "role": "美的 M20 冰箱产品外观",
+            }],
+            "scenes": [{
+                "scene_id": "SC01", "prompt": "参考产品图展示冰箱", "duration_sec": 8,
+                "reference_asset_ids": [f"asset_material_{material_id}"],
+            }],
+        },
+    )
+
+    asset = result.workspace_patch["asset_registry"][0]
+    assert asset["kind"] == "product_reference"
+    assert asset["role"] == "美的 M20 冰箱产品外观"
+    assert asset["origin"] == "existing_material"
+    assert asset["source_material_id"] == material_id
+    assert asset["usable_for_video"] is True
+
+
+@pytest.mark.asyncio
 async def test_prepare_tool_rejects_prompt_reference_not_in_asset_registry() -> None:
     result = await VideoToolRegistry((PrepareScenePackagesTool(),)).execute(
         VideoToolContext(
@@ -228,3 +267,38 @@ async def test_memory_repository_migrates_payload_on_first_cas_write() -> None:
     )
     assert updated.payload["workspace_schema_version"] == 2
     assert updated.payload["narrative_plan"]["script"] == "旧脚本"
+
+
+@pytest.mark.asyncio
+async def test_material_append_immediately_registers_existing_asset() -> None:
+    repository = MemoryVideoAgentRepository()
+    workspace = await repository.create_workspace(
+        "user",
+        VideoWorkspace(workspace_id="workspace-material-append", conversation_id="conversation-material-append"),
+    )
+    updated = await repository.apply_workspace_patch(
+        "user",
+        workspace.workspace_id,
+        {"materials_append": [{
+            "material_id": "m20-reference",
+            "kind": "image",
+            "name": "M20 冰箱参考图",
+            "reference_label": "@产品图1",
+            "url": "https://example.invalid/m20.jpg",
+        }]},
+        expected_revision=workspace.revision,
+        now=workspace.updated_at,
+    )
+
+    assert updated.payload["asset_registry"] == [{
+        "asset_id": "asset_material_m20-reference",
+        "slot": "@产品图1",
+        "kind": "reference_image",
+        "role": "M20 冰箱参考图",
+        "origin": "existing_material",
+        "source_material_id": "m20-reference",
+        "state": "ready",
+        "reference_asset_ids": [],
+        "provider_artifact_ref": "artifact:material:m20-reference",
+        "usable_for_video": True,
+    }]

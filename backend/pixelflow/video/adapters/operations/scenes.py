@@ -582,6 +582,9 @@ def build_scene_provider_request(
     contract = payload.get("creation_contract")
     contract_map = contract if isinstance(contract, Mapping) else {}
     global_assets = payload.get("global_assets")
+    # V2 Prompt Package 的结构化引用是生成入口的权威边界：不能因旧的 materials 全量拼接
+    # 而把未登记或尚未生成的素材静默带入某段视频。
+    referenced_material_ids = _validate_v2_scene_asset_references(payload, scene)
 
     model = _first_text(scene.get("model"), contract_map.get("video_model"))
     ratio = _first_text(scene.get("ratio"), contract_map.get("video_ratio"))
@@ -604,6 +607,11 @@ def build_scene_provider_request(
         model=model,
     )
     image_urls = _collect_image_references(
+        _workspace_image_material_urls(
+            payload.get("materials"),
+            only_material_ids=referenced_material_ids,
+        ),
+        _workspace_reference_image_urls(payload.get("reference_images")),
         bound_image_urls,
         scene.get("image_urls"),
         _mention_image_urls(
@@ -654,6 +662,81 @@ def build_scene_provider_request(
         if value is not None:
             request[key] = value
     return request
+
+
+def _workspace_reference_image_urls(value: object) -> list[str]:
+    """读取 Workspace 已验证的用户参考图 TOS URL，最多由上游公共命令写入九张。"""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return _collect_https_urls(
+        item.get("url") for item in value if isinstance(item, Mapping)
+    )
+
+
+def _validate_v2_scene_asset_references(
+    payload: Mapping[str, object],
+    scene: Mapping[str, object],
+) -> set[str] | None:
+    """校验 V2 分镜只消费已登记且可用于视频的资产，返回已选用户材料身份。"""
+
+    raw_registry = payload.get("asset_registry")
+    if not isinstance(raw_registry, list):
+        return None
+    registry = {
+        str(item.get("asset_id") or "").strip(): item
+        for item in raw_registry
+        if isinstance(item, Mapping) and str(item.get("asset_id") or "").strip()
+    }
+    # 空注册表属于尚未迁移的历史 Workspace，保持兼容；非空注册表则严格执行 V2 合同。
+    if not registry:
+        return None
+    raw_references = scene.get("reference_asset_ids")
+    references = (
+        [str(item).strip() for item in raw_references if str(item).strip()]
+        if isinstance(raw_references, (list, tuple))
+        else []
+    )
+    if not references:
+        raise VideoToolExecutionError("分镜尚未声明已登记资产，不能开始生成")
+    material_ids: set[str] = set()
+    for asset_id in references:
+        asset = registry.get(asset_id)
+        if asset is None:
+            raise VideoToolExecutionError("分镜引用了未登记资产，不能开始生成")
+        if asset.get("state") != "ready" or asset.get("usable_for_video") is not True:
+            raise VideoToolExecutionError("分镜引用资产尚未就绪，需先完成素材生成")
+        material_id = str(asset.get("source_material_id") or "").strip()
+        if material_id:
+            material_ids.add(material_id)
+    return material_ids
+
+
+def _workspace_image_material_urls(
+    value: object,
+    *,
+    only_material_ids: set[str] | None = None,
+) -> list[str]:
+    """把用户在 Composer 上传并持久化的指定图片材料作为本次视频的参考图。"""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    urls: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping) or item.get("kind") != "image":
+            continue
+        material_id = str(item.get("material_id") or "").strip()
+        if only_material_ids is not None and material_id not in only_material_ids:
+            continue
+        raw_url = item.get("url")
+        # content-app 测试环境曾保存 HTTP TOS 地址；只在 Composer 材料边界升级为 HTTPS，
+        # 既兼容已写入的记录，也不放宽其他 Workspace 外部引用的安全协议约束。
+        if isinstance(raw_url, str) and raw_url.strip().lower().startswith("http://"):
+            raw_url = f"https://{raw_url.strip()[len('http://'):]}"
+        url = _safe_https_url(raw_url)
+        if url and url not in urls:
+            urls.append(url)
+    return urls
 
 
 def _default_provider_request(

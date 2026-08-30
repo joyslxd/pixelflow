@@ -149,6 +149,44 @@ def migrate_workspace_payload(payload: Mapping[str, object] | None) -> dict[str,
     return source  # type: ignore[return-value]
 
 
+def material_asset_records(payload: Mapping[str, object]) -> list[dict[str, JsonValue]]:
+    """将私有材料记录投影为可公开引用的已有素材，不复制其 URL。"""
+
+    raw_materials = payload.get("materials")
+    if not isinstance(raw_materials, list):
+        return []
+    kind_by_material = {
+        "image": "reference_image",
+        "video": "reference_video",
+        "audio": "reference_audio",
+        "file": "reference_file",
+    }
+    records: list[dict[str, JsonValue]] = []
+    for index, item in enumerate(raw_materials, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        material_id = str(item.get("material_id") or "").strip()
+        material_kind = str(item.get("kind") or "").strip().lower()
+        if not material_id or material_kind not in kind_by_material:
+            continue
+        name = str(item.get("name") or item.get("reference_label") or f"素材{index}").strip()
+        label = str(item.get("reference_label") or f"@素材{index}").strip()
+        records.append(
+            WorkspaceAssetRecord(
+                asset_id=f"asset_material_{material_id}",
+                slot=label[:64],
+                kind=kind_by_material[material_kind],
+                role=name[:256] or f"用户素材{index}",
+                origin="existing_material",
+                source_material_id=material_id,
+                state="ready",
+                provider_artifact_ref=f"artifact:material:{material_id}",
+                usable_for_video=True,
+            ).model_dump(mode="json")
+        )
+    return records
+
+
 def _legacy_asset_registry(source: Mapping[str, object]) -> list[dict[str, JsonValue]]:
     buckets = {"characters": "character", "scenes": "scene", "props": "prop"}
     records: list[dict[str, JsonValue]] = []
@@ -217,5 +255,6 @@ __all__ = [
     "WorkspaceCreativeBrief",
     "WorkspacePayloadV2",
     "WorkspacePromptPackage",
+    "material_asset_records",
     "migrate_workspace_payload",
 ]

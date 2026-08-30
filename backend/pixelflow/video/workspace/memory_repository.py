@@ -30,6 +30,7 @@ from pixelflow.video.services.workflow_events import (
     build_step_started_event,
 )
 from pixelflow.video.workspace.ids import video_workspace_id_for_conversation
+from pixelflow.video.workspace.payload import material_asset_records, migrate_workspace_payload
 
 
 def _clone[T](record: T) -> T:
@@ -222,7 +223,9 @@ def _updated_workspace(
     raw_patch = dict(patch)
     # 用途：prepare / 全量重建时整表替换；默认按 scene_id 合并，避免并发生成互相覆盖。
     replace_scenes = bool(raw_patch.pop("scenes_replace", False))
-    payload = dict(workspace.payload)
+    reference_images_append = raw_patch.pop("reference_images_append", None)
+    materials_append = raw_patch.pop("materials_append", None)
+    payload = migrate_workspace_payload(workspace.payload)
     for key in ("scenes", "scene_packages"):
         if key not in raw_patch:
             continue
@@ -231,6 +234,41 @@ def _updated_workspace(
             payload[key] = deepcopy(incoming)
         else:
             payload[key] = _merge_scenes_by_id(payload.get(key), incoming)
+    if isinstance(reference_images_append, list):
+        existing = payload.get("reference_images")
+        merged = [item for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+        known_ids = {str(item.get("reference_id") or "") for item in merged}
+        for item in reference_images_append:
+            if not isinstance(item, dict):
+                continue
+            reference_id = str(item.get("reference_id") or "")
+            if reference_id and reference_id not in known_ids:
+                merged.append(deepcopy(item))
+                known_ids.add(reference_id)
+        payload["reference_images"] = merged
+    if isinstance(materials_append, list):
+        existing = payload.get("materials")
+        merged = [item for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+        known_ids = {str(item.get("material_id") or "") for item in merged}
+        for item in materials_append:
+            if not isinstance(item, dict):
+                continue
+            material_id = str(item.get("material_id") or "")
+            if material_id and material_id not in known_ids:
+                merged.append(deepcopy(item))
+                known_ids.add(material_id)
+        payload["materials"] = merged
+        # 用户素材在入库时立即成为 V2 已有资产；URL 仍只留在 materials 私有记录，
+        # 后续 Agent 可按 asset_id 补充“产品/角色”等语义而无需再次生成。
+        raw_assets = payload.get("asset_registry")
+        asset_registry = [item for item in raw_assets if isinstance(item, dict)] if isinstance(raw_assets, list) else []
+        known_asset_ids = {str(item.get("asset_id") or "") for item in asset_registry}
+        for asset in material_asset_records(payload):
+            asset_id = str(asset["asset_id"])
+            if asset_id not in known_asset_ids:
+                asset_registry.append(asset)
+                known_asset_ids.add(asset_id)
+        payload["asset_registry"] = asset_registry
     payload.update(raw_patch)
     return VideoWorkspace.model_validate(
         {

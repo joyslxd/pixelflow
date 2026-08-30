@@ -13,6 +13,7 @@ from pixelflow.video.workspace.payload import (
     WorkspaceAssetRecord,
     WorkspaceCreativeBrief,
     WorkspacePromptPackage,
+    material_asset_records,
     migrate_workspace_payload,
 )
 
@@ -69,44 +70,6 @@ class PrepareScenePackagesInput(BaseModel):
         if len(set(scene_ids)) != len(scene_ids):
             raise ValueError("分镜 scene_id 不能重复")
         return self
-
-
-def _material_asset_records(payload: Mapping[str, object]) -> list[dict[str, JsonValue]]:
-    """把 Composer 已持久化材料映射为不含 URL 的稳定已有资产记录。"""
-
-    raw_materials = payload.get("materials")
-    if not isinstance(raw_materials, list):
-        return []
-    kind_by_material = {
-        "image": "reference_image",
-        "video": "reference_video",
-        "audio": "reference_audio",
-        "file": "reference_file",
-    }
-    records: list[dict[str, JsonValue]] = []
-    for index, item in enumerate(raw_materials, start=1):
-        if not isinstance(item, Mapping):
-            continue
-        material_id = str(item.get("material_id") or "").strip()
-        material_kind = str(item.get("kind") or "").strip().lower()
-        if not material_id or material_kind not in kind_by_material:
-            continue
-        name = str(item.get("name") or item.get("reference_label") or f"素材{index}").strip()
-        label = str(item.get("reference_label") or f"@素材{index}").strip()
-        records.append(
-            WorkspaceAssetRecord(
-                asset_id=f"asset_material_{material_id}",
-                slot=label[:64],
-                kind=kind_by_material[material_kind],
-                role=name[:256] or f"用户素材{index}",
-                origin="existing_material",
-                source_material_id=material_id,
-                state="ready",
-                provider_artifact_ref=f"artifact:material:{material_id}",
-                usable_for_video=True,
-            ).model_dump(mode="json")
-        )
-    return records
 
 
 def _validate_and_canonicalize_scene_references(
@@ -254,9 +217,15 @@ class PrepareScenePackagesTool:
         for asset in request.asset_registry:
             asset_by_id[asset.asset_id] = asset.model_dump(mode="json")
         # 已上传材料不是模型可自由伪造的资产：Gateway 从权威 Workspace 派生稳定引用。
-        for asset in _material_asset_records(payload):
-            asset_id = str(asset["asset_id"])
-            asset_by_id.setdefault(asset_id, asset)
+        # Agent 可以补充产品/角色/道具等语义，但不能覆盖材料来源、Artifact 或就绪状态。
+        for material_asset in material_asset_records(payload):
+            asset_id = str(material_asset["asset_id"])
+            proposed = asset_by_id.get(asset_id)
+            if proposed is not None:
+                for key in ("slot", "kind", "role", "reference_asset_ids"):
+                    if proposed.get(key) is not None:
+                        material_asset[key] = proposed[key]
+            asset_by_id[asset_id] = material_asset
         if not asset_by_id:
             raise VideoToolValidationError("请先登记至少一个已有素材或待生成素材")
         _validate_and_canonicalize_scene_references(scenes, asset_by_id)
