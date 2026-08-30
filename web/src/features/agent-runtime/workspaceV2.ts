@@ -5,6 +5,7 @@ export type WorkspaceV2Asset = {
   slot: string;
   kind: string;
   role: string;
+  origin: "existing_material" | "planned_generation" | "provider_output";
   state: "planned" | "generating" | "ready" | "failed";
   referenceAssetIds: string[];
   usableForVideo: boolean;
@@ -78,6 +79,11 @@ function status(value: unknown): WorkspaceV2Asset["state"] {
   return STATE_VALUES.has(candidate) ? candidate as WorkspaceV2Asset["state"] : "planned";
 }
 
+function assetOrigin(value: unknown): WorkspaceV2Asset["origin"] {
+  const candidate = string(value).toLowerCase();
+  return candidate === "existing_material" || candidate === "provider_output" ? candidate : "planned_generation";
+}
+
 function creativeBrief(summary: RecordValue): Record<string, string | number> {
   const source = record(summary.creative_brief);
   const legacy = record(summary.product_info);
@@ -136,6 +142,7 @@ function assets(summary: RecordValue): WorkspaceV2Asset[] {
     slot: string(item.slot, 64) || `@资产${index + 1}`,
     kind: string(item.kind ?? item.asset_type, 64) || "asset",
     role: string(item.role ?? item.name ?? item.title, 256) || "未命名资产",
+    origin: assetOrigin(item.origin),
     state: status(item.state),
     referenceAssetIds: strings(item.reference_asset_ids),
     usableForVideo: item.usable_for_video === true,

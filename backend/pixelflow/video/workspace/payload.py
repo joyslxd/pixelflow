@@ -14,6 +14,7 @@ MIN_SCENE_DURATION_SEC = 4
 MAX_SCENE_DURATION_SEC = 30
 
 AssetState = Literal["planned", "generating", "ready", "failed"]
+AssetOrigin = Literal["existing_material", "planned_generation", "provider_output"]
 GenerationMode = Literal["independent", "extend", "reference"]
 
 
@@ -26,6 +27,10 @@ class WorkspaceAssetRecord(BaseModel):
     slot: str | None = Field(default=None, max_length=64)
     kind: str = Field(min_length=1, max_length=64)
     role: str = Field(min_length=1, max_length=256)
+    # 区分用户已经提供的素材和需要后续生成的素材，前端与 Provider 都以此字段编排，
+    # 不能通过是否存在 URL 推断，避免把外部 URL 透传进 Prompt Package。
+    origin: AssetOrigin = "planned_generation"
+    source_material_id: str | None = Field(default=None, max_length=128)
     state: AssetState = "planned"
     reference_asset_ids: tuple[str, ...] = Field(default=(), max_length=32)
     provider_artifact_ref: str | None = Field(default=None, max_length=256)
@@ -41,6 +46,11 @@ class WorkspaceAssetRecord(BaseModel):
             raise ValueError("ready 资产必须有内部 Artifact 引用")
         if self.usable_for_video and self.state != "ready":
             raise ValueError("只有 ready 资产可以进入视频生成")
+        if self.origin == "existing_material":
+            if not self.source_material_id:
+                raise ValueError("已有素材必须关联 source_material_id")
+            if self.state != "ready" or not self.usable_for_video:
+                raise ValueError("已有素材必须处于 ready 且可用于视频")
         return self
 
 
@@ -159,6 +169,7 @@ def _legacy_asset_registry(source: Mapping[str, object]) -> list[dict[str, JsonV
                     "slot": f"{bucket}-{index}",
                     "kind": kind,
                     "role": str(item.get("name") or item.get("title") or asset_id)[:256],
+                    "origin": "provider_output" if ready else "planned_generation",
                     "state": "ready" if ready else "planned",
                     "provider_artifact_ref": artifact if ready else None,
                     "usable_for_video": ready,

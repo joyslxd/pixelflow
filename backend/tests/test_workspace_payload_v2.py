@@ -100,7 +100,7 @@ async def test_prepare_tool_executor_accepts_all_declared_workspace_roots() -> N
             "script": "家庭保鲜产品片",
             "creative_brief": {"brand": "美的", "aspect_ratio": "9:16"},
             "asset_registry": [{"asset_id": "product-image-1", "kind": "image", "role": "产品参考"}],
-            "scenes": [{"scene_id": "A", "prompt": "冰箱产品展示", "duration_sec": 8}],
+            "scenes": [{"scene_id": "A", "prompt": "冰箱产品展示", "duration_sec": 8, "reference_asset_ids": ["product-image-1"]}],
         },
     )
     updated = await repository.get_workspace("user", workspace.workspace_id)
@@ -132,10 +132,79 @@ async def test_prepare_tool_returns_safe_validation_field_for_agent_self_correct
         },
     )
 
-    assert result.public_summary == "工具参数无效，请修正字段：scenes.0.duration_sec"
+    assert result.public_summary == "工具参数无效，请修正字段：scenes.0.duration_sec、scenes.0.reference_asset_ids"
     assert result.model_observation == {
-        "validation_fields": ["scenes.0.duration_sec"],
+        "validation_fields": ["scenes.0.duration_sec", "scenes.0.reference_asset_ids"],
     }
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_registers_uploaded_material_and_canonicalizes_its_reference() -> None:
+    """上传图在规划写入时变为已有素材，Prompt 仅保留稳定资产身份而不保存 URL。"""
+
+    material_id = "material-product-1"
+    workspace = VideoWorkspace(
+        workspace_id="workspace-material",
+        conversation_id="conversation-material",
+        payload={
+            "materials": [{
+                "material_id": material_id,
+                "kind": "image",
+                "name": "M20 产品参考图",
+                "reference_label": "@产品图1",
+                "url": "https://example.invalid/m20.jpg",
+            }]
+        },
+    )
+    result = await PrepareScenePackagesTool().execute(
+        VideoToolContext(user_id="user", workspace=workspace),
+        {
+            "script": "产品展示",
+            "scenes": [{
+                "scene_id": "SC01",
+                "prompt": "女主角参考 @产品图1 打开冰箱门",
+                "duration_sec": 8,
+                "reference_asset_ids": [material_id],
+            }],
+        },
+    )
+
+    assets = result.workspace_patch["asset_registry"]
+    assert assets == [{
+        "asset_id": "asset_material_material-product-1",
+        "slot": "@产品图1",
+        "kind": "reference_image",
+        "role": "M20 产品参考图",
+        "origin": "existing_material",
+        "source_material_id": material_id,
+        "state": "ready",
+        "reference_asset_ids": [],
+        "provider_artifact_ref": "artifact:material:material-product-1",
+        "usable_for_video": True,
+    }]
+    assert result.workspace_patch["prompt_packages"][0]["reference_asset_ids"] == [
+        "asset_material_material-product-1"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_rejects_prompt_reference_not_in_asset_registry() -> None:
+    result = await VideoToolRegistry((PrepareScenePackagesTool(),)).execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(workspace_id="workspace-asset-validation", conversation_id="conversation"),
+        ),
+        "prepare_scene_packages",
+        {
+            "script": "测试",
+            "asset_registry": [{"asset_id": "asset-product", "kind": "product", "role": "冰箱"}],
+            "scenes": [{
+                "scene_id": "SC01", "prompt": "展示产品", "duration_sec": 8,
+                "reference_asset_ids": ["missing-asset"],
+            }],
+        },
+    )
+    assert result.public_summary == "分镜 SC01 引用了未登记资产"
 
 
 @pytest.mark.asyncio

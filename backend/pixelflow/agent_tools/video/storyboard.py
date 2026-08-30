@@ -38,6 +38,9 @@ class StoryboardSceneInput(BaseModel):
     scene_id: str = Field(min_length=1, max_length=128)
     prompt: str = Field(min_length=1, max_length=10_000)
     duration_sec: int = Field(ge=MIN_SCENE_DURATION_SEC, le=MAX_SCENE_DURATION_SEC)
+    # 每段必须通过稳定 asset_id 声明人物、产品、场景或道具依赖；正文中的 @引用只是可读提示，
+    # 不能替代这组结构化引用。
+    reference_asset_ids: tuple[str, ...] = Field(min_length=1, max_length=32)
     title: str | None = Field(default=None, max_length=256)
     storyline: str | None = Field(default=None, max_length=4_000)
     narration: str | None = Field(default=None, max_length=4_000)
@@ -66,6 +69,67 @@ class PrepareScenePackagesInput(BaseModel):
         if len(set(scene_ids)) != len(scene_ids):
             raise ValueError("分镜 scene_id 不能重复")
         return self
+
+
+def _material_asset_records(payload: Mapping[str, object]) -> list[dict[str, JsonValue]]:
+    """把 Composer 已持久化材料映射为不含 URL 的稳定已有资产记录。"""
+
+    raw_materials = payload.get("materials")
+    if not isinstance(raw_materials, list):
+        return []
+    kind_by_material = {
+        "image": "reference_image",
+        "video": "reference_video",
+        "audio": "reference_audio",
+        "file": "reference_file",
+    }
+    records: list[dict[str, JsonValue]] = []
+    for index, item in enumerate(raw_materials, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        material_id = str(item.get("material_id") or "").strip()
+        material_kind = str(item.get("kind") or "").strip().lower()
+        if not material_id or material_kind not in kind_by_material:
+            continue
+        name = str(item.get("name") or item.get("reference_label") or f"素材{index}").strip()
+        label = str(item.get("reference_label") or f"@素材{index}").strip()
+        records.append(
+            WorkspaceAssetRecord(
+                asset_id=f"asset_material_{material_id}",
+                slot=label[:64],
+                kind=kind_by_material[material_kind],
+                role=name[:256] or f"用户素材{index}",
+                origin="existing_material",
+                source_material_id=material_id,
+                state="ready",
+                provider_artifact_ref=f"artifact:material:{material_id}",
+                usable_for_video=True,
+            ).model_dump(mode="json")
+        )
+    return records
+
+
+def _validate_and_canonicalize_scene_references(
+    scenes: list[dict[str, JsonValue]],
+    asset_by_id: Mapping[str, Mapping[str, JsonValue]],
+) -> None:
+    """拒绝未登记资产，并允许模型以 source_material_id 引用用户素材。"""
+
+    aliases: dict[str, str] = {}
+    for asset_id, asset in asset_by_id.items():
+        aliases[asset_id] = asset_id
+        source_material_id = str(asset.get("source_material_id") or "").strip()
+        if source_material_id:
+            aliases[source_material_id] = asset_id
+    for scene in scenes:
+        scene_id = str(scene.get("scene_id") or scene.get("segment_id") or "").strip()
+        raw_references = scene.get("reference_asset_ids")
+        references = [str(item).strip() for item in raw_references] if isinstance(raw_references, list) else []
+        canonical = [aliases[reference] for reference in references if reference in aliases]
+        if not canonical or len(canonical) != len(references):
+            raise VideoToolValidationError(f"分镜 {scene_id or '未命名'} 引用了未登记资产")
+        # 保留声明顺序并去重；顺序会成为后续 Provider 参考图绑定顺序。
+        scene["reference_asset_ids"] = list(dict.fromkeys(canonical))
 
 
 class StoryboardRevisionPatch(BaseModel):
@@ -117,6 +181,8 @@ class PrepareScenePackagesTool:
         description=(
             "写入脚本和分镜包；面向 Seedance 2.5 时，先使用已加载的导演/提示词 Skill "
             "将每段 prompt 编排为可提交的完整正文，再原样写入，不得仅写摘要；"
+            "必须同时登记已有素材（origin=existing_material）与待生成素材"
+            "（origin=planned_generation），每段 reference_asset_ids 必须只引用这张资产表的 asset_id；"
             "单镜最长 30 秒，长片生成由 M06 批次拆分，完成后再请求生成确认。"
         ),
         input_model=PrepareScenePackagesInput,
@@ -174,10 +240,6 @@ class PrepareScenePackagesTool:
             scenes.append(item)
         scene_ids = [str(item["scene_id"]) for item in scenes]
         total = sum(int(item["duration_sec"]) for item in scenes)
-        prompt_packages = [
-            WorkspacePromptPackage.model_validate(item).model_dump(mode="json")
-            for item in scenes
-        ]
         existing_assets = payload.get("asset_registry")
         asset_registry = (
             [dict(item) for item in existing_assets if isinstance(item, Mapping)]
@@ -191,6 +253,17 @@ class PrepareScenePackagesTool:
         }
         for asset in request.asset_registry:
             asset_by_id[asset.asset_id] = asset.model_dump(mode="json")
+        # 已上传材料不是模型可自由伪造的资产：Gateway 从权威 Workspace 派生稳定引用。
+        for asset in _material_asset_records(payload):
+            asset_id = str(asset["asset_id"])
+            asset_by_id.setdefault(asset_id, asset)
+        if not asset_by_id:
+            raise VideoToolValidationError("请先登记至少一个已有素材或待生成素材")
+        _validate_and_canonicalize_scene_references(scenes, asset_by_id)
+        prompt_packages = [
+            WorkspacePromptPackage.model_validate(item).model_dump(mode="json")
+            for item in scenes
+        ]
         brief = payload.get("creative_brief")
         creative_brief = dict(brief) if isinstance(brief, Mapping) else {}
         if request.creative_brief is not None:
@@ -264,6 +337,12 @@ class ReviseStoryboardTool:
         missing = [item.segment_id for item in request.revisions if item.segment_id not in by_segment]
         if missing:
             raise VideoToolValidationError(f"分镜不存在：{', '.join(missing[:4])}")
+        raw_assets = payload.get("asset_registry")
+        asset_ids = {
+            str(item.get("asset_id") or "").strip()
+            for item in raw_assets
+            if isinstance(item, Mapping)
+        } if isinstance(raw_assets, list) else set()
 
         stale_count = 0
         affected: list[str] = []
@@ -283,6 +362,11 @@ class ReviseStoryboardTool:
             if package is not None:
                 package.update(changes)
                 package["segment_id"] = package.get("segment_id") or segment_id
+                references = package.get("reference_asset_ids")
+                if not isinstance(references, list) or not references or any(
+                    str(asset_id).strip() not in asset_ids for asset_id in references
+                ):
+                    raise VideoToolValidationError(f"分镜 {segment_id} 必须引用已登记资产")
                 package["state"] = "planned"
             affected.append(segment_id)
 
