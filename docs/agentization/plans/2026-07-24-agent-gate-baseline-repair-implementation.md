@@ -311,7 +311,7 @@ git commit -m "修复：统一 content-app Authorization 鉴权合同"
 - Modify: corresponding sandbox/path tests
 
 **Interfaces:**
-- Consumes: 实际 Skill 根 `backend/skills/public`、宿主 Windows 路径。
+- Consumes: 实际 Skill 源目录 `backend/skills/skills`、宿主 Windows 路径。
 - Produces: Agent 可见路径始终为 `/mnt/...` POSIX 形式。
 
 - [ ] **Step 1: 写/收紧路径红灯**

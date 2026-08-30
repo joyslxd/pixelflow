@@ -15,7 +15,7 @@ M03.4 的定向测试、范围内 Ruff 和独立审核均已通过，但 `Invoke
 3. 退役已经确认不属于 PixelFlow 产品范围、且仓库从未提供实现文件的
    Docker/provisioner/Sandbox 诊断脚本测试。
 4. 将仍属于当前产品的鉴权、Skill、虚拟路径和文件安全测试对齐到
-   content-app Authorization、`backend/skills/public` 和 Windows 本地开发环境。
+   content-app Authorization、`backend/skills/skills` 和 Windows 本地开发环境。
 5. 清理后端全量 Ruff 基线，为后续 M13 全量门禁保留真实而可执行的测试集合。
 
 ## 2. 边界
@@ -34,8 +34,8 @@ M03.4 的定向测试、范围内 Ruff 和独立审核均已通过，但 `Invoke
 - 不恢复 `Makefile`、`docker/dev-entrypoint.sh`、`docker/provisioner/app.py`、
   `scripts/sandbox_memory_profile.py` 或其他已确认无需保留的基础设施。
 - 不恢复 PixelFlow 本地登录、注册、管理员初始化或 cookie session。
-- 不删除仍被 PixelFlow Agent/Skill 运行时使用的 LocalSandboxProvider、虚拟
-  `/mnt/...` 路径和 `backend/skills/public`。
+- 不删除仍被 PixelFlow Harness 运行时使用的虚拟 `/mnt/...` 路径和
+  `backend/skills/skills`。
 - 不直接修改 `feature/dev_0.8.4_boguan` 或
   `feature/agent_0.8.4_boguan`，不把自动化修复混入 M03 模块提交。
 - 不调用真实图片、视频、PPT、剪映或 LLM 付费接口。
@@ -113,8 +113,8 @@ content-app-only 合同，再删除 fallback；不为了保留过期测试恢复
 
 ### 3.4 Skill 与 Windows 可移植性
 
-`backend/skills/public` 是 PixelFlow 实际 Skill 根目录。Skill frontmatter 和
-客户端列表测试统一定位该目录，不再读取不存在的仓库根 `skills/public`。
+`backend/skills/skills` 是 PixelFlow 实际共享 Skill 源目录。Sidecar 通过
+`PIXELFLOW_AGENT_HOME/skills` 读取其发布副本，不再读取已废弃的旧目录。
 
 对外暴露的虚拟路径固定使用 POSIX `/mnt/...` 格式。路径转换实现使用
 `PurePosixPath` 或显式分隔符归一化，不把 Windows `\` 泄漏给 Agent。符号链接

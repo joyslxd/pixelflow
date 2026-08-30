@@ -286,32 +286,19 @@ PowerMem 调用和真实供应商路径均保持不变。
 | IndustryProfileSkill | `backend/pixelflow/intake/industry_profile.py` | 命中垂类模板或用 LLM 生成行业创作画像 | LLM 失败时通用电商兜底 |
 | CreativeDirectionSkill | `backend/pixelflow/intake/llm.py` | 生成 3 个可进入 plan.md 的创意方向 | LLM 失败时本地兜底方向 |
 
-垂类模板路径：
-
-```text
-backend/skills/public/borgrise-creative-assistant-v2/templates/industry_profile.md
-```
-
 ### 5.2 策划类 Skill
 
 | Skill | 代码位置 | 作用 |
 | --- | --- | --- |
 | PlanTemplateFillSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/plan_llm.py` | 读取图片/视频独立模板；视频第一阶段生成 plan.md 结构、精确时间线、资产需求与完整资产清单 |
-| SeedancePlanAuthoringSkill | `backend/pixelflow/creative/seedance_plan.py`、`creative/plan_llm.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 在稳定资产 ID 后一次写作全部分镜；初始生成、Agent 修订和手工编辑重新对齐共用；只允许改叙事字段，模型、时间线、卖点、目标和资产合同不可变 |
+| SeedancePlanAuthoringSkill | `backend/skills/skills/seedance-prompt/SKILL.md` | 在稳定资产 ID 后一次写作全部分镜；初始生成、Agent 修订和手工编辑重新对齐共用；只允许改叙事字段，模型、时间线、卖点、目标和资产合同不可变 |
 | PlanSceneBlueprintSkill | `backend/pixelflow/creative/scene_blueprint.py`、`generate/seedance_prompt.py` | 规范化分镜叙事职能、连续时间线、故事线、镜头描述、旁白、转场和资产需求；LLM 不可用或镜头描述二次校验仍不完整时，按叙事职能使用八维增强规则兜底；资产需求只允许人物、物理场景和有形道具 |
 | PlanConsistencyCheckSkill | `backend/pixelflow/creative/plan_markdown.py`、`creative/contract.py`、`creative/scene_blueprint.py` | 校验用户确认字段、模型能力、场景图片规格、每镜 4-15 秒、秒级镜头描述、总分总结构、精确总时长、八维镜头完整度，以及资产需求语义；资产不合法时只让 LLM 定向修复 `asset_requirements`，不得修改故事和时长 |
 | PlanRevisionSkill | `backend/pixelflow/creative/revision_contract.py`、`creative/plan_markdown.py`、`creative/plan_llm.py` | 先合并白名单 `creation_contract_patch`，再结合当前 Plan、表单、垂类补充、附件、采集上下文和 PowerMem 重写 Plan；生成新版本并保留历史 |
 | PlanRestoreSkill | `backend/pixelflow/creative/plan_markdown.py` | 直接激活所选历史版本，不追加重复版本；恢复对应合同与分镜时长快照 |
 | PlanManualEditSkill | `backend/pixelflow/creative/plan_markdown.py`、`web/src/components/canvas/PlanMarkdownEditor.tsx` | 在右侧画布编辑完整 Markdown 后复用 Plan 修订 LLM，对齐权威合同、分镜蓝图和镜头完整度；全部校验通过才发布下一版本 |
 
-plan.md 模板路径：
-
-```text
-backend/skills/public/borgrise-creative-assistant-v2/templates/plan_video.md
-backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
-```
-
-模板只是章节结构和信息密度范例。策划 Agent 必须结合当前表单、选中创意、行业画像、附件、语义记忆和创作合同重新生成内容，禁止把模板中的示例人物、产品或卖点复制到其他任务。语义记忆只影响内部决策，禁止在 plan.md 中展示“长期记忆约束”、PowerMem、Skill/Agent 日志或记忆原文。前端统一把两类结果显示为 `plan.md`。
+策划 Agent 必须结合当前工作区、选中创意、附件和创作合同重新生成规划，禁止复制示例人物、产品或卖点。前端统一显示规划结果。
 
 ### 5.3 图片类 Skill
 
@@ -346,7 +333,7 @@ backend/skills/public/borgrise-creative-assistant-v2/templates/plan_image.md
 | VideoModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/video_generate` | 查询启用视频模型及 `aspectRatioList/sizeList/onSoundList/videoDurationList/modelGenerateTypeList/uploadFileTypeList`；展示 content-app 返回的所有启用 Seedance，并把用户所选模型的完整实时能力固化到创作合同；系统推荐优先 `seedance-2.0` |
 | SceneImageModelConfigLookupSkill | `web/src/lib/api.ts`、`GenParamsDialog.tsx` | `/api/modelParamConfig/listByCategory/image_generate` | 查询场景资产图片模型及其比例/清晰度能力；用户只选模型，能力范围随表单提交给 Plan Agent |
 | ScenePackageSkill | `backend/pixelflow/generate/scene_packages.py` | LLM + 本地规则 | 生成可编辑场景包 |
-| SeedanceShotPromptSkill | `backend/pixelflow/generate/seedance_prompt.py` + `backend/skills/public/borgrise-creative-assistant-v2/skills/seedance-prompt/SKILL.md` | 无 | 对 Seedance 全系列通用；按实际 `video_model` 生成秒级镜头描述，并保留 `@asset_id`、mentions 和最多 9 张参考图 |
+| SeedanceShotPromptSkill | `backend/skills/skills/seedance-prompt/SKILL.md` | 无 | 对 Seedance 全系列通用；按实际 `video_model` 生成秒级镜头描述，并保留 `@asset_id`、mentions 和最多 9 张参考图 |
 | SceneAssetImageSkill | `pixelflow_video.py` + Image Skill | `/api/picture/text_to_image` | 生成人物三视图、场景图、道具图 |
 | TextToVideoSkill | `run_generation.py` | `/api/video/text-to-video` | 文生视频 |
 | ImageToVideoSkill | `run_generation.py` | `/api/video/image-to-video` | 首帧图生视频 |

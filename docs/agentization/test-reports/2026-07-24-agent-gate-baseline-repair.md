@@ -19,7 +19,7 @@
 | M13 聚合门禁只构建前端，且后端 Ruff 不是全量 | M13 固定运行后端全量 pytest、`ruff check .`、前端合同测试、前端全量测试、lint 与生产构建 |
 | Docker/provisioner/Sandbox memory profile 文件已删除，但旧测试仍要求其存在 | 删除四组过期基础设施合同测试，保留当前 Gateway Dockerfile 与 CORS 合同测试 |
 | 网关仍残留本地 Cookie 注册、登录与用户表兼容合同 | 网关统一使用 content-app `Authorization`；运行时 E2E 在 content-app Client 边界替换外部鉴权，保留真实认证传播链 |
-| Skill 扫描指向仓库根目录的不存在路径 | 统一到 `backend/skills/public`，并让测试优先加载当前 worktree 的 harness 源码 |
+| Skill 扫描指向仓库根目录的不存在路径 | 统一到 `backend/skills/skills`，并让测试优先加载当前 worktree 的 Harness 源码 |
 | Windows 路径反向映射泄露宿主路径或产生反斜杠虚拟路径 | 使用路径对象做包含判断，所有虚拟路径统一输出 POSIX 分隔符；Windows 优先使用可用 PowerShell，子进程按 UTF-8 解码 |
 | Windows 未授权创建符号链接，且不提供可验证的 POSIX chmod 语义 | 仅在 `WinError 1314` 时跳过符号链接测试；POSIX 权限位测试在 Windows 条件跳过，其他异常仍失败 |
 | 内部系统身份覆盖渠道传入的真实用户 | `inject_authenticated_user_context()` 对 `system_role=internal` 保留已有终端用户 |

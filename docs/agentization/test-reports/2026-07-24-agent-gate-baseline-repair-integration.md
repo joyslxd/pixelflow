@@ -74,7 +74,7 @@ M13 的八项命令包括差异检查、项目 Python 3.12 检查、后端全量
 ## 产品能力边界
 
 - 产品已确认不保留缺失的旧 Docker/provisioner/Sandbox memory profile 能力，对应过期合同测试已退役，不恢复从未存在于当前 Git 历史的文件。
-- 当前 Gateway Dockerfile、`LocalSandboxProvider`、`backend/skills/public` 和 `/mnt/...` 虚拟路径能力仍然保留。
+- 当前 Gateway Dockerfile、Harness 活动 Skill 根 `backend/skills/skills` 和 `/mnt/...` 虚拟路径能力仍然保留。
 - 网关鉴权统一使用 content-app `Authorization`，缺少 Header 时 fail-closed；测试在 content-app Client 边界替换外部鉴权。
 - 没有 migration、配置键、content-app API、生产运行模式、`enabled_intents` 或 Feature Flag 变化。
 - 本次只合入代码和门禁基线，不构成发布批准，也不把自动化状态提升为 `automation_active`。
