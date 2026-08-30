@@ -17,10 +17,18 @@ export function apply(ctx) {
                     type: "object",
                     additionalProperties: false,
                     properties: {
+                        // execute 返回的状态是 Runtime 判定是否应挂起的必要字段；Schema 必须
+                        // 与 BrokerObservation 对齐，否则成功 Broker 响应会被 Runtime 错判为无效。
+                        status: {
+                            type: "string",
+                            enum: ["completed", "pending_operation", "awaiting_confirmation", "authorization_required"],
+                        },
                         public_summary: { type: "string" },
                         model_observation: { type: "object" },
+                        // 已由 canonicalObservation 过滤，保留给挂起策略读取；不向模型暴露原始 Provider 信息。
+                        suspension: { type: "object" },
                     },
-                    required: ["public_summary", "model_observation"],
+                    required: ["status", "public_summary", "model_observation"],
                 },
                 render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
             },

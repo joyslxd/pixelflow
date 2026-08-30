@@ -42,3 +42,10 @@ apply({
 
 assert.deepEqual(registered.map((tool) => tool.name), ["inspect_video_workspace", "patch_scene"]);
 assert.deepEqual(registered[1].parameters, { type: "object", properties: { scene_id: { type: "string" } } });
+assert.deepEqual(registered[0].output.schema.required, ["status", "public_summary", "model_observation"]);
+assert.deepEqual(registered[0].output.schema.properties.status.enum, [
+  "completed",
+  "pending_operation",
+  "awaiting_confirmation",
+  "authorization_required",
+]);
