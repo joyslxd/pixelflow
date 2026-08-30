@@ -41,6 +41,10 @@ function statusLabel(status: string): string {
   return (({ planned: "已规划", generating: "生成中", ready: "已就绪", failed: "失败", queued: "等待调度", polling: "处理中", succeeded: "已完成", paused: "已暂停" } as Record<string, string>)[status.toLowerCase()] ?? status) || "未知";
 }
 
+function assetOriginLabel(origin: string): string {
+  return ({ existing_material: "已有素材", planned_generation: "待生成素材", provider_output: "已生成素材" } as Record<string, string>)[origin] ?? "待生成素材";
+}
+
 export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }: Props) {
   const projection = useMemo(() => projectWorkspaceV2(summary), [summary]);
   const [creativeDraft, setCreativeDraft] = useState(() => fields(projection.creativeBrief));
@@ -136,7 +140,7 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
         {projection.assets.map((asset) => (
           <article key={asset.assetId} className="rounded bg-surface p-2">
             <p className="font-medium text-ink">{asset.slot} · {asset.role}</p>
-            <p>{asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
+            <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
             {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
             {asset.operationStatus ? <p>生成任务：{statusLabel(asset.operationStatus)}</p> : null}
             {asset.artifactRef ? <p>Artifact：{asset.artifactRef}</p> : null}
