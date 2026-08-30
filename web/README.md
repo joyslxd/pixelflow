@@ -1,7 +1,6 @@
 # PixelFlow Web
 
-PixelFlow 前端 —— **对话 + canvas** 工作区(Vite + React + TS + Tailwind v4)。
-左侧对话(chat),右侧 canvas 渲染 Brief / 生成进度 / 成片。
+PixelFlow 前端是基于 Vite、React 和 TypeScript 的 Agent 工作台。浏览器只通过 Gateway 的 `/agent` 公开合同读取 Conversation、Snapshot、SSE、Interrupt 和 Workspace 投影。
 
 ## 开发
 
@@ -47,16 +46,15 @@ VITE_API_TARGET=http://localhost:8123 pnpm dev
 ```
 src/
   components/layout/    Sidebar(对话列表) + AppLayout
-  components/chat/      ChatPanel + MessageBubble
-  components/composer/  Composer(输入器) + Chip(参数胶囊)
-  components/canvas/    CanvasPanel + BriefCard + FlowTimeline + VideoResultCard + VideoPreviewPanel
-  pages/WorkspacePage   对话 + canvas 双栏
+  features/agent-runtime/    Snapshot/SSE reducer 与 Conversation 生命周期
+  features/agent-workspace/  AgentWorkspace、InterruptHost 与三栏 Shell
+  features/video/            视频 Workspace 投影
+  api/                       Gateway 公开合同 Client
   pages/AuthTokenPage   本地调试 content-app Authorization 的设置页
-  lib/                  api / authStorage / types / chat 类型 / utils
+  lib/                  authStorage 与通用显示工具
 ```
 
-> WorkspacePage 已接 `/agent/flows`
-> (创建 / SSE 事件 / 可解释执行时间线 / brief 确认·修订 / 结果·资产)。
+根路由和 `/c/:conversationId` 均直接渲染 `AgentWorkspace`；不保留 Legacy Workspace、浏览器任务轮询或 `/agent/flows` 根任务 API。
 
 ## 本地 Authorization 调试
 
@@ -68,4 +66,4 @@ PixelFlow 前端所有后端请求都通过 `src/lib/api.ts` 统一调用。这�
 http://localhost:5273/agentfrontend/#/auth-token
 ```
 
-粘贴 content-app 登录 token 后点击“保存并验证”。页面会把 token 保存到 `localStorage.Authorization`，并调用 `/agent/auth/me` 验证当前用户。验证通过后，回到工作台即可正常调用 `/agent/flows`、SSE 和资产接口。
+粘贴 content-app 登录 token 后点击“保存并验证”。页面会把 token 保存到 `localStorage.Authorization`，并调用 `/agent/auth/me` 验证当前用户。验证通过后，回到工作台即可调用 Gateway 的 Conversation、Harness Run、SSE 与 Workspace 接口。

@@ -20,8 +20,10 @@ const creativeLabels: Record<string, string> = {
 };
 const narrativeLabels: Record<string, string> = {
   concept: "创意概念", character_arc: "人物弧线", era: "时代设定", narration: "旁白",
-  dialogue: "对白", sound: "声音骨架", brand_closure: "品牌收束", script: "脚本", outline: "脚本大纲",
+  dialogue: "对白", sound: "声音骨架", brand_closure: "品牌收束", script: "脚本大纲", outline: "脚本大纲",
 };
+const primaryNarrativeKeys = ["concept", "script", "outline", "narration", "dialogue", "sound", "brand_closure"];
+const optionalNarrativeKeys = ["character_arc", "era"];
 
 function fields(source: Record<string, string | number>): Record<string, string> {
   return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, String(value)]));
@@ -53,6 +55,8 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
   const [narrativeDirty, setNarrativeDirty] = useState(false);
   const [saving, setSaving] = useState<"creative" | "narrative" | null>(null);
   const [conflict, setConflict] = useState("");
+  const [addingNarrative, setAddingNarrative] = useState(false);
+  const [narrativeKeyToAdd, setNarrativeKeyToAdd] = useState("concept");
 
   useEffect(() => {
     if (!creativeDirty) setCreativeDraft(fields(projection.creativeBrief));
@@ -91,6 +95,30 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
   const childTotal = Object.values(counts).reduce((total, value) => total + value, 0);
   const creativeFieldKeys = orderedFieldKeys(creativeDraft, creativeLabels);
   const narrativeFieldKeys = orderedFieldKeys(narrativeDraft, narrativeLabels);
+  const visiblePrimaryNarrativeKeys = narrativeFieldKeys.filter(
+    (key) => primaryNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+  );
+  const visibleOptionalNarrativeKeys = narrativeFieldKeys.filter(
+    (key) => optionalNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+  );
+  const visibleExtendedNarrativeKeys = narrativeFieldKeys.filter(
+    (key) => !primaryNarrativeKeys.includes(key) && !optionalNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+  );
+  const editNarrativeField = (key: string, value: string) => {
+    setNarrativeDirty(true);
+    setNarrativeDraft((current) => ({ ...current, [key]: value }));
+  };
+  const narrativeEditor = (key: string) => (
+    <label key={key} className="block space-y-1">
+      <span>{narrativeLabels[key] ?? key}</span>
+      <textarea
+        className={`w-full rounded border border-line bg-surface p-2 text-ink ${key === "script" || key === "outline" ? "min-h-32" : "min-h-16"}`}
+        maxLength={key === "script" || key === "outline" ? 8_000 : 2_000}
+        value={narrativeDraft[key] ?? ""}
+        onChange={(event) => editNarrativeField(key, event.target.value)}
+      />
+    </label>
+  );
 
   return (
     <div className="mt-2 space-y-4 text-xs text-ink-soft">
@@ -119,17 +147,34 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
 
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle("叙事与脚本")}
-        {narrativeFieldKeys.map((key) => (
-          <label key={key} className="block space-y-1">
-            <span>{narrativeLabels[key] ?? key}</span>
-            <textarea
-              className={`w-full rounded border border-line bg-surface p-2 text-ink ${key === "script" ? "min-h-32" : "min-h-16"}`}
-              maxLength={key === "script" ? 8_000 : 2_000}
-              value={narrativeDraft[key] ?? ""}
-              onChange={(event) => { setNarrativeDirty(true); setNarrativeDraft((current) => ({ ...current, [key]: event.target.value })); }}
-            />
-          </label>
-        ))}
+        {visiblePrimaryNarrativeKeys.map(narrativeEditor)}
+        {visiblePrimaryNarrativeKeys.length === 0 ? <p>尚未填写叙事约束。</p> : null}
+        {visibleOptionalNarrativeKeys.length > 0 ? (
+          <details className="rounded bg-surface p-2">
+            <summary className="cursor-pointer text-ink">人物与世界观</summary>
+            <div className="mt-2 space-y-2">{visibleOptionalNarrativeKeys.map(narrativeEditor)}</div>
+          </details>
+        ) : null}
+        {visibleExtendedNarrativeKeys.length > 0 ? (
+          <details className="rounded bg-surface p-2">
+            <summary className="cursor-pointer text-ink">更多叙事约束</summary>
+            <div className="mt-2 space-y-2">{visibleExtendedNarrativeKeys.map(narrativeEditor)}</div>
+          </details>
+        ) : null}
+        {addingNarrative ? (
+          <div className="space-y-2 rounded border border-line bg-surface p-2">
+            <label className="block space-y-1">
+              <span>选择要添加的叙事约束</span>
+              <select className="w-full rounded border border-line bg-surface px-2 py-1 text-ink" value={narrativeKeyToAdd} onChange={(event) => setNarrativeKeyToAdd(event.target.value)}>
+                {Object.entries(narrativeLabels).filter(([key]) => !narrativeDraft[key]?.trim()).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+              </select>
+            </label>
+            {narrativeEditor(narrativeKeyToAdd)}
+            <button className="rounded border border-line px-2 py-1" onClick={() => setAddingNarrative(false)}>完成添加</button>
+          </div>
+        ) : (
+          <button className="rounded border border-line px-2 py-1" onClick={() => setAddingNarrative(true)}>添加叙事约束</button>
+        )}
         <button className="rounded border border-line px-2 py-1 disabled:opacity-50" disabled={saving !== null || !narrativeDirty} onClick={() => void save("narrative")}>
           {saving === "narrative" ? "保存中…" : `保存叙事与脚本（r${revision}）`}
         </button>
@@ -152,6 +197,7 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
 
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle(`Prompt Package（${projection.packages.length} 段）`)}
+        <p>这是生成前的最终可执行层：继承上述叙事约束，并由 Seedance 2.5 Skill 优化。</p>
         <p>总时长：{projection.packages.reduce((total, item) => total + (item.durationSec ?? 0), 0)} 秒</p>
         <ol className="space-y-2">
           {projection.packages.map((item) => (

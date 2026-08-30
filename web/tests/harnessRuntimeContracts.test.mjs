@@ -28,7 +28,6 @@ function assertFields(block, fields, label) {
 test("Harness fixture 仅冻结公开跨端 DTO", () => {
   assert.deepEqual(Object.keys(fixture).sort(), [
     "event",
-    "interrupt_response",
     "schema_version",
     "snapshot",
     "turn_start",
@@ -39,13 +38,7 @@ test("Harness fixture 仅冻结公开跨端 DTO", () => {
 
 test("TypeScript Harness 合同覆盖冻结字段", () => {
   assertFields(typeBlock("TurnStartV1"), Object.keys(fixture.turn_start), "TurnStartV1");
-  assertFields(typeBlock("InterruptResponseV1"), Object.keys(fixture.interrupt_response), "InterruptResponseV1");
   assertFields(typeBlock("WorkspaceCommandV1"), Object.keys(fixture.workspace_command), "WorkspaceCommandV1");
   assertFields(typeBlock("PublicAgentEventV1"), Object.keys(fixture.event), "PublicAgentEventV1");
   assertFields(typeBlock("AgentSnapshotV1"), Object.keys(fixture.snapshot), "AgentSnapshotV1");
-  assertFields(
-    typeBlock("InterruptResponseV1"),
-    Object.keys(fixture.interrupt_response.value),
-    "InterruptResponseV1.value",
-  );
 });

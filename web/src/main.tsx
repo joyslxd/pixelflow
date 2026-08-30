@@ -7,7 +7,7 @@ import "./index.css";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { AuthTokenPage } from "@/pages/AuthTokenPage";
 import { TracePage } from "@/pages/TracePage";
-import { WorkspacePage } from "@/pages/WorkspacePage";
+import { AgentWorkspace } from "@/features/agent-workspace/AgentWorkspace";
 import { setupContentAppAuthorizationListener } from "@/lib/authStorage";
 
 setupContentAppAuthorizationListener();
@@ -21,8 +21,8 @@ const router = createHashRouter([
     path: "/",
     element: <AppLayout />,
     children: [
-      { index: true, element: <WorkspacePage /> },
-      { path: "c/:conversationId", element: <WorkspacePage /> },
+      { index: true, element: <AgentWorkspace /> },
+      { path: "c/:conversationId", element: <AgentWorkspace /> },
       { path: "auth-token", element: <AuthTokenPage /> },
       { path: "trace/:conversationId", element: <TracePage /> },
       { path: "*", element: <Navigate to="/" replace /> },

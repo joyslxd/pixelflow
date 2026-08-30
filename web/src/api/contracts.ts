@@ -36,7 +36,6 @@ export type PublicAgentEventTypeV1 =
   | "agent.response.delta"
   | "agent.response.completed"
   | "agent.confirmation.requested"
-  | "agent.route.decided"
   | "error.raised";
 
 export type TurnStartV1 = {
@@ -44,25 +43,19 @@ export type TurnStartV1 = {
   workspace_id: string;
   expected_workspace_revision: number;
   content: string;
+  materials?: TurnMaterialV1[];
   max_output_tokens?: number;
 };
 
-export type InterruptResponseV1 = {
-  client_response_id: string;
-  value: {
-    content: string;
-    materials?: Array<Record<string, unknown>>;
-    reply_to_message_id?: string;
-    artifact_refs?: string[];
-    explicit_action?: {
-      action: string;
-      intent?: string | null;
-      workflow_id?: string | null;
-      stage?: string | null;
-      artifact_ref?: string | null;
-      patch: Record<string, unknown>;
-    } | null;
-  };
+/** 已上传文件的公开引用；二进制仅在 content-app/TOS，浏览器不把文件内容发送给 Gateway。 */
+export type TurnMaterialV1 = {
+  material_id: string;
+  kind: "image" | "video" | "audio" | "file";
+  name: string;
+  reference_label: string;
+  content_type: string;
+  url: string;
+  asset_id?: string;
 };
 
 /** 浏览器只消费 Gateway 投影的中断摘要，不持有 Tool 参数、授权或 Provider 状态。 */
@@ -72,6 +65,14 @@ export type PublicInterruptV1 = {
   title: string;
   description: string;
   status: "open" | "submitting";
+};
+
+/** 外部 Operation 的公开进度；不包含 Provider job、供应商标识或错误正文。 */
+export type PublicOperationV1 = {
+  operation_id: string;
+  status: "queued" | "running" | "paused" | "completed" | "failed";
+  completed: number | null;
+  total: number | null;
 };
 
 export type WorkspaceCommandV1 = {

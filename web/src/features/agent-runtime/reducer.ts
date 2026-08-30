@@ -205,7 +205,8 @@ export function foldAppliedEvent(
     case "agent.tool.completed": {
       const summary = payloadText(event.payload, "public_summary")
         || payloadText(event.payload, "tool_name");
-      return summary === null ? next : { ...next, progressLines: [...state.progressLines, summary] };
+      if (summary === null || state.progressLines.at(-1) === summary) return next;
+      return { ...next, progressLines: [...state.progressLines, summary] };
     }
     case "external_job.state_changed":
     case "agent.operation.updated": {

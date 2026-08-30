@@ -7,7 +7,6 @@ type Summary = Record<string, unknown>;
 type VideoWorkspaceSnapshotPanelProps = {
   summary: Summary;
   revision: number;
-  onCancelQuotaInterrupt: () => void;
   onUpdateScript: (content: string) => Promise<void>;
   onUpdatePlanPublicGoal: (
     planId: string,
@@ -28,6 +27,13 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
+function materialName(value: unknown): string {
+  /** 浏览器下载图片可能把 URL 查询串作为文件名；展示层不应把它误导为地址。 */
+
+  const name = text(value);
+  return !name || /^u=/iu.test(name) || /[?&=]/u.test(name) ? "图片" : name;
+}
+
 function records(value: unknown): Array<Record<string, unknown>> {
   /** 仅接受数组内普通对象，浏览器不解释未冻结的业务 payload。 */
 
@@ -44,7 +50,6 @@ function PanelTitle({ children }: { children: string }) {
 export function VideoWorkspaceSnapshotPanel({
   summary,
   revision,
-  onCancelQuotaInterrupt,
   onUpdateScript,
   onUpdatePlanPublicGoal,
 }: VideoWorkspaceSnapshotPanelProps) {
@@ -96,9 +101,7 @@ export function VideoWorkspaceSnapshotPanel({
         <section className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-900">
           <PanelTitle>额度中断</PanelTitle>
           <p className="mt-1">原因：{text(summary.quota_interrupt_reason_code, "需要人工处理")}</p>
-          <button className="mt-2 rounded border border-amber-300 px-2 py-1" onClick={onCancelQuotaInterrupt}>
-            取消该任务
-          </button>
+          <p className="mt-2">请完成额度处理后重新发起该操作。</p>
         </section>
       ) : null}
 
@@ -173,6 +176,18 @@ export function VideoWorkspaceSnapshotPanel({
           <p key={`${text(asset.asset_id)}-${text(asset.name)}`} className="rounded bg-surface px-1 py-0.5">{text(asset.name)}</p>
         ))}
       </section>
+
+      {count(summary.material_count) > 0 ? (
+        <section className="space-y-2 rounded bg-canvas p-2">
+          <PanelTitle>本对话上传的引用</PanelTitle>
+          {records(summary.material_summaries).map((material) => (
+            <p key={text(material.material_id)} className="rounded bg-surface px-1 py-0.5">
+              {text(material.reference_label)}：{materialName(material.name)}
+            </p>
+          ))}
+        </section>
+      ) : null}
+
 
       <section className="space-y-2 rounded bg-canvas p-2">
         <PanelTitle>分镜</PanelTitle>

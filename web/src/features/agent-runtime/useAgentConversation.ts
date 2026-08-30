@@ -169,7 +169,7 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [hydrateRun, startEventStream, stopStream]);
 
-  const newConversation = useCallback(async () => {
+  const newConversation = useCallback(async (): Promise<ConversationV1> => {
     /** 新会话创建完成后回读服务端状态，避免前端构造业务副本。 */
 
     setError("");
@@ -177,8 +177,10 @@ export function useAgentConversation(initialConversationId?: string) {
       const created = await createConversation();
       await refreshConversations();
       await openConversation(created.conversation_id);
+      return created;
     } catch (caught) {
       setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
+      throw caught;
     }
   }, [openConversation, refreshConversations]);
 

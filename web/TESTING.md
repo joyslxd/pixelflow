@@ -15,3 +15,9 @@ corepack pnpm test
 ```
 
 两个脚本都要求先完成 `corepack pnpm install`。它们不读取 Authorization、供应商密钥或生产配置。
+
+## F4 切换验证
+
+`pnpm test` 包含 F4 源码门禁：禁止旧工作台、`/agent/flows`、旧 Task Client、`pending*Job` 业务状态和 Sidecar 私有 URL 回流。`pnpm build-dev` 会产生带内容哈希的 JavaScript/CSS 文件，发布时应以新 `index.html` 引用这些文件；CDN 不得将 HTML 长期缓存。
+
+完整浏览器旅程需在已启动 Gateway、Sidecar 与隔离测试数据上执行：新建对话、连续输入、刷新恢复、切换对话、断网重连、表单提交/关闭、确认、授权恢复、Operation 完成和最终下载。旧静态资源命中新 Gateway 时必须得到升级提示，且不得对已删除 API 无限重试。

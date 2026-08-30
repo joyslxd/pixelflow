@@ -32,6 +32,8 @@ const harnessSnapshotFixture = path.resolve(
 const contractSource = path.join(webRoot, "src", "api", "contracts.ts");
 const harnessContractTest = path.join(webRoot, "tests", "harnessRuntimeContracts.test.mjs");
 const reducerTest = path.join(webRoot, "tests", "agentRuntimeReducer.test.mjs");
+const f4SourceGateTest = path.join(webRoot, "tests", "f4SourceGate.test.mjs");
+const workspaceV2Test = path.join(webRoot, "tests", "workspaceV2.test.mjs");
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pixelflow-web-tests-"));
 const moduleDirectory = path.join(temporaryRoot, "modules");
 
@@ -52,6 +54,7 @@ function compileAgentRuntimeModules() {
     "src/features/agent-runtime/reducer.ts",
     "src/features/agent-runtime/snapshotProjector.ts",
     "src/features/agent-runtime/state.ts",
+    "src/features/agent-runtime/workspaceV2.ts",
     "--target",
     "ES2022",
     "--module",
@@ -83,7 +86,7 @@ try {
 
   // 先编译全部当前前端源码，再运行公开合同与 reducer 门禁。
   run(process.execPath, [tscEntry, "--noEmit"]);
-  run(process.execPath, ["--test", harnessContractTest, reducerTest], {
+  run(process.execPath, ["--test", harnessContractTest, reducerTest, f4SourceGateTest, workspaceV2Test], {
     env: {
       AGENT_HARNESS_CONTRACT_FIXTURE: fixture,
       AGENT_HARNESS_TYPES_SOURCE: contractSource,
@@ -91,6 +94,10 @@ try {
         path.join(moduleDirectory, "features/agent-runtime/state.js"),
       ).href,
       AGENT_RUNTIME_SNAPSHOT_FIXTURE: harnessSnapshotFixture,
+      WORKSPACE_V2_TEST_MODULE: pathToFileURL(
+        path.join(moduleDirectory, "features/agent-runtime/workspaceV2.js"),
+      ).href,
+      PIXELFLOW_WEB_ROOT: webRoot,
     },
   });
 } finally {
