@@ -183,7 +183,7 @@ async def test_confirmation_tool_is_ledgered_and_never_executes_provider_before_
             interrupt_id=interrupt_id,
             binding=binding,
             client_response_id="b8bd2c37-4c1a-4e0d-8299-8dc091cc6b43",
-            expected_workspace_revision=1,
+            expected_workspace_revision=2,
             response_payload={"action": "confirm"},
         )
         reloaded_interrupt = await repository.get_interrupt(interrupt_id)
@@ -193,7 +193,7 @@ async def test_confirmation_tool_is_ledgered_and_never_executes_provider_before_
             interrupt_id=interrupt_id,
             binding=binding,
             client_response_id="b8bd2c37-4c1a-4e0d-8299-8dc091cc6b43",
-            expected_workspace_revision=1,
+            expected_workspace_revision=2,
             response_payload={"action": "confirm"},
         )
         assert replayed_confirmation == confirmed

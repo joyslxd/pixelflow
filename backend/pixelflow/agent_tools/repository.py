@@ -241,7 +241,9 @@ class SQLAgentToolRepository:
                     if dict(row.response_payload_json or {}) != normalized_payload:
                         raise AgentToolBindingConflictError("同一 Harness 中断响应内容不一致")
                     return self._interrupt_from_row(row)
-                if row.status != "open" or row.workspace_revision != expected_workspace_revision:
+                # Controller 已先校验客户端看到的是当前 Workspace revision。确认恢复 Run 读取
+                # 当前权威 Workspace，因此同一原 Run 在确认卡创建后完成的安全写入不能作废确认。
+                if row.status != "open" or row.workspace_revision > expected_workspace_revision:
                     raise AgentToolBindingConflictError("Harness 中断已关闭或工作区版本不一致")
                 row.status = "responded"
                 row.response_id = client_response_id
@@ -274,7 +276,7 @@ class SQLAgentToolRepository:
                     if row.response_id != client_response_id:
                         raise AgentToolBindingConflictError("Harness 表单已由其他响应处理")
                     return self._interrupt_from_row(row)
-                if row.status != "open" or row.workspace_revision != expected_workspace_revision:
+                if row.status != "open" or row.workspace_revision > expected_workspace_revision:
                     raise AgentToolBindingConflictError("Harness 表单已关闭或工作区版本不一致")
                 row.status = "cancelled"
                 row.response_id = client_response_id
