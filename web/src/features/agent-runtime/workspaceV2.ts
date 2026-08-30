@@ -6,6 +6,7 @@ export type WorkspaceV2Asset = {
   kind: string;
   role: string;
   origin: "existing_material" | "planned_generation" | "provider_output";
+  generationPrompt: string;
   state: "planned" | "generating" | "ready" | "failed";
   referenceAssetIds: string[];
   usableForVideo: boolean;
@@ -143,6 +144,7 @@ function assets(summary: RecordValue): WorkspaceV2Asset[] {
     kind: string(item.kind ?? item.asset_type, 64) || "asset",
     role: string(item.role ?? item.name ?? item.title, 256) || "未命名资产",
     origin: assetOrigin(item.origin),
+    generationPrompt: string(item.generation_prompt, 8_000),
     state: status(item.state),
     referenceAssetIds: strings(item.reference_asset_ids),
     usableForVideo: item.usable_for_video === true,

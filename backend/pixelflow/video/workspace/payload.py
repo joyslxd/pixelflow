@@ -31,6 +31,8 @@ class WorkspaceAssetRecord(BaseModel):
     # 不能通过是否存在 URL 推断，避免把外部 URL 透传进 Prompt Package。
     origin: AssetOrigin = "planned_generation"
     source_material_id: str | None = Field(default=None, max_length=128)
+    # 待生成资产的可审阅生产提示词；已有素材不复制原始 URL，也不要求重新生成。
+    generation_prompt: str | None = Field(default=None, max_length=20_000)
     state: AssetState = "planned"
     reference_asset_ids: tuple[str, ...] = Field(default=(), max_length=32)
     provider_artifact_ref: str | None = Field(default=None, max_length=256)
@@ -51,6 +53,9 @@ class WorkspaceAssetRecord(BaseModel):
                 raise ValueError("已有素材必须关联 source_material_id")
             if self.state != "ready" or not self.usable_for_video:
                 raise ValueError("已有素材必须处于 ready 且可用于视频")
+        if self.origin == "planned_generation" and self.state in {"planned", "generating"}:
+            if not self.generation_prompt or not self.generation_prompt.strip():
+                raise ValueError("待生成素材必须提供 generation_prompt")
         return self
 
 
@@ -182,7 +187,7 @@ def material_asset_records(payload: Mapping[str, object]) -> list[dict[str, Json
                 state="ready",
                 provider_artifact_ref=f"artifact:material:{material_id}",
                 usable_for_video=True,
-            ).model_dump(mode="json")
+            ).model_dump(mode="json", exclude_none=True)
         )
     return records
 

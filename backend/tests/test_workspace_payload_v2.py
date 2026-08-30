@@ -46,7 +46,7 @@ async def test_prepare_tool_writes_four_layers_and_legacy_projections_together()
             "creative_brief": {"platform": "douyin", "aspect_ratio": "9:16"},
             "narrative_plan": {"concept": "把爱变成分担"},
             "asset_registry": [
-                {"asset_id": "image-1", "kind": "character", "role": "母亲"}
+                {"asset_id": "image-1", "kind": "character", "role": "母亲", "generation_prompt": "家庭厨房中的母亲角色设定图"}
             ],
             "scenes": [
                 {
@@ -99,7 +99,7 @@ async def test_prepare_tool_executor_accepts_all_declared_workspace_roots() -> N
         arguments={
             "script": "家庭保鲜产品片",
             "creative_brief": {"brand": "美的", "aspect_ratio": "9:16"},
-            "asset_registry": [{"asset_id": "product-image-1", "kind": "image", "role": "产品参考"}],
+            "asset_registry": [{"asset_id": "product-image-1", "kind": "image", "role": "产品参考", "generation_prompt": "美的冰箱产品设定图"}],
             "scenes": [{"scene_id": "A", "prompt": "冰箱产品展示", "duration_sec": 8, "reference_asset_ids": ["product-image-1"]}],
         },
     )
@@ -210,6 +210,7 @@ async def test_prepare_tool_keeps_uploaded_material_and_allows_agent_to_enrich_i
                 "asset_id": f"asset_material_{material_id}",
                 "kind": "product_reference",
                 "role": "美的 M20 冰箱产品外观",
+                "generation_prompt": "不会使用：该图为用户已上传的产品参考图",
             }],
             "scenes": [{
                 "scene_id": "SC01", "prompt": "参考产品图展示冰箱", "duration_sec": 8,
@@ -236,7 +237,7 @@ async def test_prepare_tool_rejects_prompt_reference_not_in_asset_registry() -> 
         "prepare_scene_packages",
         {
             "script": "测试",
-            "asset_registry": [{"asset_id": "asset-product", "kind": "product", "role": "冰箱"}],
+            "asset_registry": [{"asset_id": "asset-product", "kind": "product", "role": "冰箱", "generation_prompt": "冰箱产品设定图"}],
             "scenes": [{
                 "scene_id": "SC01", "prompt": "展示产品", "duration_sec": 8,
                 "reference_asset_ids": ["missing-asset"],

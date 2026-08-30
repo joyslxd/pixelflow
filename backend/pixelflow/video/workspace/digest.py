@@ -142,6 +142,7 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "kind": kind,
             "role": role,
             "origin": _bounded_text(item.get("origin"), maximum=32) or "planned_generation",
+            "generation_prompt": _bounded_text(item.get("generation_prompt"), maximum=8_000),
             "state": _bounded_text(item.get("state"), maximum=32) or "planned",
             "reference_asset_ids": [
                 reference[:128]

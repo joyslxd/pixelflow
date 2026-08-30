@@ -141,6 +141,7 @@ export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }
           <article key={asset.assetId} className="rounded bg-surface p-2">
             <p className="font-medium text-ink">{asset.slot} · {asset.role}</p>
             <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
+            {asset.generationPrompt ? <details><summary>资产生成提示词</summary><p className="mt-1 whitespace-pre-wrap">{asset.generationPrompt}</p></details> : null}
             {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
             {asset.operationStatus ? <p>生成任务：{statusLabel(asset.operationStatus)}</p> : null}
             {asset.artifactRef ? <p>Artifact：{asset.artifactRef}</p> : null}
