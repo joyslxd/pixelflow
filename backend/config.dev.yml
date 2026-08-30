@@ -20,9 +20,9 @@ harness:
   request_timeout_seconds: 15 # 用途：限制 Gateway 调用 Sidecar 的等待秒数；影响：超时后关闭新 Run 准入。
   run_limit_profiles:
     video_interactive_v1:
-      deadline_seconds: 180 # 用途：限制用户视频互动 Run 的模型循环秒数；影响：到期安全收口，不等待 Provider 任务。
-      max_model_steps: 12 # 用途：限制用户视频互动的模型决策轮次；影响：达到上限后停止继续调用 Tool。
-      max_business_tools: 6 # 用途：限制用户视频互动的业务 Tool 数；影响：读取、编辑与规划调用共同计数。
+      deadline_seconds: 300 # 用途：为多轮 Skill、检查、参数纠错和非计费规划预留墙钟时间；影响：超时后当前 Run 安全停止。
+      max_model_steps: 24 # 用途：允许复杂视频规划在自主纠错后完成；影响：仍受 64 步平台硬上限约束。
+      max_business_tools: 12 # 用途：允许读取、规划和编辑串行组合；影响：仍受 32 次平台硬上限约束。
       max_billable_batch_starts: 1 # 用途：限制本 Run 可启动计费批次；影响：M5 计费 Tool 最多一次。
     operation_resume_v1:
       deadline_seconds: 150 # 用途：限制 Operation 完成后的恢复 Run 秒数；影响：只允许短决策，不等待外部轮询。

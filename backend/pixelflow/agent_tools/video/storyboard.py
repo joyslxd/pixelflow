@@ -136,7 +136,12 @@ class PrepareScenePackagesTool:
             "scenes_replace",
             "dirty_scene_ids",
         ),
-        model_observation_keys=("scene_count", "total_duration_sec", "workspace_revision_required"),
+        model_observation_keys=(
+            "scene_count",
+            "total_duration_sec",
+            "workspace_revision_required",
+            "validation_fields",
+        ),
     )
 
     async def execute(

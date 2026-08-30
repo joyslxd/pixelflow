@@ -113,6 +113,32 @@ async def test_prepare_tool_executor_accepts_all_declared_workspace_roots() -> N
 
 
 @pytest.mark.asyncio
+async def test_prepare_tool_returns_safe_validation_field_for_agent_self_correction() -> None:
+    """模型拼错分镜字段时只得到字段路径，不会回显用户正文或 Pydantic 原文。"""
+
+    registry = VideoToolRegistry((PrepareScenePackagesTool(),))
+    result = await registry.execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-validation",
+                conversation_id="conversation-validation",
+            ),
+        ),
+        "prepare_scene_packages",
+        {
+            "script": "测试脚本",
+            "scenes": [{"scene_id": "A", "prompt": "测试镜头", "duratio_sec": 8}],
+        },
+    )
+
+    assert result.public_summary == "工具参数无效，请修正字段：scenes.0.duration_sec"
+    assert result.model_observation == {
+        "validation_fields": ["scenes.0.duration_sec"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_memory_repository_migrates_payload_on_first_cas_write() -> None:
     repository = MemoryVideoAgentRepository()
     workspace = await repository.create_workspace(

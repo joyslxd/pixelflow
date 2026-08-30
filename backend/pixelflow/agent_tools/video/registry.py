@@ -64,10 +64,19 @@ class VideoToolRegistry:
             raise VideoToolValidationError("规划器选择了未注册工具")
         try:
             validated = tool.spec.input_model.model_validate(dict(arguments))
-        except ValidationError:
+        except ValidationError as error:
+            fields = _safe_validation_fields(error)
+            summary = "工具参数无效，请修正后重试"
+            if fields:
+                summary = f"工具参数无效，请修正字段：{'、'.join(fields)}"
             return VideoToolResult(
                 tool_name=tool.spec.name,
-                public_summary="工具参数无效，请修正后重试",
+                public_summary=summary,
+                model_observation=(
+                    {"validation_fields": fields}
+                    if "validation_fields" in tool.spec.model_observation_keys
+                    else {}
+                ),
             )
         try:
             result = await tool.execute(
@@ -124,6 +133,29 @@ class VideoToolRegistry:
             )
             raise VideoToolExecutionError("工具结果无效，请稍后重试")
         return result
+
+
+def _safe_validation_fields(error: ValidationError) -> list[str]:
+    """只反馈 DTO 字段路径，帮助模型修正参数，不回显用户输入或校验原文。"""
+
+    detailed: list[str] = []
+    top_level: list[str] = []
+    for item in error.errors():
+        location = item.get("loc")
+        if not isinstance(location, tuple):
+            continue
+        parts = [str(part) for part in location if isinstance(part, (str, int))]
+        if not parts:
+            continue
+        field = ".".join(parts)
+        target = detailed if len(parts) > 1 else top_level
+        if 0 < len(field) <= 160 and field not in target:
+            target.append(field)
+        if len(detailed) >= 8:
+            break
+    # 嵌套 DTO 缺少字段时，Pydantic 还会附带父数组“元素不足”错误；优先返回可修正的
+    # 详细路径，避免模型把 scenes 误认为需要替换为另一种数据类型。
+    return (detailed or top_level)[:8]
 
 
 __all__ = ["VideoToolRegistry"]
