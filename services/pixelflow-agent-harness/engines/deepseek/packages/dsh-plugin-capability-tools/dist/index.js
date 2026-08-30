@@ -159,12 +159,13 @@ function canonicalObservation(payload) {
     if (!isRecord(payload.suspension) || payload.suspension.kind !== payload.status) {
         throw new Error("PixelFlow Tool Broker 返回了无效挂起合同");
     }
-    const interruptId = payload.status === "awaiting_confirmation" && typeof payload.suspension.interrupt_id === "string"
+    const requiresInterruptId = payload.status === "awaiting_confirmation" || payload.status === "authorization_required";
+    const interruptId = requiresInterruptId && typeof payload.suspension.interrupt_id === "string"
         && /^[a-zA-Z0-9_-]{1,128}$/u.test(payload.suspension.interrupt_id)
         ? payload.suspension.interrupt_id
         : undefined;
-    if (payload.status === "awaiting_confirmation" && !interruptId) {
-        throw new Error("PixelFlow Tool Broker 返回的确认中断身份无效");
+    if (requiresInterruptId && !interruptId) {
+        throw new Error("PixelFlow Tool Broker 返回的人工中断身份无效");
     }
     return {
         status: payload.status,
@@ -185,5 +186,8 @@ function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isSafeBrokerUrl(value) {
-    return value.startsWith("https://") || /^http:\/\/127\.0\.0\.1:\d+$/u.test(value);
+    // Compose 内网只允许固定 Gateway 服务名；与 SidecarSettings 的启动期白名单保持一致。
+    return value.startsWith("https://")
+        || /^http:\/\/127\.0\.0\.1:\d+$/u.test(value)
+        || /^http:\/\/gateway:\d+$/u.test(value);
 }
