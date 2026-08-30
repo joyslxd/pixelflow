@@ -1051,7 +1051,9 @@ async def confirm_harness_interrupt(
             context_budget_digest=_harness_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
             run_limits_digest=limits.digest, limit_profile=limits.profile, max_model_steps=limits.max_model_steps,
             max_business_tools=limits.max_business_tools, max_billable_batch_starts=limits.max_billable_batch_starts,
-            deadline_seconds=limits.deadline_seconds, max_output_tokens=192, **context,
+            deadline_seconds=limits.deadline_seconds,
+            max_output_tokens=32_768,
+            **context,
             transient_credential_grant_id=grant_id,
         ))
         confirmed = await repository.bind_interrupt_resume_run(
@@ -1288,7 +1290,7 @@ async def _start_harness_interrupt_resume(
             max_business_tools=limits.max_business_tools,
             max_billable_batch_starts=limits.max_billable_batch_starts,
             deadline_seconds=limits.deadline_seconds,
-            max_output_tokens=192,
+            max_output_tokens=32_768,
             **context,
             transient_credential_grant_id=grant_id,
         ))

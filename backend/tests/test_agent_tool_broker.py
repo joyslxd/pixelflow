@@ -15,6 +15,7 @@ import jwt
 import pytest
 import uvicorn
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.auth_middleware import AuthMiddleware
@@ -22,7 +23,7 @@ from app.gateway.routers import internal_agent_tools
 from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
 from pixelflow.agent_tools.contracts import ToolCallRequest
 from pixelflow.agent_tools.manifest import manifest
-from pixelflow.agent_tools.repository import RunBinding
+from pixelflow.agent_tools.repository import RunBinding, ensure_sql_agent_tool_schema
 from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
 from pixelflow.agent_tools.video.delivery import ComposeOrExportVideoTool
 from pixelflow.agent_tools.video.registry import VideoToolRegistry
@@ -183,7 +184,19 @@ async def test_confirmation_tool_is_ledgered_and_never_executes_provider_before_
             binding=binding,
             client_response_id="b8bd2c37-4c1a-4e0d-8299-8dc091cc6b43",
             expected_workspace_revision=1,
+            response_payload={"action": "confirm"},
         )
+        reloaded_interrupt = await repository.get_interrupt(interrupt_id)
+        assert reloaded_interrupt is not None
+        assert reloaded_interrupt.response_payload == {"action": "confirm"}
+        replayed_confirmation = await repository.respond_interrupt(
+            interrupt_id=interrupt_id,
+            binding=binding,
+            client_response_id="b8bd2c37-4c1a-4e0d-8299-8dc091cc6b43",
+            expected_workspace_revision=1,
+            response_payload={"action": "confirm"},
+        )
+        assert replayed_confirmation == confirmed
         resumed_binding = replace(
             binding,
             run_id="hrun_m5_confirmation_resume",
@@ -218,6 +231,52 @@ async def test_confirmation_tool_is_ledgered_and_never_executes_provider_before_
     }
     assert resumed.status == "completed"
     assert resumed.status != "awaiting_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_schema_migrates_existing_sqlite_rows_without_losing_the_owner_index(tmp_path) -> None:
+    """旧 SQLite 中断表升级后仍可保存通用响应载荷，避免确认端点在发布后 500。"""
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-tools-interrupt-migration.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "CREATE TABLE pixelflow_agent_harness_interrupts ("
+                    "interrupt_id VARCHAR(64) PRIMARY KEY, tool_call_key VARCHAR(71) NOT NULL UNIQUE, "
+                    "run_id VARCHAR(64) NOT NULL, user_id VARCHAR(64) NOT NULL, "
+                    "conversation_id VARCHAR(64) NOT NULL, workspace_id VARCHAR(64) NOT NULL, "
+                    "workspace_revision INTEGER NOT NULL, kind VARCHAR(32) NOT NULL, "
+                    "status VARCHAR(16) NOT NULL, response_id VARCHAR(64), resumed_run_id VARCHAR(64), "
+                    "payload_json JSON NOT NULL, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, "
+                    "CONSTRAINT ck_pf_harness_interrupt_kind "
+                    "CHECK (kind IN ('awaiting_confirmation', 'authorization_required'))"
+                    ")"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE INDEX ix_pf_harness_interrupt_owner_conversation "
+                    "ON pixelflow_agent_harness_interrupts (user_id, conversation_id, status)"
+                )
+            )
+
+        await ensure_sql_agent_tool_schema(engine)
+
+        async with engine.connect() as connection:
+            columns = {
+                row[1]
+                for row in (await connection.execute(text("PRAGMA table_info(pixelflow_agent_harness_interrupts)"))).all()
+            }
+            indexes = {
+                row[1]
+                for row in (await connection.execute(text("PRAGMA index_list(pixelflow_agent_harness_interrupts)"))).all()
+            }
+    finally:
+        await engine.dispose()
+
+    assert "response_payload_json" in columns
+    assert "ix_pf_harness_interrupt_owner_conversation" in indexes
 
 
 @pytest.mark.asyncio

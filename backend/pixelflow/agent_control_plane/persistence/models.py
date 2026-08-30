@@ -679,13 +679,15 @@ class PixelFlowAgentHarnessInterruptRow(Base):
     response_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     resumed_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # 用户提交的表单/确认摘要；不存授权凭据或 Provider 原始数据。
+    response_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = (
         CheckConstraint("workspace_revision >= 1", name="ck_pf_harness_interrupt_revision"),
         CheckConstraint(
-            "kind IN ('awaiting_confirmation', 'authorization_required')",
+            "kind IN ('awaiting_confirmation', 'authorization_required', 'form')",
             name="ck_pf_harness_interrupt_kind",
         ),
         CheckConstraint("status IN ('open', 'responded', 'cancelled')", name="ck_pf_harness_interrupt_status"),

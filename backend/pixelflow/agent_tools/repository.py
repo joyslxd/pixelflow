@@ -62,6 +62,7 @@ class HarnessInterruptRecord:
     payload: dict[str, Any]
     response_id: str | None
     resumed_run_id: str | None
+    response_payload: dict[str, Any]
 
 
 class ToolCallClaimState(StrEnum):
@@ -144,7 +145,7 @@ class SQLAgentToolRepository:
     ) -> HarnessInterruptRecord:
         """按 Tool Call 身份创建或回读中断；重复模型请求不得生成第二个确认按钮。"""
 
-        if kind not in {"awaiting_confirmation", "authorization_required"}:
+        if kind not in {"awaiting_confirmation", "authorization_required", "form"}:
             raise ValueError("Harness Interrupt 类型不受支持")
         interrupt_id = "hint_" + hashlib.sha256(
             f"v1:harness-interrupt:{tool_call_key}".encode(),
@@ -183,6 +184,13 @@ class SQLAgentToolRepository:
             binding = await session.get(PixelFlowAgentHarnessRunBindingRow, interrupt.run_id)
             return None if binding is None else self._binding_from_row(binding)
 
+    async def get_interrupt(self, interrupt_id: str) -> HarnessInterruptRecord | None:
+        """回读公开中断的权威身份；浏览器提交时不得信任自身携带的 kind。"""
+
+        async with self._session_factory() as session:
+            row = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+            return None if row is None else self._interrupt_from_row(row)
+
     async def is_tool_confirmation_granted(self, *, run_id: str, tool_name: str) -> bool:
         """只允许指定 confirmation_resume Run 执行其已确认的同名 Tool。"""
 
@@ -193,7 +201,20 @@ class SQLAgentToolRepository:
         )
         async with self._session_factory() as session:
             rows = (await session.scalars(statement)).all()
-        return any(row.payload_json.get("tool_name") == tool_name for row in rows)
+        if any(row.payload_json.get("tool_name") == tool_name for row in rows):
+            return True
+        authorization_statement = select(PixelFlowAgentHarnessInterruptRow).where(
+            PixelFlowAgentHarnessInterruptRow.resumed_run_id == run_id,
+            PixelFlowAgentHarnessInterruptRow.status == "responded",
+            PixelFlowAgentHarnessInterruptRow.kind == "authorization_required",
+        )
+        async with self._session_factory() as session:
+            authorization_rows = (await session.scalars(authorization_statement)).all()
+        return any(
+            row.payload_json.get("tool_name") == tool_name
+            and row.payload_json.get("confirmation_granted") is True
+            for row in authorization_rows
+        )
 
     async def respond_interrupt(
         self,
@@ -202,6 +223,7 @@ class SQLAgentToolRepository:
         binding: RunBinding,
         client_response_id: str,
         expected_workspace_revision: int,
+        response_payload: dict[str, Any] | None = None,
     ) -> HarnessInterruptRecord:
         """以客户端响应 ID 幂等确认中断，revision 漂移必须在创建恢复 Run 前失败关闭。"""
 
@@ -212,14 +234,51 @@ class SQLAgentToolRepository:
                     raise LookupError("Harness 中断不存在或不属于当前会话")
                 if row.workspace_id != binding.workspace_id or row.run_id != binding.run_id:
                     raise AgentToolBindingConflictError("Harness 中断绑定发生漂移")
+                normalized_payload = {} if response_payload is None else dict(response_payload)
                 if row.response_id is not None:
                     if row.response_id != client_response_id:
                         raise AgentToolBindingConflictError("Harness 中断已由其他响应处理")
+                    if dict(row.response_payload_json or {}) != normalized_payload:
+                        raise AgentToolBindingConflictError("同一 Harness 中断响应内容不一致")
                     return self._interrupt_from_row(row)
                 if row.status != "open" or row.workspace_revision != expected_workspace_revision:
                     raise AgentToolBindingConflictError("Harness 中断已关闭或工作区版本不一致")
                 row.status = "responded"
                 row.response_id = client_response_id
+                row.response_payload_json = normalized_payload
+                return self._interrupt_from_row(row)
+
+    async def cancel_interrupt(
+        self,
+        *,
+        interrupt_id: str,
+        binding: RunBinding,
+        client_response_id: str,
+        expected_workspace_revision: int,
+    ) -> HarnessInterruptRecord:
+        """以同一响应身份幂等关闭表单，关闭不是仅隐藏浏览器卡片。"""
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(PixelFlowAgentHarnessInterruptRow, interrupt_id)
+                if row is None or row.kind != "form":
+                    raise LookupError("Harness 表单中断不存在")
+                if (
+                    row.user_id != binding.user_id
+                    or row.conversation_id != binding.conversation_id
+                    or row.workspace_id != binding.workspace_id
+                    or row.run_id != binding.run_id
+                ):
+                    raise AgentToolBindingConflictError("Harness 表单中断绑定发生漂移")
+                if row.status == "cancelled":
+                    if row.response_id != client_response_id:
+                        raise AgentToolBindingConflictError("Harness 表单已由其他响应处理")
+                    return self._interrupt_from_row(row)
+                if row.status != "open" or row.workspace_revision != expected_workspace_revision:
+                    raise AgentToolBindingConflictError("Harness 表单已关闭或工作区版本不一致")
+                row.status = "cancelled"
+                row.response_id = client_response_id
+                row.response_payload_json = {"action": "form_cancelled"}
                 return self._interrupt_from_row(row)
 
     async def bind_interrupt_resume_run(
@@ -433,6 +492,7 @@ class SQLAgentToolRepository:
             payload=dict(row.payload_json),
             response_id=row.response_id,
             resumed_run_id=row.resumed_run_id,
+            response_payload=dict(row.response_payload_json or {}),
         )
 
 
@@ -452,6 +512,7 @@ async def ensure_sql_agent_tool_schema(engine: object) -> None:
             ),
         )
         await connection.run_sync(_ensure_tool_call_execution_state_column)
+        await connection.run_sync(_ensure_harness_interrupt_schema)
 
 
 def _ensure_tool_call_execution_state_column(sync_connection: object) -> None:
@@ -468,3 +529,77 @@ def _ensure_tool_call_execution_state_column(sync_connection: object) -> None:
                 "ADD COLUMN execution_state VARCHAR(16) NOT NULL DEFAULT 'completed'",
             ),
         )
+
+
+def _ensure_harness_interrupt_schema(sync_connection: object) -> None:
+    """为 M5 表单响应补齐列与 kind 约束，兼容已运行的 SQLite Gateway。"""
+
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(sync_connection)
+    if "pixelflow_agent_harness_interrupts" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"] for column in inspector.get_columns("pixelflow_agent_harness_interrupts")
+    }
+    if "response_payload_json" not in columns:
+        sync_connection.execute(
+            text(
+                "ALTER TABLE pixelflow_agent_harness_interrupts "
+                "ADD COLUMN response_payload_json JSON NOT NULL DEFAULT '{}'",
+            ),
+        )
+    dialect = sync_connection.dialect.name
+    if dialect == "sqlite":
+        table_sql = sync_connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pixelflow_agent_harness_interrupts'"),
+        ).scalar() or ""
+        if "'form'" not in table_sql:
+            _rebuild_sqlite_harness_interrupt_table(sync_connection)
+    elif dialect in {"mysql", "mariadb"}:
+        try:
+            sync_connection.execute(
+                text("ALTER TABLE pixelflow_agent_harness_interrupts DROP CHECK ck_pf_harness_interrupt_kind"),
+            )
+        except Exception:  # noqa: BLE001 - 旧 MySQL 版本可能不支持命名 CHECK。
+            pass
+        try:
+            sync_connection.execute(
+                text(
+                    "ALTER TABLE pixelflow_agent_harness_interrupts "
+                    "ADD CONSTRAINT ck_pf_harness_interrupt_kind "
+                    "CHECK (kind IN ('awaiting_confirmation', 'authorization_required', 'form'))",
+                ),
+            )
+        except Exception:  # noqa: BLE001 - 已升级约束时保持幂等。
+            pass
+
+
+def _rebuild_sqlite_harness_interrupt_table(sync_connection: object) -> None:
+    """SQLite 不支持原地替换 CHECK；保留全部既有记录后重建最小表。"""
+
+    from sqlalchemy import inspect, text
+
+    legacy = "pixelflow_agent_harness_interrupts_m5_legacy"
+    inspector = inspect(sync_connection)
+    for index in inspector.get_indexes("pixelflow_agent_harness_interrupts"):
+        name = index.get("name")
+        # 唯一约束对应 SQLite 自动索引，随旧表删除；这里只删除模型可重建的命名查询索引。
+        if isinstance(name, str) and name.startswith("ix_pf_harness_interrupt_"):
+            sync_connection.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+    sync_connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
+    sync_connection.execute(text(f"ALTER TABLE pixelflow_agent_harness_interrupts RENAME TO {legacy}"))
+    PixelFlowAgentHarnessInterruptRow.__table__.create(sync_connection)
+    sync_connection.execute(
+        text(
+            "INSERT INTO pixelflow_agent_harness_interrupts "
+            "(interrupt_id, tool_call_key, run_id, user_id, conversation_id, workspace_id, "
+            "workspace_revision, kind, status, response_id, resumed_run_id, payload_json, "
+            "response_payload_json, created_at, updated_at) "
+            "SELECT interrupt_id, tool_call_key, run_id, user_id, conversation_id, workspace_id, "
+            "workspace_revision, kind, status, response_id, resumed_run_id, payload_json, "
+            "response_payload_json, created_at, updated_at "
+            f"FROM {legacy}",
+        ),
+    )
+    sync_connection.execute(text(f"DROP TABLE {legacy}"))
