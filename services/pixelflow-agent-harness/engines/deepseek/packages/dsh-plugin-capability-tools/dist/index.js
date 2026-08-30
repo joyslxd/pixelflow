@@ -149,13 +149,16 @@ function base64Url(value) {
 }
 /** 严格过滤 Broker 结果，绝不把 Provider raw 或未知字段带回 Harness。 */
 function canonicalObservation(payload) {
-    if (!isRecord(payload) || payload.protocol_version !== "v1" || !isSuspensionStatus(payload.status)
+    if (!isRecord(payload) || payload.protocol_version !== "v1" || !isBrokerResponseStatus(payload.status)
         || typeof payload.public_summary !== "string" || payload.public_summary.length === 0 || payload.public_summary.length > 512
         || !isRecord(payload.model_observation)) {
         throw new Error("PixelFlow Tool Broker 返回了无效 Observation");
     }
-    if (payload.status === "completed")
+    // rejected/failed 是 Broker 的受控业务结果，不是协议错误。它们不挂起当前
+    // Run，模型可依据安全摘要重新观察 Workspace 或向用户说明下一步。
+    if (payload.status === "completed" || payload.status === "rejected" || payload.status === "failed") {
         return { status: "completed", public_summary: payload.public_summary, model_observation: payload.model_observation };
+    }
     if (!isRecord(payload.suspension) || payload.suspension.kind !== payload.status) {
         throw new Error("PixelFlow Tool Broker 返回了无效挂起合同");
     }
@@ -174,8 +177,9 @@ function canonicalObservation(payload) {
         suspension: { kind: payload.status, ...(interruptId ? { interrupt_id: interruptId } : {}) },
     };
 }
-function isSuspensionStatus(value) {
-    return value === "completed" || value === "pending_operation" || value === "awaiting_confirmation" || value === "authorization_required";
+function isBrokerResponseStatus(value) {
+    return value === "completed" || value === "rejected" || value === "failed"
+        || value === "pending_operation" || value === "awaiting_confirmation" || value === "authorization_required";
 }
 function parseNonNegativeInteger(value) {
     if (!/^\d+$/u.test(value))

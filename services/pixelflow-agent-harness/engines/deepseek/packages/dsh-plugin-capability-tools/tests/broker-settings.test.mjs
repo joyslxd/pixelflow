@@ -45,3 +45,13 @@ apply({
 const result = await registered[0].execute({}, { callId: "call-1" });
 assert.equal(requestedUrl, "http://gateway:8001/agent/internal/agent-tools/calls");
 assert.equal(result.status, "completed");
+
+globalThis.fetch = async () => new Response(JSON.stringify({
+  protocol_version: "v1",
+  status: "failed",
+  public_summary: "该 Tool 调用未完成，请基于当前工作区继续",
+  model_observation: { code: "tool_call_failed" },
+}), { status: 200, headers: { "Content-Type": "application/json" } });
+const failedResult = await registered[0].execute({}, { callId: "call-2" });
+assert.equal(failedResult.status, "completed");
+assert.equal(failedResult.model_observation.code, "tool_call_failed");

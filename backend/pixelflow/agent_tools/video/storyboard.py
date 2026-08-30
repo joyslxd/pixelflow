@@ -121,6 +121,11 @@ class PrepareScenePackagesTool:
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.REPLAY,
         workspace_mutations=(
+            "workspace_schema_version",
+            "creative_brief",
+            "narrative_plan",
+            "asset_registry",
+            "prompt_packages",
             "script",
             "scenes",
             "scene_packages",

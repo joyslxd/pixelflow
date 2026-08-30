@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext
+from pixelflow.agent_tools.video.registry import VideoToolRegistry
 from pixelflow.agent_tools.video.storyboard import PrepareScenePackagesTool
 from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.services.tool_executor import VideoToolExecutor
 from pixelflow.video.workspace import MemoryVideoAgentRepository
 from pixelflow.video.workspace.payload import (
     WORKSPACE_SCHEMA_VERSION,
@@ -71,6 +73,43 @@ async def test_prepare_tool_writes_four_layers_and_legacy_projections_together()
     assert package["segment_id"] == "A"
     assert package["generation_mode"] == "reference"
     assert result.workspace_patch["scenes"][0]["scene_id"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_executor_accepts_all_declared_workspace_roots() -> None:
+    """经 Registry/Executor 写入时，V2 四层根字段不能被白名单误拒绝。"""
+
+    repository = MemoryVideoAgentRepository()
+    workspace = await repository.create_workspace(
+        "user",
+        VideoWorkspace(
+            workspace_id="workspace-executor",
+            conversation_id="conversation-executor",
+            revision=1,
+        ),
+    )
+    executor = VideoToolExecutor(
+        repository=repository,
+        registry=VideoToolRegistry((PrepareScenePackagesTool(),)),
+    )
+
+    result = await executor.execute_tool_call(
+        context=VideoToolContext(user_id="user", workspace=workspace),
+        tool_name="prepare_scene_packages",
+        arguments={
+            "script": "家庭保鲜产品片",
+            "creative_brief": {"brand": "美的", "aspect_ratio": "9:16"},
+            "asset_registry": [{"asset_id": "product-image-1", "kind": "image", "role": "产品参考"}],
+            "scenes": [{"scene_id": "A", "prompt": "冰箱产品展示", "duration_sec": 8}],
+        },
+    )
+    updated = await repository.get_workspace("user", workspace.workspace_id)
+
+    assert result.public_summary.startswith("已准备 1 个分镜")
+    assert updated is not None
+    assert updated.revision == 2
+    assert updated.payload["creative_brief"]["brand"] == "美的"
+    assert updated.payload["prompt_packages"][0]["segment_id"] == "A"
 
 
 @pytest.mark.asyncio
