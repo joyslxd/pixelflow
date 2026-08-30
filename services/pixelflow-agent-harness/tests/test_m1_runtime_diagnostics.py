@@ -99,6 +99,21 @@ class _TimeoutEngine:
         )
 
 
+class _OutputLimitWithoutResponseEngine(_TimeoutEngine):
+    """构造只完成 reasoning 且达到输出上限的安全可恢复失败。"""
+
+    async def execute(self, *_args, **_kwargs):
+        await asyncio.sleep(0)
+        raise HarnessExecutionError(
+            HarnessExecutionDiagnostic(
+                exception_type="HarnessProjectionError",
+                failure_phase="result_projection",
+                failure_reason="max_output_tokens_without_public_response",
+                timeout_phase=None,
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_runtime_timeout_only_projects_safe_diagnostic_fields(tmp_path: Path) -> None:
     """SSE 失败事件必须保留类型与阶段，同时不包含底层异常文本。"""
@@ -139,6 +154,33 @@ def test_non_timeout_runtime_error_also_projects_failure_phase() -> None:
     assert diagnostic.failure_phase == "model_execution"
     assert diagnostic.failure_reason is None
     assert diagnostic.timeout_phase is None
+
+
+@pytest.mark.asyncio
+async def test_output_limit_without_public_response_is_recoverable(tmp_path: Path) -> None:
+    """模型只输出 reasoning 时保留恢复入口，而不是向浏览器暴露不可恢复失败。"""
+
+    service = RunService(
+        SqliteRunEventStore(tmp_path / "runs.sqlite3"),
+        _OutputLimitWithoutResponseEngine(tmp_path / "skills"),
+    )
+    try:
+        created = await service.create_run(_request())
+        await service.activate_run(created.run_id)
+        for _ in range(20):
+            state = await service.get_run(created.run_id)
+            if state is not None and state.status.value == "failed":
+                break
+            await asyncio.sleep(0)
+        state = await service.get_run(created.run_id)
+        events = await service.events_after(created.run_id, 0)
+
+        assert state is not None
+        assert state.termination_reason.value == "max_output_tokens"
+        assert events[-1].type == "run.failed"
+        assert events[-1].payload == {"code": "harness_run_recovery_required"}
+    finally:
+        await service.aclose()
 
 
 def test_result_projection_does_not_depend_on_harness_private_sequence() -> None:
@@ -220,6 +262,17 @@ def test_result_projection_failure_uses_fixed_reason_code() -> None:
 
     diagnostic = _execution_diagnostic(captured.value, "result_projection")
     assert diagnostic.failure_reason == "final_response_missing"
+
+
+def test_output_limit_without_public_response_uses_recovery_reason() -> None:
+    """仅输出上限且无公开文本可走 Gateway 的幂等恢复合同。"""
+
+    with pytest.raises(HarnessProjectionError) as captured:
+        _project_harness_result(
+            SimpleNamespace(events=[], final_response="", finish_reason="max-tokens")
+        )
+
+    assert captured.value.reason_code == "max_output_tokens_without_public_response"
 
 
 def test_result_projection_uses_text_delta_only_when_final_message_missing() -> None:

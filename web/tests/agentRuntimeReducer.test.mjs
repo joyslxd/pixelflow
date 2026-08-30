@@ -11,6 +11,8 @@ const {
   applyPublicEvent,
   hydrateSnapshot,
   initialAgentWorkspaceState,
+  isRecoveryRequired,
+  isTerminalSnapshot,
   normalizeEventType,
   projectVisible,
   shouldReloadSnapshot,
@@ -105,4 +107,69 @@ test("确认中断可由公开事件恢复，并在关闭事件后移除", () =>
   };
   [state] = applyPublicEvent(state, closed);
   assert.deepEqual(state.interrupts, []);
+});
+
+test("Sidecar 确认挂起可从 run.state_changed 恢复中断", () => {
+  let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0 });
+  const suspended = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "run.state_changed",
+    payload: { status: "suspended_confirmation", interrupt_id: "hint_run" },
+  };
+  [state] = applyPublicEvent(state, suspended);
+  assert.equal(state.interrupts[0]?.interrupt_id, "hint_run");
+  assert.equal(state.interrupts[0]?.kind, "awaiting_confirmation");
+  assert.equal(isTerminalSnapshot(state.snapshot), true);
+});
+
+test("输出上限导致无公开回复时标记为可继续恢复", () => {
+  const recoverySnapshot = {
+    ...fixture.snapshot,
+    status: "failed",
+    events: [{
+      ...fixture.snapshot.events[0],
+      sequence: 1,
+      type: "run.state_changed",
+      payload: { status: "failed", code: "harness_run_recovery_required" },
+    }],
+    last_sequence: 1,
+  };
+  assert.equal(isRecoveryRequired(recoverySnapshot), true);
+  assert.equal(isRecoveryRequired({ ...recoverySnapshot, status: "completed" }), false);
+});
+
+test("外部 Operation 公开事件按 job_id 幂等更新进度", () => {
+  let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0 });
+  const queued = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "agent.operation.updated",
+    payload: { job_id: "operation-1", status: "polling", completed: 1, total: 2 },
+  };
+  [state] = applyPublicEvent(state, queued);
+  const completed = { ...queued, sequence: 2, payload: { job_id: "operation-1", status: "succeeded", completed: 2, total: 2 } };
+  [state] = applyPublicEvent(state, completed);
+  assert.deepEqual(state.operations, [{ operation_id: "operation-1", status: "completed", completed: 2, total: 2 }]);
+});
+
+test("通用中断事件保留表单和授权的稳定身份", () => {
+  let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0 });
+  const form = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "interrupt.opened",
+    payload: { interrupt_id: "hint_form", kind: "form", title: "补充需求", public_summary: "请补充交付要求。" },
+  };
+  [state] = applyPublicEvent(state, form);
+  const authorization = {
+    ...form,
+    sequence: 2,
+    payload: { interrupt_id: "hint_authorization", kind: "authorization_required", public_summary: "需要重新授权。" },
+  };
+  [state] = applyPublicEvent(state, authorization);
+  assert.deepEqual(state.interrupts.map((item) => [item.interrupt_id, item.kind]), [
+    ["hint_form", "form"],
+    ["hint_authorization", "authorization_required"],
+  ]);
 });

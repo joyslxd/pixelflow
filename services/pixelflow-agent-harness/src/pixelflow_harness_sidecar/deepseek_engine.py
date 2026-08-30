@@ -320,6 +320,9 @@ def _project_harness_result(
             notification_events_emitted=notification_events_emitted,
         )
     response = _public_text_from_result(result)
+    finish_reason = getattr(result, "finish_reason", None)
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise HarnessProjectionError("finish_reason_invalid")
     if not response:
         response = _public_text_from_chunks(events).strip()
     if not response:
@@ -335,10 +338,11 @@ def _project_harness_result(
             "harness_final_response_missing_chunk_types=%s",
             _safe_assistant_chunk_types(events),
         )
+        # Runtime 在达到输出上限前可能只产出内部 reasoning。此时不能伪造最终
+        # 回复，但 Gateway 可在确认没有业务 Tool 副作用后创建冻结恢复 Run。
+        if finish_reason in {"max-tokens", "max_tokens"}:
+            raise HarnessProjectionError("max_output_tokens_without_public_response")
         raise HarnessProjectionError("final_response_missing")
-    finish_reason = getattr(result, "finish_reason", None)
-    if finish_reason is not None and not isinstance(finish_reason, str):
-        raise HarnessProjectionError("finish_reason_invalid")
     # Runtime 直接透传 ``turn/end.reason.kind``；不同 Provider 对正常文本收束分别
     # 使用 completed、complete、stop 或 end_turn。统一为 PixelFlow 的 completed，
     # 未知结束值仍由 RunService fail-closed，不能被静默当作成功。

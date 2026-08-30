@@ -1,11 +1,12 @@
 /** 新 Runtime 工作台组合根：消息、公开进度与只读 Workspace 均从 Snapshot 投影。 */
 
 import { useMemo } from "react";
+import { useParams } from "react-router-dom";
 
-import { VideoWorkspaceProjector } from "@/features/video/VideoWorkspaceProjector";
 import { useAgentConversation } from "@/features/agent-runtime/useAgentConversation";
-import { projectVisible } from "@/features/agent-runtime/state";
-import type { InterruptResponseV1 } from "@/api/contracts";
+import { isRecoveryRequired, projectVisible } from "@/features/agent-runtime/state";
+import { WorkspaceV2Panel } from "@/features/agent-runtime/WorkspaceV2Panel";
+import { createClientUuid } from "@/lib/uuid";
 import { ConversationList } from "@/features/conversations/ConversationList";
 import { ConversationMessages } from "@/features/conversations/ConversationMessages";
 
@@ -13,6 +14,7 @@ import { AgentTaskBoard } from "./AgentTaskBoard";
 import { Composer } from "./Composer";
 import { ConnectionNotice } from "./ConnectionNotice";
 import { InterruptHost } from "./InterruptHost";
+import { OperationProgress } from "./OperationProgress";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 type AgentWorkspaceProps = {
@@ -31,6 +33,7 @@ function statusLabel(status: string | undefined): string {
 
 /** 只消费 Gateway 公开 Snapshot/SSE 的新工作台，不保留旧任务轮询或业务状态副本。 */
 export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
+  const { conversationId: routeConversationId } = useParams();
   const {
     conversations,
     detail,
@@ -41,35 +44,46 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     newConversation,
     openConversation,
     submitTurn,
-    cancelQuotaInterrupt,
     confirmInterrupt,
+    submitFormInterrupt,
+    resumeAuthorizationInterrupt,
     confirmationSubmittingId,
     refreshActiveRun,
     cancelActiveRun,
-    updatePlanPublicGoal,
-    updateScript,
-  } = useAgentConversation(conversationId);
+    recoverActiveRun,
+    recoveringRunId,
+    submitWorkspaceCommand,
+  } = useAgentConversation(conversationId ?? routeConversationId);
   const snapshot = runtime.snapshot;
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
+  const recoveryRequired = isRecoveryRequired(snapshot);
   const progressText = visible.progressLines.join("\n") || "等待公开进度";
-
-  const cancelQuotaInterruptedPlan = async () => {
-    /** 仅为已投影的 M06 额度中断创建 cancel_workflow 响应。 */
-
+  const quotaInterrupt = (() => {
     const workspace = runtime.videoWorkspace ?? snapshot?.workspace;
     const interruptId = workspace?.summary.quota_interrupt_id;
-    if (!workspace || typeof interruptId !== "string" || !interruptId) return;
-    const response: InterruptResponseV1 = {
-      client_response_id: crypto.randomUUID(),
-      value: {
-        content: "取消当前额度中断任务。",
-        explicit_action: {
-          action: "cancel_workflow",
-          patch: {},
-        },
-      },
+    if (!workspace || typeof interruptId !== "string" || !interruptId) return null;
+    return {
+      interrupt_id: interruptId,
+      kind: "quota" as const,
+      title: "额度不足",
+      description: typeof workspace.summary.quota_interrupt_reason_code === "string"
+        ? workspace.summary.quota_interrupt_reason_code
+        : "当前任务已暂停。",
+      status: "open" as const,
     };
-    await cancelQuotaInterrupt(workspace.workspace_id, interruptId, response);
+  })();
+  const interrupts = quotaInterrupt === null
+    ? runtime.interrupts
+    : [...runtime.interrupts.filter((item) => item.interrupt_id !== quotaInterrupt.interrupt_id), quotaInterrupt];
+  const updateWorkspace = async (patch: Record<string, unknown>) => {
+    const workspace = runtime.videoWorkspace;
+    if (workspace === null) throw new Error("harness_workspace_not_found");
+    await submitWorkspaceCommand({
+      client_command_id: createClientUuid(),
+      workspace_id: workspace.workspace_id,
+      expected_workspace_revision: workspace.revision,
+      patch,
+    });
   };
 
   return (
@@ -92,17 +106,26 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
         <ConversationMessages
           messages={runtime.messages}
           responsePreview={visible.responsePreview}
+          executionSummary={visible.thinkingPreview}
           loading={loading}
         />
       )}
       composer={(
         <>
-          <AgentTaskBoard status={snapshot?.status} />
+          <AgentTaskBoard
+            status={snapshot?.status}
+            recoveryRequired={recoveryRequired}
+            recovering={recoveringRunId === snapshot?.run_id}
+            onRecover={() => void recoverActiveRun()}
+          />
           <InterruptHost
-            interrupts={runtime.interrupts}
+            interrupts={interrupts}
             confirmationSubmittingId={confirmationSubmittingId}
             onConfirm={confirmInterrupt}
+            onResumeAuthorization={resumeAuthorizationInterrupt}
+            onSubmitForm={submitFormInterrupt}
           />
+          <OperationProgress operations={runtime.operations} />
           <Composer
             canSend={canSend && detail !== null}
             sending={runtime.inputStatus === "sending"}
@@ -124,7 +147,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
               刷新
             </button>
           </div>
-          <p className="mt-1">状态：{statusLabel(snapshot?.status)}</p>
+          <p className="mt-1">状态：{recoveryRequired ? "等待继续" : statusLabel(snapshot?.status)}</p>
           {snapshot && snapshot.status === "running" ? (
             <button
               className="mt-3 rounded border border-red-200 px-2 py-1 text-xs text-red-700"
@@ -135,20 +158,13 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           ) : null}
           <h2 className="mt-6 text-sm font-medium">公开进度</h2>
           <pre className="mt-2 whitespace-pre-wrap text-xs text-ink-soft">{progressText}</pre>
-          {visible.thinkingPreview ? (
-            <>
-              <h2 className="mt-6 text-sm font-medium">过程摘要</h2>
-              <p className="mt-2 text-xs text-ink-soft" aria-live="polite">{visible.thinkingPreview}</p>
-            </>
-          ) : null}
           <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
           {runtime.videoWorkspace ? (
-            <VideoWorkspaceProjector
+            <WorkspaceV2Panel
               summary={runtime.videoWorkspace.summary}
               revision={runtime.videoWorkspace.revision}
-              onCancelQuotaInterrupt={() => void cancelQuotaInterruptedPlan()}
-              onUpdateScript={updateScript}
-              onUpdatePlanPublicGoal={updatePlanPublicGoal}
+              operations={runtime.operations}
+              onApplyPatch={updateWorkspace}
             />
           ) : (
             <p className="mt-2 text-xs text-ink-soft">

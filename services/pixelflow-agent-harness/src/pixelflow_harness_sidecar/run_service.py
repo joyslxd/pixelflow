@@ -235,11 +235,29 @@ class RunService:
                 RunStatus.COMPLETED,
                 RunStatus.FAILED,
             }:
+                recovery_required = (
+                    diagnostic is not None
+                    and diagnostic.failure_phase == "result_projection"
+                    and diagnostic.failure_reason == "max_output_tokens_without_public_response"
+                )
                 await self._store.transition(
                     run_id,
                     status=RunStatus.FAILED,
-                    termination_reason=TerminationReason.ENGINE_ERROR,
+                    termination_reason=(
+                        TerminationReason.MAX_OUTPUT_TOKENS
+                        if recovery_required
+                        else TerminationReason.ENGINE_ERROR
+                    ),
                 )
+                if recovery_required:
+                    # 浏览器只能看到固定恢复码。Gateway Recovery Service 会先检查
+                    # 旧 Run 是否已有 Tool 调用，避免在副作用边界不明时自动续跑。
+                    await self._store.append_event(
+                        run_id,
+                        "run.failed",
+                        {"code": "harness_run_recovery_required"},
+                    )
+                    return
                 await self._store.append_event(
                     run_id,
                     "run.failed",
@@ -276,9 +294,9 @@ class RunService:
             raise RuntimeError("未知 Tool 挂起状态") from error
         await self._store.transition(run_id, status=status, termination_reason=reason)
         payload: dict[str, str] = {"status": status.value}
-        if kind == "awaiting_confirmation":
+        if kind in {"awaiting_confirmation", "authorization_required"}:
             if interrupt_id is None:
-                raise RuntimeError("确认挂起缺少中断身份")
+                raise RuntimeError("人工挂起缺少中断身份")
             payload["interrupt_id"] = interrupt_id
         await self._store.append_event(run_id, "run.suspended", payload)
 

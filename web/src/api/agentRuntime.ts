@@ -2,7 +2,6 @@
 
 import type {
   AgentSnapshotV1,
-  InterruptResponseV1,
   PublicAgentEventV1,
   TurnStartV1,
   WorkspaceCommandV1,
@@ -22,22 +21,20 @@ export type HarnessRunCancellationV1 = {
   termination_reason: string | null;
 };
 
+export type HarnessRunRecoveryV1 = {
+  recovery_event_id: string;
+  recovery_run_id: string;
+};
+
 export type HarnessWorkspaceCommandResultV1 = {
   client_command_id: string;
   workspace: NonNullable<AgentSnapshotV1["workspace"]>;
 };
 
 export type HarnessInterruptResultV1 = {
-  client_response_id: string;
   interrupt_id: string;
-  status: "cancelled";
-  workspace: NonNullable<AgentSnapshotV1["workspace"]>;
-};
-
-export type HarnessConfirmationResultV1 = {
-  interrupt_id: string;
-  run_id: string;
-  status: "accepted";
+  run_id: string | null;
+  status: "accepted" | "cancelled";
   workspace_revision: number;
 };
 
@@ -80,6 +77,15 @@ export function cancelHarnessRun(conversationId: string, runId: string): Promise
   );
 }
 
+export function recoverHarnessRun(conversationId: string, runId: string): Promise<HarnessRunRecoveryV1> {
+  /** 仅恢复 Gateway 标记为安全可重放的 Run；恢复身份由后端唯一事件去重。 */
+
+  return agentRequest<HarnessRunRecoveryV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/harness-runs/${encodeURIComponent(runId)}/recover`,
+    { method: "POST" },
+  );
+}
+
 export function applyHarnessWorkspaceCommand(
   conversationId: string,
   body: WorkspaceCommandV1,
@@ -117,9 +123,15 @@ export function respondToHarnessInterrupt(
   conversationId: string,
   workspaceId: string,
   interruptId: string,
-  body: InterruptResponseV1,
+  body: {
+    client_response_id: string;
+    expected_workspace_revision: number;
+    action: "submit" | "confirm" | "form_cancelled";
+    content?: string;
+    fields?: Record<string, string>;
+  },
 ): Promise<HarnessInterruptResultV1> {
-  /** 当前只支持取消 M06 额度中断；继续/重试必须由新的受控 Tool 创建 Operation。 */
+  /** 统一提交表单/内容确认；重复请求必须复用 client_response_id。 */
 
   return agentRequest<HarnessInterruptResultV1>(
     `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/responses`,
@@ -131,21 +143,17 @@ export function respondToHarnessInterrupt(
   );
 }
 
-export function confirmHarnessInterrupt(
+export function resumeHarnessInterruptAuthorization(
   conversationId: string,
   workspaceId: string,
   interruptId: string,
   body: { client_response_id: string; expected_workspace_revision: number },
-): Promise<HarnessConfirmationResultV1> {
-  /** 确认只交给 Gateway 创建唯一恢复 Run；浏览器不续跑旧 Session 或启动 Provider。 */
+): Promise<HarnessInterruptResultV1> {
+  /** Authorization 仅随本次请求发往 Gateway，浏览器不把它写入中断 payload。 */
 
-  return agentRequest<HarnessConfirmationResultV1>(
-    `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/confirmations`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
+  return agentRequest<HarnessInterruptResultV1>(
+    `/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/interrupts/${encodeURIComponent(interruptId)}/authorizations`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
   );
 }
 

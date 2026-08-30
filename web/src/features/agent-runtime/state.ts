@@ -4,6 +4,7 @@ export {
   applyPublicEvent,
   foldAppliedEvent,
   initialAgentWorkspaceState,
+  isRecoveryRequired,
   isTerminalSnapshot,
   isTerminalStatus,
   mergeMessages,

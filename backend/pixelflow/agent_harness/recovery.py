@@ -102,7 +102,9 @@ class HarnessRecoveryService:
             max_business_tools=limits.max_business_tools,
             max_billable_batch_starts=limits.max_billable_batch_starts,
             deadline_seconds=limits.deadline_seconds,
-            max_output_tokens=192,
+            # 用途：恢复时仍需让 Agent 完成完整规划/Tool 调度；影响：不再因 192 token
+            # 预算再次提前结束，计费上限仍由 run_recovery_v1 限制为零。
+            max_output_tokens=32_768,
         )
         run = await bridge.create_and_bind(request)
         bound = await self._bindings.bind_recovery_run(

@@ -5,13 +5,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyHarnessWorkspaceCommand,
   cancelHarnessRun,
-  confirmHarnessInterrupt,
+  recoverHarnessRun,
+  resumeHarnessInterruptAuthorization,
   getHarnessSnapshot,
   respondToHarnessInterrupt,
   startHarnessTurn,
   updateVideoPlanPublicGoal as requestVideoPlanPublicGoal,
 } from "@/api/agentRuntime";
-import type { InterruptResponseV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
+import { createClientUuid } from "@/lib/uuid";
+import type { PublicMessageV1, TurnMaterialV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
 import {
   HARNESS_ORCHESTRATION_MODE,
   createConversation,
@@ -64,6 +66,7 @@ export function useAgentConversation(initialConversationId?: string) {
   const pendingTurnRef = useRef<{ client_input_id: string; content: string } | null>(null);
   const confirmationResponseIdsRef = useRef(new Map<string, string>());
   const [confirmationSubmittingId, setConfirmationSubmittingId] = useState<string | null>(null);
+  const [recoveringRunId, setRecoveringRunId] = useState<string | null>(null);
 
   useEffect(() => {
     runtimeRef.current = runtime;
@@ -85,16 +88,19 @@ export function useAgentConversation(initialConversationId?: string) {
     /** 读取并校验完整 Snapshot；非法 sequence 直接提示而不是局部容错。 */
 
     const snapshot = await getHarnessSnapshot(conversationId, runId);
-    setRuntime((current) => hydrateSnapshot(snapshot, {
+    const current = runtimeRef.current;
+    const next = hydrateSnapshot(snapshot, {
       videoWorkspace: snapshot.workspace ?? current.videoWorkspace,
       messages: current.messages,
       connection: "connected",
-    }));
+    });
+    runtimeRef.current = next;
+    setRuntime(next);
     return !isTerminalSnapshot(snapshot);
   }, []);
 
   const startEventStream = useCallback(async (conversationId: string, runId: string) => {
-    /** 从已 hydrate 的 sequence 订阅；仅 gap / Tool / Artifact / 终态回读 Snapshot。 */
+    /** 从已 hydrate 的 sequence 订阅；实时更新只消费 SSE，Snapshot 仅用于恢复与权威收敛。 */
 
     stopStream();
     const controller = new AbortController();
@@ -129,6 +135,7 @@ export function useAgentConversation(initialConversationId?: string) {
     confirmationResponseIdsRef.current.clear();
     setLoading(true);
     setError("");
+    runtimeRef.current = initialAgentWorkspaceState;
     setRuntime(initialAgentWorkspaceState);
     try {
       const [next, workspace] = await Promise.all([
@@ -137,8 +144,8 @@ export function useAgentConversation(initialConversationId?: string) {
       ]);
       if (generation !== requestGenerationRef.current) return;
       setDetail(next);
-      setRuntime((current) => replaceVideoWorkspace({
-        ...current,
+      const nextRuntime = replaceVideoWorkspace({
+        ...runtimeRef.current,
         conversationId,
         messages: next.messages.map((message) => ({
           message_id: message.message_id,
@@ -146,7 +153,9 @@ export function useAgentConversation(initialConversationId?: string) {
           content: message.content,
         })),
         connection: "idle",
-      }, workspace));
+      }, workspace);
+      runtimeRef.current = nextRuntime;
+      setRuntime(nextRuntime);
       const runId = latestRunId(next);
       if (runId !== null && await hydrateRun(conversationId, runId)) {
         if (generation === requestGenerationRef.current) void startEventStream(conversationId, runId);
@@ -173,7 +182,7 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [openConversation, refreshConversations]);
 
-  const submitTurn = useCallback(async (content: string) => {
+  const submitTurn = useCallback(async (content: string, materials: TurnMaterialV1[] = []) => {
     /** 提交一个冻结 Turn；网络失败必须复用同一个 client_input_id。 */
 
     if (detail === null) throw new Error("conversation_unselected");
@@ -190,27 +199,58 @@ export function useAgentConversation(initialConversationId?: string) {
     const pending = pendingTurnRef.current;
     const clientInputId = pending !== null && pending.content === trimmed
       ? pending.client_input_id
-      : crypto.randomUUID();
+      : createClientUuid();
     pendingTurnRef.current = { client_input_id: clientInputId, content: trimmed };
     const turn: TurnStartV1 = {
       client_input_id: clientInputId,
       workspace_id: workspace.workspace_id,
       expected_workspace_revision: workspace.revision,
       content: trimmed,
+      ...(materials.length > 0 ? { materials } : {}),
     };
     setError("");
-    setRuntime((current) => ({ ...current, inputStatus: "sending" }));
+    const optimisticMessage: PublicMessageV1 = { message_id: `pending:${clientInputId}`, role: "user", content: trimmed };
+    const optimisticRuntime = {
+      ...runtimeRef.current,
+      inputStatus: "sending" as const,
+      messages: [...runtimeRef.current.messages, optimisticMessage],
+    };
+    runtimeRef.current = optimisticRuntime;
+    setRuntime(optimisticRuntime);
     try {
       const started = await startHarnessTurn(detail.conversation.conversation_id, turn);
       pendingTurnRef.current = null;
-      const nextDetail = await getConversation(detail.conversation.conversation_id);
-      setDetail(nextDetail);
-      setRuntime((current) => replaceVideoWorkspace(current, {
+      const acceptedRuntime = replaceVideoWorkspace(runtimeRef.current, {
         ...workspace,
         revision: started.workspace_revision,
-      }));
-      await hydrateRun(detail.conversation.conversation_id, started.run_id);
-      void startEventStream(detail.conversation.conversation_id, started.run_id);
+      });
+      runtimeRef.current = acceptedRuntime;
+      setRuntime(acceptedRuntime);
+      void getConversation(detail.conversation.conversation_id).then((latestDetail) => {
+        setDetail(latestDetail);
+        const persistedMessages = latestDetail.messages.map((message) => ({
+          message_id: message.message_id,
+          role: message.role,
+          content: message.content,
+        }));
+        const next = {
+          ...runtimeRef.current,
+          messages: [
+            ...runtimeRef.current.messages.filter((message) => !(
+              message.message_id === `pending:${clientInputId}`
+              && persistedMessages.some((persisted) => persisted.role === "user" && persisted.content === message.content)
+            )),
+            ...persistedMessages.filter((persisted) => !runtimeRef.current.messages.some((message) => message.message_id === persisted.message_id)),
+          ],
+        };
+        runtimeRef.current = next;
+        setRuntime(next);
+      }).catch(() => undefined);
+      void (async () => {
+        if (await hydrateRun(detail.conversation.conversation_id, started.run_id)) {
+          void startEventStream(detail.conversation.conversation_id, started.run_id);
+        }
+      })();
     } catch (caught) {
       const code = caught instanceof AgentApiError ? caught.code : undefined;
       if (code === "harness_workspace_revision_conflict") {
@@ -251,6 +291,27 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [detail, refreshActiveRun, runtime.snapshot]);
 
+  const recoverActiveRun = useCallback(async () => {
+    /** 只由用户显式触发恢复；后端会以 recovery_event_id 去重并校验旧 Run 无副作用。 */
+
+    if (detail === null || runtime.snapshot === null) return;
+    const { conversation_id: conversationId } = detail.conversation;
+    const { run_id: runId } = runtime.snapshot;
+    setRecoveringRunId(runId);
+    setError("");
+    try {
+      const recovered = await recoverHarnessRun(conversationId, runId);
+      if (await hydrateRun(conversationId, recovered.recovery_run_id)) {
+        void startEventStream(conversationId, recovered.recovery_run_id);
+      }
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
+      throw caught;
+    } finally {
+      setRecoveringRunId(null);
+    }
+  }, [detail, hydrateRun, runtime.snapshot, startEventStream]);
+
   const submitWorkspaceCommand = useCallback(async (command: WorkspaceCommandV1) => {
     /** 命令成功后立即回读 Snapshot，浏览器不以返回体维护第二份工作区状态。 */
 
@@ -259,9 +320,22 @@ export function useAgentConversation(initialConversationId?: string) {
       const result = await applyHarnessWorkspaceCommand(detail.conversation.conversation_id, command);
       setRuntime((current) => replaceVideoWorkspace(current, result.workspace));
       await refreshActiveRun();
-    } catch {
-      setError("工作区修改未完成，请刷新后确认当前版本。");
-      throw new Error("workspace_command_failed");
+    } catch (caught) {
+      const apiError = caught instanceof AgentApiError ? caught : null;
+      if (apiError?.code === "harness_workspace_revision_conflict") {
+        try {
+          const latest = await getOrCreateVideoWorkspace(detail.conversation.conversation_id);
+          const next = replaceVideoWorkspace(runtimeRef.current, latest);
+          runtimeRef.current = next;
+          setRuntime(next);
+        } catch {
+          // 仍保留原始冲突语义，面板负责保留本地草稿并提示人工合并。
+        }
+        setError("Workspace 已更新到新版本，本地草稿已保留，请合并后重试。");
+      } else {
+        setError("工作区修改未完成，请刷新后确认当前版本。");
+      }
+      throw caught;
     }
   }, [detail, refreshActiveRun]);
 
@@ -271,12 +345,13 @@ export function useAgentConversation(initialConversationId?: string) {
     const workspace = runtime.videoWorkspace;
     if (workspace === null) throw new Error("harness_workspace_not_found");
     await submitWorkspaceCommand({
-      client_command_id: crypto.randomUUID(),
+      client_command_id: createClientUuid(),
       workspace_id: workspace.workspace_id,
       expected_workspace_revision: workspace.revision,
       patch: { script: { content: content.trim(), status: "已编辑" } },
     });
   }, [runtime.videoWorkspace, submitWorkspaceCommand]);
+
 
   const updatePlanPublicGoal = useCallback(async (
     planId: string,
@@ -324,45 +399,28 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [detail]);
 
-  const cancelQuotaInterrupt = useCallback(async (
-    workspaceId: string,
-    interruptId: string,
-    response: InterruptResponseV1,
-  ) => {
-    /** 额度中断取消完成后统一从 Snapshot 恢复 Workspace 与任务进度。 */
-
-    if (detail === null) throw new Error("conversation_unselected");
-    try {
-      await respondToHarnessInterrupt(
-        detail.conversation.conversation_id,
-        workspaceId,
-        interruptId,
-        response,
-      );
-      await refreshActiveRun();
-    } catch {
-      setError("额度中断取消未完成，请刷新后确认当前状态。");
-      throw new Error("interrupt_response_failed");
-    }
-  }, [detail, refreshActiveRun]);
-
   const confirmInterrupt = useCallback(async (interruptId: string) => {
     /** 同一中断重试复用 client_response_id；409 会刷新权威 revision，但不丢弃提交身份。 */
 
     const workspace = runtime.videoWorkspace;
     if (detail === null || workspace === null) throw new Error("harness_workspace_not_found");
-    const clientResponseId = confirmationResponseIdsRef.current.get(interruptId) ?? crypto.randomUUID();
+    const clientResponseId = confirmationResponseIdsRef.current.get(interruptId) ?? createClientUuid();
     confirmationResponseIdsRef.current.set(interruptId, clientResponseId);
     setConfirmationSubmittingId(interruptId);
     setError("");
     try {
-      const confirmed = await confirmHarnessInterrupt(
+      const confirmed = await respondToHarnessInterrupt(
         detail.conversation.conversation_id,
         workspace.workspace_id,
         interruptId,
-        { client_response_id: clientResponseId, expected_workspace_revision: workspace.revision },
+        {
+          client_response_id: clientResponseId,
+          expected_workspace_revision: workspace.revision,
+          action: "confirm",
+        },
       );
       confirmationResponseIdsRef.current.delete(interruptId);
+      if (confirmed.run_id === null) throw new Error("harness_interrupt_resume_missing");
       setRuntime((current) => replaceVideoWorkspace(current, {
         ...workspace,
         revision: confirmed.workspace_revision,
@@ -380,6 +438,79 @@ export function useAgentConversation(initialConversationId?: string) {
         }
       }
       setError(publicErrorMessage(apiError?.code));
+      throw caught;
+    } finally {
+      setConfirmationSubmittingId(null);
+    }
+  }, [detail, hydrateRun, runtime.videoWorkspace, startEventStream]);
+
+  const submitFormInterrupt = useCallback(async (
+    interruptId: string,
+    content: string,
+    cancelled: boolean,
+  ) => {
+    /** 表单关闭与提交共用同一幂等响应身份；关闭不会创建恢复 Run。 */
+
+    const workspace = runtime.videoWorkspace;
+    if (detail === null || workspace === null) throw new Error("harness_workspace_not_found");
+    const clientResponseId = confirmationResponseIdsRef.current.get(interruptId) ?? createClientUuid();
+    confirmationResponseIdsRef.current.set(interruptId, clientResponseId);
+    setConfirmationSubmittingId(interruptId);
+    setError("");
+    try {
+      const resumed = await respondToHarnessInterrupt(
+        detail.conversation.conversation_id,
+        workspace.workspace_id,
+        interruptId,
+        {
+          client_response_id: clientResponseId,
+          expected_workspace_revision: workspace.revision,
+          action: cancelled ? "form_cancelled" : "submit",
+          ...(cancelled ? {} : { content: content.trim() }),
+        },
+      );
+      confirmationResponseIdsRef.current.delete(interruptId);
+      if (resumed.run_id !== null) {
+        await hydrateRun(detail.conversation.conversation_id, resumed.run_id);
+        void startEventStream(detail.conversation.conversation_id, resumed.run_id);
+      } else {
+        await refreshActiveRun();
+      }
+    } catch (caught) {
+      const apiError = caught instanceof AgentApiError ? caught : null;
+      if (apiError?.status === 409) {
+        try {
+          const latest = await getOrCreateVideoWorkspace(detail.conversation.conversation_id);
+          setRuntime((current) => replaceVideoWorkspace(current, latest));
+        } catch {
+          // 保留草稿和稳定提交身份，供用户在刷新后显式重试。
+        }
+      }
+      setError(publicErrorMessage(apiError?.code));
+      throw caught;
+    } finally {
+      setConfirmationSubmittingId(null);
+    }
+  }, [detail, hydrateRun, refreshActiveRun, runtime.videoWorkspace, startEventStream]);
+
+  const resumeAuthorizationInterrupt = useCallback(async (interruptId: string) => {
+    const workspace = runtime.videoWorkspace;
+    if (detail === null || workspace === null) throw new Error("harness_workspace_not_found");
+    const clientResponseId = confirmationResponseIdsRef.current.get(interruptId) ?? createClientUuid();
+    confirmationResponseIdsRef.current.set(interruptId, clientResponseId);
+    setConfirmationSubmittingId(interruptId);
+    try {
+      const resumed = await resumeHarnessInterruptAuthorization(
+        detail.conversation.conversation_id, workspace.workspace_id, interruptId,
+        { client_response_id: clientResponseId, expected_workspace_revision: workspace.revision },
+      );
+      confirmationResponseIdsRef.current.delete(interruptId);
+      if (resumed.run_id !== null) {
+        await hydrateRun(detail.conversation.conversation_id, resumed.run_id);
+        void startEventStream(detail.conversation.conversation_id, resumed.run_id);
+      }
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
       throw caught;
     } finally {
       setConfirmationSubmittingId(null);
@@ -410,10 +541,13 @@ export function useAgentConversation(initialConversationId?: string) {
     submitWorkspaceCommand,
     updateScript,
     updatePlanPublicGoal,
-    cancelQuotaInterrupt,
     confirmInterrupt,
+    submitFormInterrupt,
+    resumeAuthorizationInterrupt,
     confirmationSubmittingId,
     refreshActiveRun,
     cancelActiveRun,
+    recoverActiveRun,
+    recoveringRunId,
   };
 }

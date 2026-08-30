@@ -6,6 +6,7 @@ import type {
   PublicAgentEventV1,
   PublicMessageV1,
   PublicInterruptV1,
+  PublicOperationV1,
   RunStatusV1,
   VideoWorkspaceProjectionV1,
 } from "../../api/contracts";
@@ -28,6 +29,7 @@ export type AgentWorkspaceState = {
   connection: ConnectionState;
   progressLines: string[];
   interrupts: PublicInterruptV1[];
+  operations: PublicOperationV1[];
 };
 
 export const initialAgentWorkspaceState: AgentWorkspaceState = {
@@ -42,6 +44,7 @@ export const initialAgentWorkspaceState: AgentWorkspaceState = {
   connection: "idle",
   progressLines: [],
   interrupts: [],
+  operations: [],
 };
 
 const EVENT_TYPE_ALIASES: Record<string, PublicAgentEventTypeV1> = {
@@ -73,11 +76,33 @@ export function normalizePublicEvent(event: PublicAgentEventV1): PublicAgentEven
 export function isTerminalStatus(status: string | null | undefined): boolean {
   /** Run 终态后不再建立浏览器重连，刷新仍由用户显式触发。 */
 
-  return status === "completed" || status === "failed" || status === "cancelled";
+  return status === "completed"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "suspended_operation"
+    || status === "suspended_confirmation"
+    || status === "suspended_authorization";
 }
 
 export function isTerminalSnapshot(snapshot: AgentSnapshotV1 | null): boolean {
-  return isTerminalStatus(snapshot?.status);
+  /** Sidecar 挂起不属于旧 RunStatus 枚举，需从已冻结的公开状态事件判断停止重连。 */
+
+  if (isTerminalStatus(snapshot?.status)) return true;
+  const lastState = [...(snapshot?.events ?? [])]
+    .reverse()
+    .find((event) => normalizeEventType(event.type) === "run.state_changed");
+  return lastState !== undefined && isTerminalStatus(payloadText(lastState.payload, "status"));
+}
+
+export function isRecoveryRequired(snapshot: AgentSnapshotV1 | null): boolean {
+  /** 只接受 Gateway 冻结的恢复码；未知失败仍按普通失败展示。 */
+
+  if (snapshot?.status !== "failed") return false;
+  return snapshot.events.some((event) => (
+    normalizeEventType(event.type) === "run.state_changed"
+    && payloadText(event.payload, "status") === "failed"
+    && payloadText(event.payload, "code") === "harness_run_recovery_required"
+  ));
 }
 
 export function shouldReloadSnapshot(
@@ -144,6 +169,18 @@ export function foldAppliedEvent(
           next = { ...next, inputStatus: "idle" };
         }
       }
+      if (event.payload.status === "suspended_confirmation") {
+        const interrupt = payloadInterrupt(event);
+        if (interrupt !== null) {
+          next = { ...next, interrupts: upsertInterrupt(next.interrupts, interrupt) };
+        }
+      }
+      if (event.payload.status === "suspended_authorization") {
+        const interrupt = payloadInterrupt(event, "authorization_required");
+        if (interrupt !== null) {
+          next = { ...next, interrupts: upsertInterrupt(next.interrupts, interrupt) };
+        }
+      }
       return next;
     }
     case "input.state_changed": {
@@ -169,6 +206,11 @@ export function foldAppliedEvent(
       const summary = payloadText(event.payload, "public_summary")
         || payloadText(event.payload, "tool_name");
       return summary === null ? next : { ...next, progressLines: [...state.progressLines, summary] };
+    }
+    case "external_job.state_changed":
+    case "agent.operation.updated": {
+      const operation = payloadOperation(event.payload);
+      return operation === null ? next : { ...next, operations: upsertOperation(state.operations, operation) };
     }
     case "agent.thinking.delta":
     case "agent.reasoning_summary.delta": {
@@ -289,18 +331,37 @@ function upsertInterrupt(interrupts: PublicInterruptV1[], interrupt: PublicInter
   return interrupts.map((item, itemIndex) => (itemIndex === index ? { ...item, ...interrupt } : item));
 }
 
-function payloadInterrupt(event: PublicAgentEventV1): PublicInterruptV1 | null {
+function upsertOperation(operations: PublicOperationV1[], operation: PublicOperationV1): PublicOperationV1[] {
+  const index = operations.findIndex((item) => item.operation_id === operation.operation_id);
+  if (index < 0) return [...operations, operation];
+  return operations.map((item, itemIndex) => (itemIndex === index ? operation : item));
+}
+
+function payloadInterrupt(
+  event: PublicAgentEventV1,
+  defaultKind: PublicInterruptV1["kind"] = "awaiting_confirmation",
+): PublicInterruptV1 | null {
   /** 只接受冻结的公开字段；未知 payload 不得生成可提交的人工操作。 */
 
   const payload = event.payload;
   const interruptId = payloadText(payload, "interrupt_id") || payloadText(payload, "confirmation_id");
-  if (interruptId === null) return null;
+  if (interruptId === null) {
+    // 授权挂起不带可持久化授权凭据；以 Run 身份构造仅用于当前 Snapshot 的展示键。
+    if (defaultKind !== "authorization_required") return null;
+    return {
+      interrupt_id: `authorization:${event.run_id}`,
+      kind: "authorization_required",
+      title: "需要重新授权",
+      description: "请重新发起需要授权的操作。",
+      status: "open",
+    };
+  }
   const rawKind = payloadText(payload, "kind");
   const kind = event.type === "agent.confirmation.requested"
     ? "awaiting_confirmation"
     : rawKind === "authorization_required" || rawKind === "quota" || rawKind === "form"
       ? rawKind
-      : "awaiting_confirmation";
+      : defaultKind;
   const title = payloadText(payload, "title") || (
     kind === "awaiting_confirmation" ? "请确认继续执行" : "需要你的处理"
   );
@@ -309,6 +370,34 @@ function payloadInterrupt(event: PublicAgentEventV1): PublicInterruptV1 | null {
     || payloadText(payload, "reason_code")
     || "请根据当前工作区状态完成处理。";
   return { interrupt_id: interruptId, kind, title, description, status: "open" };
+}
+
+function payloadOperation(payload: Record<string, unknown>): PublicOperationV1 | null {
+  /** 仅投影稳定进度，无法识别的外部事件必须忽略而非猜测供应商状态。 */
+
+  const operationId = payloadText(payload, "operation_id") || payloadText(payload, "job_id");
+  if (operationId === null) return null;
+  const rawStatus = payloadText(payload, "status");
+  const status = rawStatus === "queued" || rawStatus === "pending"
+    ? "queued"
+    : rawStatus === "running" || rawStatus === "polling"
+      ? "running"
+      : rawStatus === "paused" || rawStatus === "quota_paused"
+        ? "paused"
+        : rawStatus === "completed" || rawStatus === "succeeded"
+          ? "completed"
+          : rawStatus === "failed" || rawStatus === "timeout" || rawStatus === "expired"
+            ? "failed"
+            : null;
+  if (status === null) return null;
+  const completed = payloadCount(payload, "completed");
+  const total = payloadCount(payload, "total");
+  return { operation_id: operationId, status, completed, total };
+}
+
+function payloadCount(payload: Record<string, unknown>, key: string): number | null {
+  const value = payload[key];
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function payloadStatus(payload: Record<string, unknown>): RunStatusV1 | null {
