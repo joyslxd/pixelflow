@@ -12,6 +12,7 @@ from pixelflow.video.services.production_fields import (
     workspace_has_ending_cta,
     workspace_resolved_aspect_ratio,
 )
+from pixelflow.video.workspace.payload import migrate_workspace_payload
 
 
 def _asset_has_image_url(item: Any) -> bool:
@@ -70,6 +71,130 @@ _SECRET_KEY_FRAGMENTS = (
     "authorization",
 )
 
+# 用途：V2 工作台在首屏展示已确认的创作合同；影响：只传递用户拥有的规划文本，
+# 并保持媒体 URL、Provider 原文和凭据不出现在浏览器 Snapshot 中。
+_V2_CREATIVE_FIELDS = {
+    "brand", "product", "audience", "platform", "aspect_ratio", "target_duration_sec",
+    "audio", "cta", "creative_direction", "concept", "tone", "visual_style",
+    "delivery", "reference_strategy",
+}
+_V2_NARRATIVE_FIELDS = {
+    "concept", "outline", "character_arc", "era", "narration", "dialogue", "sound",
+    "brand_closure", "script", "status", "version",
+}
+_V2_PROMPT_PREVIEW_CHARS = 8_000
+_V2_PACKAGE_LIMIT = 120
+
+
+def _bounded_text(value: object, *, maximum: int) -> str | None:
+    """返回用户可见的有界文本，空值和非文本不进入公开投影。"""
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text[:maximum] if text else None
+
+
+def _safe_v2_creative_brief(payload: Mapping[str, Any]) -> dict[str, str | int]:
+    """投影当前创意方向与生产约束，不透传可变的选项内部结构。"""
+
+    source = _as_mapping(payload.get("creative_brief")) or {}
+    result: dict[str, str | int] = {}
+    for key in _V2_CREATIVE_FIELDS:
+        value = source.get(key)
+        if key == "target_duration_sec":
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                result[key] = value
+            continue
+        text = _bounded_text(value, maximum=2_000)
+        if text is not None:
+            result[key] = text
+    return result
+
+
+def _safe_v2_narrative_plan(payload: Mapping[str, Any]) -> dict[str, str]:
+    """投影脚本大纲与声音骨架；脚本长度与 Tool 合同保持一致。"""
+
+    source = _as_mapping(payload.get("narrative_plan")) or {}
+    result: dict[str, str] = {}
+    for key in _V2_NARRATIVE_FIELDS:
+        text = _bounded_text(source.get(key), maximum=8_000 if key == "script" else 2_000)
+        if text is not None:
+            result[key] = text
+    return result
+
+
+def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """投影稳定资产身份和状态，禁止 URL、Provider 响应及未知扩展字段。"""
+
+    result: list[dict[str, Any]] = []
+    for item in _as_list(payload.get("asset_registry"))[:120]:
+        if not isinstance(item, Mapping):
+            continue
+        asset_id = _bounded_text(item.get("asset_id"), maximum=128)
+        kind = _bounded_text(item.get("kind"), maximum=64)
+        role = _bounded_text(item.get("role"), maximum=256)
+        if asset_id is None or kind is None or role is None:
+            continue
+        entry: dict[str, Any] = {
+            "asset_id": asset_id,
+            "slot": _bounded_text(item.get("slot"), maximum=64),
+            "kind": kind,
+            "role": role,
+            "state": _bounded_text(item.get("state"), maximum=32) or "planned",
+            "reference_asset_ids": [
+                reference[:128]
+                for reference in _as_list(item.get("reference_asset_ids"))[:32]
+                if isinstance(reference, str) and reference.strip()
+            ],
+            "provider_artifact_ref": _bounded_text(item.get("provider_artifact_ref"), maximum=256),
+            "usable_for_video": item.get("usable_for_video") is True,
+        }
+        result.append({key: value for key, value in entry.items() if value is not None})
+    return result
+
+
+def _safe_v2_prompt_packages(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """投影每段可审阅 Prompt；正文有界以避免 Snapshot 被长片内容无限放大。"""
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(_as_list(payload.get("prompt_packages"))[:_V2_PACKAGE_LIMIT], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        segment_id = _bounded_text(item.get("segment_id") or item.get("scene_id"), maximum=128)
+        prompt = _bounded_text(item.get("prompt"), maximum=_V2_PROMPT_PREVIEW_CHARS)
+        duration = item.get("duration_sec")
+        if segment_id is None or prompt is None or not isinstance(duration, int) or isinstance(duration, bool):
+            continue
+        entry: dict[str, Any] = {
+            "segment_id": segment_id,
+            "sequence": item.get("sequence") if isinstance(item.get("sequence"), int) and item.get("sequence") > 0 else index,
+            "duration_sec": duration,
+            "generation_mode": _bounded_text(item.get("generation_mode"), maximum=64) or "independent",
+            # 该字段是当前用户可审阅的 Seedance Prompt 正文，不是 Provider 请求或模型原文。
+            "prompt_summary": prompt,
+            "prompt_char_count": len(str(item.get("prompt") or "").strip()),
+            "prompt_truncated": len(str(item.get("prompt") or "").strip()) > _V2_PROMPT_PREVIEW_CHARS,
+            "reference_asset_ids": [
+                reference[:128]
+                for reference in _as_list(item.get("reference_asset_ids"))[:32]
+                if isinstance(reference, str) and reference.strip()
+            ],
+            "continuity_from": _bounded_text(item.get("continuity_from"), maximum=128),
+            "transition_out": _bounded_text(item.get("transition_out"), maximum=2_000),
+            "era": _bounded_text(item.get("era"), maximum=512),
+            "camera": _bounded_text(item.get("camera") or item.get("camera_movement"), maximum=2_000),
+            "sound": _bounded_text(item.get("sound"), maximum=2_000),
+            "hard_constraints": [
+                constraint[:2_000]
+                for constraint in _as_list(item.get("hard_constraints"))[:64]
+                if isinstance(constraint, str) and constraint.strip()
+            ],
+            "state": _bounded_text(item.get("state"), maximum=32) or "planned",
+        }
+        result.append({key: value for key, value in entry.items() if value is not None})
+    return result
+
 
 def _as_mapping(value: Any) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
@@ -110,6 +235,43 @@ def _asset_summaries(value: object, *, limit: int = 12) -> list[dict[str, str]]:
         if not asset_id and not name:
             continue
         result.append({"asset_id": asset_id[:64], "name": name[:120] or "未命名素材"})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _reference_image_summaries(value: object, *, limit: int = 9) -> list[dict[str, str]]:
+    """仅投影用户确认的参考图名称与资产身份，TOS URL 不进入浏览器 Snapshot。"""
+
+    result: list[dict[str, str]] = []
+    for item in _as_list(value):
+        if not isinstance(item, Mapping):
+            continue
+        reference_id = str(item.get("reference_id") or "").strip()
+        asset_id = str(item.get("asset_id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not reference_id or not asset_id or not name:
+            continue
+        result.append({"reference_id": reference_id[:64], "asset_id": asset_id[:64], "name": name[:120]})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _material_summaries(value: object, *, limit: int = 9) -> list[dict[str, str]]:
+    """仅公开用户可见材料标签，TOS URL 与 asset 库内部字段不进入 Snapshot。"""
+
+    result: list[dict[str, str]] = []
+    for item in _as_list(value):
+        if not isinstance(item, Mapping):
+            continue
+        material_id = str(item.get("material_id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        label = str(item.get("reference_label") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        if not material_id or not name or not label or kind not in {"image", "video", "audio", "file"}:
+            continue
+        result.append({"material_id": material_id[:64], "name": name[:120], "reference_label": label[:80], "kind": kind})
         if len(result) >= limit:
             break
     return result
@@ -319,6 +481,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
     """从 VideoWorkspace 抽取规划用公开摘要。"""
 
     payload = workspace.payload if isinstance(workspace.payload, dict) else {}
+    v2_payload = migrate_workspace_payload(payload)
     script = _as_mapping(payload.get("script")) or {}
     script_content = str(script.get("content") or "").strip()
     pipeline = _as_mapping(payload.get("script_pipeline")) or {}
@@ -349,6 +512,11 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
         for key, value in {
             "workspace_id": workspace.workspace_id,
             "revision": workspace.revision,
+            "workspace_schema_version": v2_payload.get("workspace_schema_version"),
+            "creative_brief": _safe_v2_creative_brief(v2_payload) or None,
+            "narrative_plan": _safe_v2_narrative_plan(v2_payload) or None,
+            "asset_registry": _safe_v2_asset_registry(v2_payload) or None,
+            "prompt_packages": _safe_v2_prompt_packages(v2_payload) or None,
             "has_script": bool(script_content) or bool(pipeline_stages),
             "script_status": str(script.get("status") or "") or None,
             "script_source": str(script.get("source") or "") or None,
@@ -364,6 +532,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
                 "script_plan_confirmed_version"
             ),
             "awaiting_production_fields": bool(payload.get("awaiting_production_fields")),
+            "awaiting_production_constraints": bool(payload.get("awaiting_production_fields")),
             "has_aspect_ratio": resolved_ratio is not None,
             "video_ratio": resolved_ratio,
             "has_ending_cta": workspace_has_ending_cta(payload),
@@ -379,6 +548,10 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "character_summaries": _asset_summaries(global_assets.get("characters")) or None,
             "scene_asset_summaries": _asset_summaries(global_assets.get("scenes")) or None,
             "prop_summaries": _asset_summaries(global_assets.get("props")) or None,
+            "reference_image_count": _safe_len(payload.get("reference_images")),
+            "reference_image_summaries": _reference_image_summaries(payload.get("reference_images")) or None,
+            "material_count": _safe_len(payload.get("materials")),
+            "material_summaries": _material_summaries(payload.get("materials")) or None,
             "scene_count": len(scenes),
             "dirty_scene_ids": dirty_ids[:32],
             "dirty_scene_count": len(dirty_ids),

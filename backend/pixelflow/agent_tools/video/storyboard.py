@@ -114,7 +114,11 @@ class PrepareScenePackagesTool:
 
     spec = VideoToolSpec(
         name="prepare_scene_packages",
-        description="写入脚本和分镜包；单镜最长 30 秒，长片生成由 M06 批次拆分，完成后再请求生成确认。",
+        description=(
+            "写入脚本和分镜包；面向 Seedance 2.5 时，先使用已加载的导演/提示词 Skill "
+            "将每段 prompt 编排为可提交的完整正文，再原样写入，不得仅写摘要；"
+            "单镜最长 30 秒，长片生成由 M06 批次拆分，完成后再请求生成确认。"
+        ),
         input_model=PrepareScenePackagesInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,
