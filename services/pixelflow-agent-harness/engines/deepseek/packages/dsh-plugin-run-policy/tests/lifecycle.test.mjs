@@ -10,7 +10,9 @@ const dispose = apply({
 }, { maxModelSteps: 1, maxBusinessTools: 1, maxBillableBatchStarts: 1, deadlineSeconds: 90 });
 listeners.get("agent/request")({}, () => "next");
 assert.throws(() => listeners.get("agent/request")({}, () => "next"), /max_model_steps/);
-listeners.get("tools/pre-execute")({}, () => "next");
+listeners.get("tools/pre-execute")({ name: "skill" }, () => "next");
+listeners.get("tools/pre-execute")({ name: "inspect_video_workspace" }, () => "next");
+assert.throws(() => listeners.get("tools/pre-execute")({ name: "inspect_script" }, () => "next"), /max_business_tools/);
 policy.assertBillableBatchStart();
 assert.throws(() => policy.assertBillableBatchStart(), /max_billable_batch_starts/);
 policy.suspend("awaiting_confirmation");

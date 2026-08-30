@@ -5,6 +5,10 @@ interface CordisContext {
   on(name: "agent/request" | "tools/pre-execute" | "session/disposed", listener: (...args: unknown[]) => unknown): () => boolean;
 }
 
+interface ToolExecutionIdentity {
+  name?: unknown;
+}
+
 export interface RunPolicyConfig {
   maxModelSteps?: number;
   maxBusinessTools?: number;
@@ -74,12 +78,21 @@ export function apply(ctx: CordisContext, config: RunPolicyConfig = {}): () => v
     policy.assertModelStep();
     return typeof next === "function" ? next() : undefined;
   });
-  const stopToolCalls = ctx.on("tools/pre-execute", (_execution, next) => {
-    policy.assertBusinessTool();
+  const stopToolCalls = ctx.on("tools/pre-execute", (execution, next) => {
+    // Skill 是 Runtime 内的只读方法说明，不是 PixelFlow Capability Tool；将它计入
+    // 业务 Tool 上限会让“读取 Skill + 检查 Workspace + 写入规划”在写入前被错误拦截。
+    // 未知 Tool 仍计数，保持默认收紧，不允许通过伪造执行对象绕过业务上限。
+    if (isBusinessTool(execution)) policy.assertBusinessTool();
     return typeof next === "function" ? next() : undefined;
   });
   const stopSession = ctx.on("session/disposed", () => { policy.cancel(); });
   return () => { stopSession(); stopToolCalls(); stopModelSteps(); policy.dispose(); release(); };
+}
+
+function isBusinessTool(execution: unknown): boolean {
+  if (typeof execution !== "object" || execution === null) return true;
+  const name = (execution as ToolExecutionIdentity).name;
+  return typeof name !== "string" || name !== "skill";
 }
 
 function positive(value: number | undefined, fallback: number): number {
