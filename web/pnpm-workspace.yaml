@@ -1,2 +1,7 @@
+# 用途：将 web 自身声明为唯一 workspace 包；影响：pnpm 9 可按锁文件解析前端依赖。
+packages:
+  - "."
+
+# 用途：允许 esbuild 执行安装期构建；影响：Vite 生产构建可使用已锁定的二进制依赖。
 allowBuilds:
   esbuild: true
