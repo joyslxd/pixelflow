@@ -342,3 +342,70 @@ def test_result_projection_uses_public_final_message_when_chunks_absent() -> Non
     )
 
     assert projected.final_response == "最终回复"
+
+
+def test_result_projection_detects_confirmation_inside_runtime_tool_result_message() -> None:
+    """新版 Runtime 将 Plugin Observation 封装为 ToolResultMessage，仍须优先挂起。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {
+                    "type": "tool/result",
+                    "data": {
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool-result",
+                                    "toolCallId": "call_01",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                '{"status":"awaiting_confirmation",'
+                                                '"suspension":{"kind":"awaiting_confirmation",'
+                                                '"interrupt_id":"interrupt_01"}}'
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                }
+            ],
+            final_response="",
+            finish_reason="error",
+        )
+    )
+
+    assert projected.finish_reason == "suspended"
+    assert projected.suspension_kind == "awaiting_confirmation"
+    assert projected.suspension_interrupt_id == "interrupt_01"
+
+
+def test_result_projection_ignores_unstructured_tool_result_text() -> None:
+    """普通 Tool 文本不得被猜测为业务挂起状态。"""
+
+    with pytest.raises(HarnessProjectionError, match="Harness 结果投影失败"):
+        _project_harness_result(
+            SimpleNamespace(
+                events=[
+                    {
+                        "type": "tool/result",
+                        "data": {
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "tool-result",
+                                        "content": [{"type": "text", "text": "等待确认"}],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ],
+                final_response="",
+                finish_reason="error",
+            )
+        )

@@ -448,10 +448,7 @@ def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None]
         data = event.get("data")
         if not isinstance(data, dict):
             continue
-        for key in ("result", "output", "value", "observation"):
-            candidate = data.get(key)
-            if not isinstance(candidate, dict):
-                continue
+        for candidate in _tool_observation_candidates(data):
             status = candidate.get("status")
             suspension = candidate.get("suspension")
             if status in allowed and isinstance(suspension, dict) and suspension.get("kind") == status:
@@ -462,6 +459,42 @@ def _suspension_from_tool_events(events: list[object]) -> tuple[str, str | None]
                     return status, interrupt_id
                 return status, None
     return None
+
+
+def _tool_observation_candidates(data: dict[str, object]) -> tuple[dict[str, object], ...]:
+    """提取 Capability Plugin 写回的受控 Observation，兼容 Runtime 的 ToolResultMessage 包装。"""
+
+    candidates = tuple(
+        value
+        for key in ("result", "output", "value", "observation")
+        if isinstance((value := data.get(key)), dict)
+    )
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return candidates
+    content = message.get("content")
+    if not isinstance(content, list):
+        return candidates
+    nested: list[dict[str, object]] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool-result":
+            continue
+        result_content = block.get("content")
+        if not isinstance(result_content, list):
+            continue
+        for result_block in result_content:
+            if not isinstance(result_block, dict) or result_block.get("type") != "text":
+                continue
+            raw = result_block.get("text")
+            if not isinstance(raw, str) or len(raw) > 16_384:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                nested.append(parsed)
+    return candidates + tuple(nested)
 
 
 def _public_events_from_notification(notification: object) -> tuple[tuple[str, dict[str, str]], ...]:
