@@ -278,6 +278,9 @@ class ConversationDetailResponse(BaseModel):
     messages: list[ConversationMessageResponse] = Field(default_factory=list)
     # 用途：刷新时恢复最新 Harness Run；影响：授权/确认恢复 Run 不再依赖用户消息才能被页面找到。
     latest_harness_run_id: str | None = Field(default=None, pattern=r"^hrun_[a-f0-9]{32}$")
+    # 用途：区分用户 Turn 与自动恢复 Run；影响：浏览器只对有用户输入来源的失败 Run 展示 /recover，
+    # 避免 Operation 完成恢复已包含 Tool 副作用时被误导为可继续。
+    latest_harness_run_is_user_turn: bool = False
 
 
 class ConversationTraceEventResponse(BaseModel):
@@ -566,14 +569,22 @@ async def _conversation_detail(
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages = await store.list_conversation_messages(conversation_id, user_id=user_id)
     latest_harness_run_id: str | None = None
+    latest_harness_run_is_user_turn = False
     if user_id and runtime_events is not None:
         latest_event = await runtime_events.get_latest_event(user_id, conversation_id)
         if latest_event is not None and latest_event.run_id.startswith("hrun_"):
             latest_harness_run_id = latest_event.run_id
+            latest_harness_run_is_user_turn = any(
+                message.role == "user"
+                and isinstance(message.payload, dict)
+                and message.payload.get("harness_run_id") == latest_harness_run_id
+                for message in messages
+            )
     return ConversationDetailResponse(
         conversation=_conversation_response(conversation),
         messages=[_message_response(message) for message in messages],
         latest_harness_run_id=latest_harness_run_id,
+        latest_harness_run_is_user_turn=latest_harness_run_is_user_turn,
     )
 
 

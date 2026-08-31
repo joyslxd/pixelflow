@@ -56,7 +56,8 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   } = useAgentConversation(conversationId ?? routeConversationId);
   const snapshot = runtime.snapshot;
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
-  const recoveryRequired = isRecoveryRequired(snapshot);
+  const recoveryRequired = isRecoveryRequired(snapshot)
+    && detail?.latest_harness_run_is_user_turn === true;
   const progressText = visible.progressLines.join("\n") || "等待公开进度";
   const quotaInterrupt = (() => {
     const workspace = runtime.videoWorkspace ?? snapshot?.workspace;

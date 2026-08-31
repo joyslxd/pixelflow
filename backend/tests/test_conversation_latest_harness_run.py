@@ -58,3 +58,43 @@ async def test_conversation_detail_prefers_latest_outbox_run_over_last_user_mess
     )
 
     assert detail.latest_harness_run_id == "hrun_" + "2" * 32
+    assert detail.latest_harness_run_is_user_turn is False
+
+
+@pytest.mark.asyncio
+async def test_conversation_detail_marks_latest_user_turn_for_safe_recovery() -> None:
+    """只有绑定同一用户消息的失败 Run 才能由前端展示通用恢复入口。"""
+
+    store = MemoryPixelFlowTaskStore()
+    events = MemoryAgentRuntimeRepository()
+    run_id = "hrun_" + "3" * 32
+    await store.create_conversation(
+        PixelFlowConversationRecord(conversation_id="conversation-2", user_id="user-2", title="恢复测试"),
+    )
+    await store.append_conversation_message(
+        PixelFlowConversationMessageRecord(
+            message_id="message-2",
+            conversation_id="conversation-2",
+            user_id="user-2",
+            role="user",
+            content="继续处理",
+            payload={"harness_run_id": run_id},
+        ),
+    )
+    await events.create_event(
+        "user-2",
+        AgentEvent(
+            event_id="event-2",
+            sequence=1,
+            cursor="event-2",
+            conversation_id="conversation-2",
+            run_id=run_id,
+            occurred_at=datetime.now(UTC),
+            type=AgentEventType.RUN_STATE_CHANGED,
+            payload={"status": "failed", "code": "harness_run_recovery_required"},
+        ),
+    )
+
+    detail = await _conversation_detail(store, "conversation-2", user_id="user-2", runtime_events=events)
+
+    assert detail.latest_harness_run_is_user_turn is True

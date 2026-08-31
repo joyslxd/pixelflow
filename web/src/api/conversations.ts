@@ -23,6 +23,8 @@ export type ConversationDetailV1 = {
   messages: ConversationMessageV1[];
   /** Gateway 依据公开 Outbox 回读，覆盖没有用户消息的确认/授权/Operation 恢复 Run。 */
   latest_harness_run_id?: string | null;
+  /** 自动恢复 Run 没有可安全重放的用户输入，失败时不能调用通用 /recover。 */
+  latest_harness_run_is_user_turn?: boolean;
 };
 
 export async function listConversations(): Promise<ConversationV1[]> {
