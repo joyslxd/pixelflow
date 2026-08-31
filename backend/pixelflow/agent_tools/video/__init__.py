@@ -21,6 +21,7 @@ from .creative_brief import (
 )
 from .credential_store import TransientBatchCredentialStore, TransientRunCredentialStore
 from .image_assets import GenerateImageAssetsInput, GenerateImageAssetsTool
+from .image_asset_inspection import InspectImageAssetsInput, InspectImageAssetsTool
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
 from .production_contract import SetVideoGenerationContractTool
 from .registry import VideoToolRegistry
@@ -69,6 +70,8 @@ __all__ = [
     "InspectVideoWorkspaceTool",
     "GenerateImageAssetsInput",
     "GenerateImageAssetsTool",
+    "InspectImageAssetsInput",
+    "InspectImageAssetsTool",
     "SetVideoGenerationContractTool",
     "AnalyzeVideoInput",
     "AnalyzeVideoTool",

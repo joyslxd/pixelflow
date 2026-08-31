@@ -7,6 +7,7 @@ import pytest
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.image_assets import GenerateImageAssetsTool
+from pixelflow.agent_tools.video.image_asset_inspection import InspectImageAssetsTool
 from pixelflow.capabilities.image_generation import (
     ContentAppImageGenerationAdapter,
     ContentAppImageProviderSettings,
@@ -81,6 +82,34 @@ async def test_generate_image_assets_creates_batch_for_planned_assets() -> None:
     assert result.model_observation["batch_ids"]
     batch = await repository.list_dispatchable_batches(limit=1)
     assert batch[0].children[0].scene_id == "asset-character-host"
+
+
+@pytest.mark.asyncio
+async def test_inspect_image_assets_reports_safe_per_asset_status() -> None:
+    workspace = VideoWorkspace(
+        workspace_id="workspace-images-inspect",
+        conversation_id="conversation-images-inspect",
+        revision=1,
+        payload={
+            "asset_registry": [
+                {"asset_id": "ready", "kind": "character", "state": "ready", "usable_for_video": True},
+                {"asset_id": "running", "kind": "scene", "state": "polling", "usable_for_video": False},
+                {"asset_id": "failed", "kind": "prop", "state": "failed", "usable_for_video": False},
+            ]
+        },
+    )
+    result = await InspectImageAssetsTool().execute(
+        VideoToolContext(user_id="user", workspace=workspace),
+        {},
+    )
+
+    assert result.model_observation["status"] == "running"
+    assert result.model_observation["total"] == 3
+    assert result.model_observation["ready"] == 1
+    assert result.model_observation["running"] == 1
+    assert result.model_observation["failed"] == 1
+    assert result.model_observation["can_generate_scenes"] is False
+    assert "image_url" not in result.model_observation
 
 
 def json_load(value: bytes) -> object:

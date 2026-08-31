@@ -681,6 +681,12 @@ class GenerateScenesTool:
         arguments: Mapping[str, object],
     ) -> VideoToolResult:
         request = _validate(GenerateScenesInput, arguments, "镜头生成参数无效")
+        if self._batch_operation_port is None:
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="分镜视频生成能力当前未装配，请等待 Gateway 配置视频 Provider。",
+                model_observation={"status": "unavailable", "scene_ids": list(request.scene_ids)},
+            )
         payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
         from pixelflow.video.workspace.digest import summarize_scene_asset_status
 
@@ -698,8 +704,6 @@ class GenerateScenesTool:
             raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
         selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
         _require_complete_creation_contract(payload)
-        if self._batch_operation_port is None:
-            raise VideoToolExecutionError("镜头生成Operation尚未装配")
         jobs_by_scene: dict[str, list[SceneGenerationJob]] = {
             scene_id: [] for scene_id in scene_ids
         }

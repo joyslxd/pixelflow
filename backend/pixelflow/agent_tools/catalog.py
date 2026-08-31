@@ -6,6 +6,7 @@ from .video import (
     AnalyzeVideoTool,
     CreateStoryboardTool,
     GenerateImageAssetsTool,
+    InspectImageAssetsTool,
     GenerateScenesTool,
     InspectCreativeBriefTool,
     InspectSceneTool,
@@ -36,6 +37,7 @@ def runtime_video_tool_registry(
 
     tools = [
             InspectVideoWorkspaceTool(),
+            InspectImageAssetsTool(),
             InspectCreativeBriefTool(),
             InspectScriptTool(),
             UpdateScriptTool(),
@@ -51,15 +53,9 @@ def runtime_video_tool_registry(
             UpdateCreativeBriefTool(),
             SelectCreativeOptionTool(),
     ]
-    if scene_generation_batch_operation_port is not None:
-        # 仅在 Gateway 已装配真实 Provider/M06 Port 时发布计费 Tool，避免空实现被模型选择。
-        tools.append(
-            GenerateScenesTool(
-                batch_operation_port=scene_generation_batch_operation_port,  # type: ignore[arg-type]
-            )
-        )
-    if image_generation_batch_operation_port is not None:
-        tools.append(GenerateImageAssetsTool(batch_operation_port=image_generation_batch_operation_port))
-    if video_understanding_port is not None:
-        tools.append(AnalyzeVideoTool(video_understanding_port))
+    # 三类外部能力始终发布到 Manifest，由 Agent 自主判断是否调用；未装配 Provider 时，
+    # Handler 返回明确的不可执行观察，不伪造成功，也不影响基础只读 Tool 启动。
+    tools.append(GenerateScenesTool(batch_operation_port=scene_generation_batch_operation_port))
+    tools.append(GenerateImageAssetsTool(batch_operation_port=image_generation_batch_operation_port))
+    tools.append(AnalyzeVideoTool(video_understanding_port))
     return VideoToolRegistry(tuple(tools))

@@ -38,11 +38,17 @@ class GenerateImageAssetsTool:
         model_observation_keys=("batch_ids", "asset_ids", "workspace_revision_required"),
     )
 
-    def __init__(self, *, batch_operation_port: object) -> None:
+    def __init__(self, *, batch_operation_port: object | None = None) -> None:
         self._port = batch_operation_port
 
     async def execute(self, context: VideoToolContext, arguments: Mapping[str, object]) -> VideoToolResult:
         request = GenerateImageAssetsInput.model_validate(dict(arguments))
+        if self._port is None:
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="图片生成能力当前未装配，请改用规划或检查 Tool，或等待 Gateway 配置 Provider。",
+                model_observation={"status": "unavailable", "asset_ids": list(request.asset_ids)},
+            )
         payload = migrate_workspace_payload(context.workspace.payload)
         registry = {
             str(item.get("asset_id") or "").strip(): item

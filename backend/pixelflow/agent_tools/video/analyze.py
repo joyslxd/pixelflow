@@ -33,11 +33,17 @@ class AnalyzeVideoTool:
         model_observation_keys=("task_id", "status", "parent_generation_dialog_id"),
     )
 
-    def __init__(self, port: VideoUnderstandingPort) -> None:
+    def __init__(self, port: VideoUnderstandingPort | None = None) -> None:
         self._port = port
 
     async def execute(self, context: VideoToolContext, arguments: Mapping[str, object]) -> VideoToolResult:
         parsed = self.spec.input_model.model_validate(arguments)
+        if self._port is None:
+            return VideoToolResult(
+                tool_name=self.spec.name,
+                public_summary="视频理解能力当前未装配，请等待 Gateway 配置分析 Provider。",
+                model_observation={"status": "unavailable"},
+            )
         result = await self._port.analyze(
             {"video_url": parsed.video_url},
             authorization=(context.credential.authorization if context.credential is not None else ""),
