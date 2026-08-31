@@ -168,6 +168,8 @@ class AgentRuntimeRepository(Protocol):
 
     async def get_event(self, user_id: str, event_id: str) -> AgentEvent | None: ...
 
+    async def get_latest_event(self, user_id: str, conversation_id: str) -> AgentEvent | None: ...
+
     async def list_events(self, user_id: str, conversation_id: str) -> list[AgentEvent]: ...
 
     async def list_events_after_cursor(
@@ -1036,6 +1038,20 @@ class MemoryAgentRuntimeRepository:
         owner = _require_text("user_id", user_id, 64)
         record = self._events.get((owner, _require_text("event_id", event_id, 64)))
         return None if record is None else _clone(record)
+
+    async def get_latest_event(self, user_id: str, conversation_id: str) -> AgentEvent | None:
+        """按会话序号回读最后一条公开事件，供刷新恢复当前 Harness Run。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        conversation = _require_text("conversation_id", conversation_id, 64)
+        records = [
+            record
+            for (record_owner, _), record in self._events.items()
+            if record_owner == owner and record.conversation_id == conversation
+        ]
+        if not records:
+            return None
+        return _clone(max(records, key=lambda record: (record.sequence, record.event_id)))
 
     async def list_events(self, user_id: str, conversation_id: str) -> list[AgentEvent]:
         owner = _require_text("user_id", user_id, 64)
@@ -2857,6 +2873,23 @@ class SQLAgentRuntimeRepository:
         statement = select(PixelFlowAgentEventRow).where(
             PixelFlowAgentEventRow.user_id == owner,
             PixelFlowAgentEventRow.event_id == _require_text("event_id", event_id, 64),
+        )
+        async with self._session_factory() as session:
+            row = (await session.scalars(statement)).one_or_none()
+        return None if row is None else _event_from_row(row)
+
+    async def get_latest_event(self, user_id: str, conversation_id: str) -> AgentEvent | None:
+        """按持久化 sequence 回读会话最新事件，避免刷新时扫描完整 Outbox。"""
+
+        owner = _require_text("user_id", user_id, 64)
+        statement = (
+            select(PixelFlowAgentEventRow)
+            .where(
+                PixelFlowAgentEventRow.user_id == owner,
+                PixelFlowAgentEventRow.conversation_id == _require_text("conversation_id", conversation_id, 64),
+            )
+            .order_by(PixelFlowAgentEventRow.sequence.desc(), PixelFlowAgentEventRow.event_id.desc())
+            .limit(1)
         )
         async with self._session_factory() as session:
             row = (await session.scalars(statement)).one_or_none()

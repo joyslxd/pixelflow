@@ -269,6 +269,8 @@ class ConversationListResponse(BaseModel):
 class ConversationDetailResponse(BaseModel):
     conversation: ConversationResponse
     messages: list[ConversationMessageResponse] = Field(default_factory=list)
+    # 用途：刷新时恢复最新 Harness Run；影响：授权/确认恢复 Run 不再依赖用户消息才能被页面找到。
+    latest_harness_run_id: str | None = Field(default=None, pattern=r"^hrun_[a-f0-9]{32}$")
 
 
 class ConversationTraceEventResponse(BaseModel):
@@ -550,14 +552,21 @@ async def _conversation_detail(
     conversation_id: str,
     *,
     user_id: str | None,
+    runtime_events: Any | None = None,
 ) -> ConversationDetailResponse:
     conversation = await store.get_conversation(conversation_id, user_id=user_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages = await store.list_conversation_messages(conversation_id, user_id=user_id)
+    latest_harness_run_id: str | None = None
+    if user_id and runtime_events is not None:
+        latest_event = await runtime_events.get_latest_event(user_id, conversation_id)
+        if latest_event is not None and latest_event.run_id.startswith("hrun_"):
+            latest_harness_run_id = latest_event.run_id
     return ConversationDetailResponse(
         conversation=_conversation_response(conversation),
         messages=[_message_response(message) for message in messages],
+        latest_harness_run_id=latest_harness_run_id,
     )
 
 
@@ -1570,7 +1579,12 @@ async def list_conversations(
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
 async def get_conversation(conversation_id: str, request: Request) -> ConversationDetailResponse:
     user_id = await get_current_user(request)
-    return await _conversation_detail(_task_store(request), conversation_id, user_id=user_id)
+    return await _conversation_detail(
+        _task_store(request),
+        conversation_id,
+        user_id=user_id,
+        runtime_events=getattr(request.app.state, "pixelflow_agent_runtime_repository", None),
+    )
 
 
 @router.put("/{conversation_id}", response_model=ConversationResponse)
@@ -1710,7 +1724,12 @@ async def resume_conversation(conversation_id: str, request: Request) -> Convers
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     await store.update_conversation(conversation_id, user_id=user_id, context=conversation.context)
-    return await _conversation_detail(store, conversation_id, user_id=user_id)
+    return await _conversation_detail(
+        store,
+        conversation_id,
+        user_id=user_id,
+        runtime_events=getattr(request.app.state, "pixelflow_agent_runtime_repository", None),
+    )
 
 
 async def _append_conversation_message(

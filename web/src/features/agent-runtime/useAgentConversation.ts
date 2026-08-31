@@ -39,7 +39,11 @@ import {
 } from "./state";
 
 function latestRunId(detail: ConversationDetailV1): string | null {
-  /** 只从服务端已持久化消息的 Harness 标识恢复，不扫描旧任务字段。 */
+  /** 优先采用 Gateway 按公开 Outbox 回读的最新 Run；恢复 Run 不必伪造用户消息。 */
+
+  if (typeof detail.latest_harness_run_id === "string" && /^hrun_[a-f0-9]{32}$/u.test(detail.latest_harness_run_id)) {
+    return detail.latest_harness_run_id;
+  }
 
   for (const message of [...detail.messages].reverse()) {
     const runId = message.payload?.harness_run_id;

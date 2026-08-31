@@ -21,6 +21,8 @@ export type ConversationMessageV1 = {
 export type ConversationDetailV1 = {
   conversation: ConversationV1;
   messages: ConversationMessageV1[];
+  /** Gateway 依据公开 Outbox 回读，覆盖没有用户消息的确认/授权/Operation 恢复 Run。 */
+  latest_harness_run_id?: string | null;
 };
 
 export async function listConversations(): Promise<ConversationV1[]> {
