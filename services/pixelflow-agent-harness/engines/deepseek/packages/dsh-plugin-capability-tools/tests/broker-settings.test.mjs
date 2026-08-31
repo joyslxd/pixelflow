@@ -39,9 +39,13 @@ globalThis.fetch = async (url, init) => {
 
 const { apply } = await import("../dist/index.js");
 const registered = [];
+const suspensions = [];
 apply({
   tools: { register(tool) { registered.push(tool); } },
-  pixelflowRunPolicy: { assertBillableBatchStart() {}, suspend() {} },
+  pixelflowRunPolicy: {
+    assertBillableBatchStart() {},
+    suspend(kind) { suspensions.push(kind); },
+  },
 });
 
 const result = await registered[0].execute({}, { callId: "call-1" });
@@ -62,3 +66,23 @@ assert.equal(failedResult.status, "completed");
 assert.equal(failedResult.model_observation.code, "tool_call_failed");
 assert.equal(requestedBodies[0].expected_workspace_revision, 1);
 assert.equal(requestedBodies[1].expected_workspace_revision, 2);
+
+// 人工确认中断必须完整保留 Gateway 生成的身份，供 Sidecar 投影为浏览器可提交的卡片。
+globalThis.fetch = async (_url, init) => {
+  requestedBodies.push(JSON.parse(String(init.body)));
+  return new Response(JSON.stringify({
+    protocol_version: "v1",
+    status: "awaiting_confirmation",
+    public_summary: "该操作需要你的确认后才能继续",
+    model_observation: { code: "tool_confirmation_required" },
+    suspension: {
+      kind: "awaiting_confirmation",
+      interrupt_id: "hint_confirmation_test",
+    },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+};
+const confirmationResult = await registered[0].execute({}, { callId: "call-3" });
+assert.equal(confirmationResult.status, "awaiting_confirmation");
+assert.equal(confirmationResult.suspension.interrupt_id, "hint_confirmation_test");
+assert.deepEqual(suspensions, ["awaiting_confirmation"]);
+assert.equal(requestedBodies[2].expected_workspace_revision, 2);

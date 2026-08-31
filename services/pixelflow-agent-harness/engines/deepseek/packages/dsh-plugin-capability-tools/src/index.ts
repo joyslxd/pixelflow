@@ -62,6 +62,10 @@ interface BrokerObservation {
 
 type BrokerResponseStatus = "completed" | "rejected" | "failed" | SuspensionKind;
 
+// 用途：为首次批次创建与 Provider 首次启动保留足够的受控调用时间；影响：超时前
+// Gateway 仍可原子写入 Tool 幂等结果，避免 10 秒中断留下 executing 占位。
+const BROKER_REQUEST_TIMEOUT_MS = 60_000;
+
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
 export const name = "pixelflow-capability-tools";
 
@@ -212,7 +216,7 @@ async function callBroker(
       context_digest: settings.contextDigest,
       toolset_version: settings.toolsetVersion,
     }),
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(BROKER_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error("PixelFlow Tool Broker 拒绝了 Tool 调用");
   return canonicalObservation(await response.json());
