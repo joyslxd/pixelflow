@@ -1,26 +1,31 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext
-from pixelflow.agent_tools.video.image_assets import GenerateImageAssetsTool
+from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
 from pixelflow.agent_tools.video.image_asset_inspection import InspectImageAssetsTool
+from pixelflow.agent_tools.video.image_assets import GenerateImageAssetsTool
 from pixelflow.agent_tools.video.operation_batch import InspectOperationBatchTool
 from pixelflow.capabilities.image_generation import (
     ContentAppImageGenerationAdapter,
     ContentAppImageProviderSettings,
 )
-from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepository
 from pixelflow.operations.jobs.batch import build_operation_batch_plan
+from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepository
 from pixelflow.video.adapters.operations.images import (
+    M06ImageGenerationBatchDispatcher,
+    M06ImageGenerationBatchDispatcherWorker,
     M06ImageGenerationBatchOperationPort,
     _image_generation_request,
+    _image_operation_stage,
 )
 from pixelflow.video.adapters.operations.projector import build_image_asset_success_patch
 from pixelflow.video.contracts import VideoWorkspace
+from pixelflow.video.workspace import MemoryVideoAgentRepository
 
 
 @pytest.mark.asyncio
@@ -125,6 +130,129 @@ def test_image_generation_request_uses_workspace_ratio_2k_and_asset_prompt() -> 
     assert request["prompt"] == "资产注册表中的唯一图片提示词"
     assert request["ratio"] == "16:9"
     assert request["size"] == "2k"
+
+
+def test_image_operation_stage_matches_batch_child_identity() -> None:
+    """图片子项的 stage 必须与 M5 计划使用的版本后缀一致。"""
+
+    asset_id = "asset-character-host"
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "b" * 32,
+        tool_call_id="call_image_stage",
+        scene_ids=(asset_id,),
+        variant_count=1,
+        attempt=1,
+        stage_prefix="generate_image_asset",
+    )
+    from pixelflow.operations.jobs.identity import build_operation_idempotency_key
+
+    assert plan.children[0].operation_idempotency_key == build_operation_idempotency_key(
+        plan.batch_id,
+        _image_operation_stage(asset_id),
+        1,
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_dispatcher_marks_start_exception_as_failed(caplog: pytest.LogCaptureFixture) -> None:
+    """Provider 启动异常不得让图片子项永久遗留在 starting。"""
+
+    class FailingOperationPort:
+        async def start_asset(self, *args: object, **kwargs: object) -> object:
+            raise RuntimeError("provider unavailable")
+
+    repository = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "c" * 32,
+        tool_call_id="call_image_failure",
+        scene_ids=("asset-character-host",),
+        variant_count=1,
+        attempt=1,
+        stage_prefix="generate_image_asset",
+    )
+    batch = await repository.create_or_read(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images",
+        plan=plan,
+    )
+    dispatcher = M06ImageGenerationBatchDispatcher(
+        batch_repository=repository,
+        operation_port=FailingOperationPort(),  # type: ignore[arg-type]
+    )
+
+    await dispatcher.dispatch_start_slots(
+        batch=batch,
+        context=VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-images",
+                conversation_id="conversation-images",
+                revision=1,
+            ),
+        ),
+        assets_by_id={"asset-character-host": {"asset_id": "asset-character-host"}},
+        attempt=1,
+    )
+
+    current = await repository.get_batch(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images",
+        batch_id=batch.batch_id,
+    )
+    assert current is not None
+    assert current.children[0].status == "failed"
+    assert "image_batch_child_start_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_image_worker_marks_stale_starting_child_failed_when_credential_is_gone(caplog: pytest.LogCaptureFixture) -> None:
+    """Gateway 重启丢失瞬时授权时，已领取子项必须收口而不是永久 starting。"""
+
+    repository = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "d" * 32,
+        tool_call_id="call_image_stale",
+        scene_ids=("asset-character-host",),
+        variant_count=1,
+        attempt=1,
+        stage_prefix="generate_image_asset",
+    )
+    batch = await repository.create_or_read(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images",
+        plan=plan,
+        run_id="hrun_" + "d" * 32,
+        tool_call_id="call_image_stale",
+        attempt=1,
+    )
+    await repository.claim_children(batch_id=batch.batch_id, max_concurrent=1)
+    worker = M06ImageGenerationBatchDispatcherWorker(
+        batch_repository=repository,
+        video_repository=MemoryVideoAgentRepository(),
+        dispatcher=M06ImageGenerationBatchDispatcher(
+            batch_repository=repository,
+            operation_port=object(),  # type: ignore[arg-type]
+        ),
+        credential_store=TransientBatchCredentialStore(),
+        worker_id="test-image-worker",
+        scan_interval=timedelta(seconds=1),
+    )
+
+    await worker.run_once()
+
+    current = await repository.get_batch(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images",
+        batch_id=batch.batch_id,
+    )
+    assert current is not None
+    assert current.children[0].status == "failed"
+    assert "image_batch_starting_credential_missing" in caplog.text
 
 
 @pytest.mark.asyncio

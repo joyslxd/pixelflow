@@ -29,7 +29,6 @@ from pixelflow.operations.ports import OperationConflictError
 from pixelflow.video.services.production_fields import workspace_resolved_aspect_ratio
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -53,10 +52,10 @@ class M06ImageGenerationOperationPort:
         request = _image_generation_request(context.workspace.payload, asset)
         if self._transformer is not None:
             request = self._transformer(request)
-        digest = hashlib.sha256(asset_id.encode()).hexdigest()[:12]
+        stage = _image_operation_stage(asset_id)
         operation_request = build_operation_request(
             workflow_id=workflow_id,
-            stage=f"generate_image_asset:{digest}",
+            stage=stage,
             stage_version=1,
             attempt=attempt,
             provider_request=request,
@@ -107,6 +106,13 @@ def _image_generation_request(
     }
 
 
+def _image_operation_stage(asset_id: str) -> str:
+    """图片子项与 M5 批次计划共用同一 Operation stage 身份。"""
+
+    digest = hashlib.sha256(asset_id.encode()).hexdigest()[:12]
+    return f"generate_image_asset:{digest}:v1"
+
+
 class M06ImageGenerationBatchDispatcher:
     def __init__(self, *, batch_repository: OperationBatchRepository, operation_port: M06ImageGenerationOperationPort, max_concurrent: int = 6) -> None:
         if not 1 <= max_concurrent <= 6:
@@ -116,11 +122,24 @@ class M06ImageGenerationBatchDispatcher:
     async def dispatch_start_slots(self, *, batch: OperationBatchRecord, context: VideoToolContext, assets_by_id: Mapping[str, Mapping[str, JsonValue]], attempt: int) -> dict[str, ImageGenerationJob]:
         jobs: dict[str, ImageGenerationJob] = {}
         for child in await self._batches.claim_children(batch_id=batch.batch_id, max_concurrent=self._max):
-            asset = assets_by_id.get(child.scene_id)
-            if asset is None:
-                job = ImageGenerationJob(job_id=child.operation_idempotency_key, asset_id=child.scene_id, status="failed")
-            else:
-                job = await self._operations.start_asset(context, asset=asset, attempt=attempt, workflow_id=batch.batch_id, expected_operation_idempotency_key=child.operation_idempotency_key)
+            try:
+                asset = assets_by_id.get(child.scene_id)
+                if asset is None:
+                    job = ImageGenerationJob(job_id=child.operation_idempotency_key, asset_id=child.scene_id, status="failed")
+                else:
+                    job = await self._operations.start_asset(context, asset=asset, attempt=attempt, workflow_id=batch.batch_id, expected_operation_idempotency_key=child.operation_idempotency_key)
+            except Exception as exc:  # noqa: BLE001 - 子项失败必须收口，不能遗留 starting。
+                logger.warning(
+                    "image_batch_child_start_failed batch_id=%s child_key=%s error_type=%s",
+                    batch.batch_id,
+                    child.operation_idempotency_key,
+                    type(exc).__name__,
+                )
+                job = ImageGenerationJob(
+                    job_id=child.operation_idempotency_key,
+                    asset_id=child.scene_id,
+                    status="failed",
+                )
             if job.status == "succeeded":
                 await self._batches.mark_child_terminal(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, status="succeeded", job_id=job.job_id)
             elif job.status == "polling":
@@ -205,26 +224,52 @@ class M06ImageGenerationBatchDispatcherWorker:
         dispatched = 0
         for batch in await self._batches.list_dispatchable_batches(limit=100):
             credential = await self._credentials.get(batch_id=batch.batch_id)
-            if credential is None or batch.run_id is None or batch.tool_call_id is None or batch.attempt is None:
+            if credential is None:
+                # 授权仅允许进程内短暂保存。进程重启后，已领取但尚未启动的
+                # 子项无法安全重放，必须转失败而不是永久卡在 starting。
+                stale_children = tuple(child for child in batch.children if child.status == "starting")
+                for child in stale_children:
+                    await self._batches.mark_child_terminal(
+                        batch_id=batch.batch_id,
+                        child_key=child.operation_idempotency_key,
+                        status="failed",
+                        job_id=child.job_id or child.operation_idempotency_key,
+                    )
+                if stale_children:
+                    logger.warning(
+                        "image_batch_starting_credential_missing batch_id=%s children=%s",
+                        batch.batch_id,
+                        len(stale_children),
+                    )
+                continue
+            if batch.run_id is None or batch.tool_call_id is None or batch.attempt is None:
+                logger.warning("image_batch_dispatch_identity_missing batch_id=%s", batch.batch_id)
                 continue
             workspace = await self._videos.get_workspace(batch.user_id, batch.workspace_id)
             if workspace is None or workspace.conversation_id != batch.conversation_id:
                 continue
             payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
             assets = {str(item.get("asset_id") or "").strip(): item for item in payload.get("asset_registry", []) if isinstance(item, Mapping)}
-            await self._dispatcher.dispatch_start_slots(
-                batch=batch,
-                context=VideoToolContext(
-                    user_id=batch.user_id,
-                    workspace=workspace,
-                    run_id=batch.run_id,
-                    tool_call_id=batch.tool_call_id,
-                    credential=credential,
-                ),
-                assets_by_id=assets,
-                attempt=batch.attempt,
-            )
-            dispatched += 1
+            try:
+                await self._dispatcher.dispatch_start_slots(
+                    batch=batch,
+                    context=VideoToolContext(
+                        user_id=batch.user_id,
+                        workspace=workspace,
+                        run_id=batch.run_id,
+                        tool_call_id=batch.tool_call_id,
+                        credential=credential,
+                    ),
+                    assets_by_id=assets,
+                    attempt=batch.attempt,
+                )
+                dispatched += 1
+            except Exception as exc:  # noqa: BLE001 - 单批次异常不得中断其它批次扫描。
+                logger.warning(
+                    "image_batch_dispatch_failed batch_id=%s error_type=%s",
+                    batch.batch_id,
+                    type(exc).__name__,
+                )
         return dispatched
 
     async def start(self) -> None:
