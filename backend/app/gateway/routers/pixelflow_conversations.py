@@ -1126,13 +1126,20 @@ async def respond_to_harness_interrupt(
             **({"content": body.content} if body.content is not None else {}),
             **({"fields": dict(body.fields)} if body.fields else {}),
         }
-        responded = await repository.respond_interrupt(
-            interrupt_id=interrupt_id,
-            binding=original,
-            client_response_id=str(body.client_response_id),
-            expected_workspace_revision=body.expected_workspace_revision,
-            response_payload=payload,
-        )
+        # 上一次请求可能已原子写入响应、却在创建恢复 Run 前进程故障。相同公开
+        # 响应可继续完成同一 response_id 的恢复绑定；不同内容仍禁止覆盖。
+        if interrupt.status == "responded":
+            if interrupt.response_payload != payload:
+                raise AgentToolBindingConflictError("同一 Harness 中断响应内容不一致")
+            responded = interrupt
+        else:
+            responded = await repository.respond_interrupt(
+                interrupt_id=interrupt_id,
+                binding=original,
+                client_response_id=str(body.client_response_id),
+                expected_workspace_revision=body.expected_workspace_revision,
+                response_payload=payload,
+            )
     except (LookupError, AgentToolBindingConflictError) as error:
         raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
     if responded.resumed_run_id is None:
@@ -1156,7 +1163,7 @@ async def respond_to_harness_interrupt(
         )
         responded = await repository.bind_interrupt_resume_run(
             interrupt_id=interrupt_id,
-            client_response_id=str(body.client_response_id),
+            client_response_id=responded.response_id or str(body.client_response_id),
             resumed_run_id=resumed_run_id,
         )
     await _publish_harness_interrupt_event(request, responded, closed=False)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -12,7 +14,7 @@ from starlette.requests import Request
 from app.gateway.routers import pixelflow_conversations
 from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
 from pixelflow.agent_harness import HarnessRunHandle
-from pixelflow.agent_tools.repository import HarnessInterruptRecord, RunBinding
+from pixelflow.agent_tools.repository import HarnessInterruptRecord, RunBinding, SQLAgentToolRepository
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 from pixelflow.video.contracts import VideoWorkspace
 
@@ -131,3 +133,95 @@ async def test_confirmation_resume_uses_gateway_run_bridge_and_current_workspace
     assert harness.request.workspace_revision == 21
     assert harness.request.max_output_tokens == 32_768
     assert projector.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_confirm_response_recovers_after_response_was_written_before_resume_run(monkeypatch) -> None:
+    """进程在响应落库后中断时，同内容的新点击必须补齐原 response_id 的恢复 Run。"""
+
+    workspace = VideoWorkspace(
+        workspace_id="workspace-confirmation-retry",
+        conversation_id="conversation-confirmation-retry",
+        revision=21,
+        payload={},
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    binding = RunBinding(
+        run_id="hrun_" + "f" * 32,
+        session_id="pfh_confirmation_retry",
+        user_id="confirmation-owner",
+        conversation_id=workspace.conversation_id,
+        workspace_id=workspace.workspace_id,
+        workspace_revision=17,
+        context_digest="sha256:" + "1" * 64,
+        toolset_version="agent-tools-v1",
+        tool_manifest_digest="sha256:" + "2" * 64,
+        request_digest="sha256:" + "3" * 64,
+    )
+    interrupt = HarnessInterruptRecord(
+        interrupt_id="hint_confirmation_retry",
+        tool_call_key="sha256:" + "4" * 64,
+        run_id=binding.run_id,
+        user_id=binding.user_id,
+        conversation_id=binding.conversation_id,
+        workspace_id=binding.workspace_id,
+        workspace_revision=17,
+        kind="awaiting_confirmation",
+        status="responded",
+        payload={"tool_name": "generate_scenes"},
+        response_id="response-written-before-crash",
+        resumed_run_id=None,
+        response_payload={"action": "confirm"},
+    )
+
+    class Repository(SQLAgentToolRepository):
+        def __init__(self) -> None:
+            self.bound_response_id = ""
+
+        async def get_run_binding_by_interrupt(self, _interrupt_id: str):
+            return binding
+
+        async def get_interrupt(self, _interrupt_id: str):
+            return interrupt
+
+        async def bind_interrupt_resume_run(self, *, client_response_id: str, **_kwargs):
+            self.bound_response_id = client_response_id
+            return replace(interrupt, resumed_run_id="hrun_" + "b" * 32)
+
+    repository = Repository()
+    app = FastAPI()
+    app.state.pixelflow_agent_tool_repository = repository
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "app": app})
+
+    async def current_user(_request):
+        return "confirmation-owner"
+
+    async def current_workspace(*_args, **_kwargs):
+        return workspace
+
+    async def start_resume(**_kwargs):
+        return "hrun_" + "b" * 32
+
+    async def publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(pixelflow_conversations, "get_current_user", current_user)
+    monkeypatch.setattr(pixelflow_conversations, "_require_conversation_workspace", current_workspace)
+    monkeypatch.setattr(pixelflow_conversations, "_start_harness_interrupt_resume", start_resume)
+    monkeypatch.setattr(pixelflow_conversations, "_publish_harness_interrupt_event", publish)
+
+    result = await pixelflow_conversations.respond_to_harness_interrupt(
+        conversation_id=workspace.conversation_id,
+        workspace_id=workspace.workspace_id,
+        interrupt_id=interrupt.interrupt_id,
+        body=pixelflow_conversations.HarnessInterruptSubmissionRequest(
+            client_response_id=uuid4(),
+            expected_workspace_revision=17,
+            action="confirm",
+        ),
+        request=request,
+    )
+
+    assert result.run_id == "hrun_" + "b" * 32
+    assert repository.bound_response_id == "response-written-before-crash"
