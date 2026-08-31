@@ -35,7 +35,7 @@ class GenerateImageAssetsTool:
         idempotency_mode=VideoToolIdempotencyMode.OPERATION,
         recovery_mode=VideoToolRecoveryMode.OPERATION,
         workspace_mutations=(),
-        model_observation_keys=("batch_ids", "asset_ids", "workspace_revision_required"),
+        model_observation_keys=("status", "batch_ids", "asset_ids", "workspace_revision_required"),
     )
 
     def __init__(self, *, batch_operation_port: object | None = None) -> None:

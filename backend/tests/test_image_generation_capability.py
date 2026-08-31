@@ -89,6 +89,25 @@ async def test_generate_image_assets_creates_batch_for_planned_assets() -> None:
     assert batch[0].children[0].scene_id == "asset-character-host"
 
 
+@pytest.mark.asyncio
+async def test_generate_image_assets_unavailable_result_matches_manifest_observation_contract() -> None:
+    workspace = VideoWorkspace(
+        workspace_id="workspace-images-unavailable",
+        conversation_id="conversation-images-unavailable",
+        revision=1,
+        payload={"asset_registry": []},
+    )
+    tool = GenerateImageAssetsTool()
+
+    result = await tool.execute(
+        VideoToolContext(user_id="user", workspace=workspace),
+        {"asset_ids": ["asset-character-host"]},
+    )
+
+    assert result.model_observation == {"status": "unavailable", "asset_ids": ["asset-character-host"]}
+    assert set(result.model_observation).issubset(tool.spec.model_observation_keys)
+
+
 def test_image_generation_request_uses_workspace_ratio_2k_and_asset_prompt() -> None:
     request = _image_generation_request(
         {
