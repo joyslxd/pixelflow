@@ -217,6 +217,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from pixelflow.operations.jobs.batch_repository import (
                 SQLOperationBatchRepository,
             )
+            from pixelflow.platform.content_app_authorization import (
+                TransientContentAppAuthorizationStore,
+            )
 
             agent_tool_repository = SQLAgentToolRepository(task_store.session_factory)
             batch_repository = SQLOperationBatchRepository(task_store.session_factory)
@@ -251,9 +254,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_transient_batch_credential_store = (
                 batch_credential_store
             )
+            content_app_authorization_store = TransientContentAppAuthorizationStore()
+            app.state.pixelflow_transient_content_app_authorization_store = (
+                content_app_authorization_store
+            )
             provider_settings = ContentAppVideoProviderSettings.from_env()
             video_provider = (
-                ContentAppVideoGenerationProvider(provider_settings)
+                ContentAppVideoGenerationProvider(
+                    provider_settings,
+                    authorization_store=content_app_authorization_store,
+                )
                 if provider_settings is not None
                 else None
             )
@@ -494,6 +504,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_operation_batch_terminal_worker = None
             app.state.pixelflow_transient_run_credential_store = None
             app.state.pixelflow_transient_batch_credential_store = None
+            app.state.pixelflow_transient_content_app_authorization_store = None
             app.state.pixelflow_operation_batch_dispatcher_worker = None
             app.state.pixelflow_video_generation_provider = None
             app.state.pixelflow_image_generation_provider = None
@@ -516,6 +527,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_operation_batch_terminal_worker = None
             app.state.pixelflow_transient_run_credential_store = None
             app.state.pixelflow_transient_batch_credential_store = None
+            app.state.pixelflow_transient_content_app_authorization_store = None
             app.state.pixelflow_operation_batch_dispatcher_worker = None
             app.state.pixelflow_video_generation_provider = None
             app.state.pixelflow_image_generation_provider = None
@@ -589,6 +601,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             if transient_batch_credential_store is not None:
                 await transient_batch_credential_store.aclose()
+            transient_content_app_authorization_store = getattr(
+                app.state,
+                "pixelflow_transient_content_app_authorization_store",
+                None,
+            )
+            if transient_content_app_authorization_store is not None:
+                await transient_content_app_authorization_store.aclose()
             video_generation_provider = getattr(
                 app.state,
                 "pixelflow_video_generation_provider",

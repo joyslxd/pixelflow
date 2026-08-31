@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -18,6 +17,9 @@ from pixelflow.operations.jobs.providers import (
     ProviderJobAdapter,
     ProviderJobMappingError,
     ProviderJobSnapshot,
+)
+from pixelflow.platform.content_app_authorization import (
+    TransientContentAppAuthorizationStore,
 )
 
 _MODE_ENDPOINTS = {
@@ -64,42 +66,6 @@ class _ContentAppHTTPError(RuntimeError):
         super().__init__("content_app_provider_request_failed")
 
 
-class _TransientStatusAuthorizationCache:
-    """仅在 Gateway 进程内短暂保留创建任务的浏览器 Authorization。"""
-
-    def __init__(self, *, ttl: timedelta = timedelta(hours=1)) -> None:
-        self._ttl = ttl
-        self._values: dict[str, tuple[str, datetime]] = {}
-        self._lock = asyncio.Lock()
-
-    async def put(self, *, provider_job_id: str, authorization: str) -> None:
-        async with self._lock:
-            self._discard_expired_locked()
-            self._values[provider_job_id] = (authorization, datetime.now(UTC) + self._ttl)
-
-    async def borrow(self, *, provider_job_id: str) -> str:
-        async with self._lock:
-            self._discard_expired_locked()
-            item = self._values.get(provider_job_id)
-            if item is None:
-                raise ProviderJobMappingError("provider_status_authorization_unavailable")
-            return item[0]
-
-    async def discard(self, *, provider_job_id: str) -> None:
-        async with self._lock:
-            self._values.pop(provider_job_id, None)
-
-    async def aclose(self) -> None:
-        async with self._lock:
-            self._values.clear()
-
-    def _discard_expired_locked(self) -> None:
-        now = datetime.now(UTC)
-        expired = [job_id for job_id, (_authorization, expires_at) in self._values.items() if expires_at <= now]
-        for job_id in expired:
-            self._values.pop(job_id, None)
-
-
 @dataclass(frozen=True)
 class ContentAppVideoProviderSettings:
     """部署环境注入的 Provider 连接配置；用户凭据不属于此配置。"""
@@ -137,6 +103,7 @@ class ContentAppVideoGenerationProvider:
         settings: ContentAppVideoProviderSettings,
         *,
         client: httpx.AsyncClient | None = None,
+        authorization_store: TransientContentAppAuthorizationStore | None = None,
     ) -> None:
         self._settings = settings
         self.provider_id = settings.provider_id
@@ -144,7 +111,8 @@ class ContentAppVideoGenerationProvider:
         self._owns_client = client is None
         # 用途：复用浏览器请求的 content-app Authorization 轮询同一异步任务；影响：
         # 凭据仅存在于 Gateway 内存，进程重启或一小时后必须由用户重新发起授权。
-        self._status_authorizations = _TransientStatusAuthorizationCache()
+        self._authorization_store = authorization_store or TransientContentAppAuthorizationStore()
+        self._owns_authorization_store = authorization_store is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=settings.connect_timeout_seconds,
@@ -207,7 +175,7 @@ class ContentAppVideoGenerationProvider:
             )
             snapshot = _to_snapshot(_raise_or_json(response), expected_job_id=None)
             if snapshot.provider_job_id is not None and snapshot.outcome.value == "polling":
-                await self._status_authorizations.put(
+                await self._authorization_store.put_job(
                     provider_job_id=snapshot.provider_job_id,
                     authorization=user_authorization,
                 )
@@ -228,9 +196,15 @@ class ContentAppVideoGenerationProvider:
     ) -> ProviderJobSnapshot:
         """轮询只读取部署服务 Authorization，绝不读取或复用用户 Authorization。"""
 
-        del user_id, conversation_id
+        del conversation_id
         job_id = _required_identifier(provider_job_id)
-        user_authorization = await self._status_authorizations.borrow(provider_job_id=job_id)
+        try:
+            user_authorization = await self._authorization_store.borrow(
+                provider_job_id=job_id,
+                user_id=user_id,
+            )
+        except LookupError as exc:
+            raise ProviderJobMappingError("provider_status_authorization_unavailable") from exc
         try:
             response = await self._client.get(
                 self._url(_STATUS_ENDPOINT.format(provider_job_id=job_id)),
@@ -238,13 +212,13 @@ class ContentAppVideoGenerationProvider:
             )
             snapshot = _to_snapshot(_raise_or_json(response), expected_job_id=job_id)
             if snapshot.outcome.value != "polling":
-                await self._status_authorizations.discard(provider_job_id=job_id)
+                await self._authorization_store.discard_job(provider_job_id=job_id)
             return snapshot
         except _ContentAppHTTPError as exc:
             if exc.status_code == 402:
                 return _quota_snapshot(provider_job_id=job_id)
             if exc.status_code == 404:
-                await self._status_authorizations.discard(provider_job_id=job_id)
+                await self._authorization_store.discard_job(provider_job_id=job_id)
                 return _expired_snapshot(job_id)
             raise
         finally:
@@ -253,7 +227,8 @@ class ContentAppVideoGenerationProvider:
     async def aclose(self) -> None:
         """仅关闭本 Adapter 自建的 HTTP Client。"""
 
-        await self._status_authorizations.aclose()
+        if self._owns_authorization_store:
+            await self._authorization_store.aclose()
         if self._owns_client:
             await self._client.aclose()
 

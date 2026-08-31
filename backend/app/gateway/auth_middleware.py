@@ -117,6 +117,17 @@ class AuthMiddleware:
         # 过滤，后者让 @require_permission 不必在同一请求里再次执行 JWT decode + DB 查询。
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+        authorization_store = getattr(
+            getattr(scope.get("app"), "state", None),
+            "pixelflow_transient_content_app_authorization_store",
+            None,
+        )
+        put_user_authorization = getattr(authorization_store, "put_user", None)
+        if callable(put_user_authorization):
+            await put_user_authorization(
+                user_id=str(user.id),
+                authorization=authorization,
+            )
         user_token = set_current_user(user)
         content_app_token = set_current_content_app_auth(authorization, username=getattr(user, "username", str(user.id)))
         # 内部调试用 trace：前端在生成类请求上带的 X-Conversation-Id，
