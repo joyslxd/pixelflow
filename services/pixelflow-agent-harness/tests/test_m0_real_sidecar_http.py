@@ -50,7 +50,14 @@ def _request_payload(*, user_input: str = "请用不超过六个汉字说明连�
             "require_verified_model_profile": True,
             "policy_digest": "sha256:m0-real-budget",
         },
-        "limits": {"max_model_steps": 8, "max_business_tools": 3, "deadline_seconds": 90},
+        "limits": {
+            "profile": "m0_real_tool_v1",
+            "digest": "sha256:430ab64beb0161d31afe22764dd1074e28fe264d05690ef4ecffe58c3312a2c6",
+            "max_model_steps": 8,
+            "max_business_tools": 3,
+            "max_billable_batch_starts": 0,
+            "deadline_seconds": 90,
+        },
         "toolset": {"version": "agent-tools-v1", "manifest_digest": "sha256:m0-real-manifest"},
         "context": {
             "system_instruction": "你是 PixelFlow 的安全测试 Agent。不要调用未声明能力。",
@@ -261,8 +268,20 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-http",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
             "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
                 "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
+                {
+                    "m0_real_tool_v1": {
+                        "deadline_seconds": 90,
+                        "max_model_steps": 8,
+                        "max_business_tools": 3,
+                        "max_billable_batch_starts": 0,
+                    }
+                },
+                separators=(",", ":"),
             ),
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": source_root,
@@ -421,9 +440,21 @@ def test_real_sidecar_http_calls_external_read_capability_with_direct_deepseek(
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-tool-calling",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-flash-vision-exp",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
             "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
                 "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
+                {
+                    "m0_real_tool_v1": {
+                        "deadline_seconds": 90,
+                        "max_model_steps": 8,
+                        "max_business_tools": 3,
+                        "max_billable_batch_starts": 0,
+                    }
+                },
+                separators=(",", ":"),
             ),
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
@@ -518,8 +549,20 @@ def test_real_sidecar_kill_restart_safely_closes_unfinished_run(tmp_path: Path) 
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-restart",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
             "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
                 "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
+                {
+                    "m0_real_tool_v1": {
+                        "deadline_seconds": 90,
+                        "max_model_steps": 8,
+                        "max_business_tools": 3,
+                        "max_billable_batch_starts": 0,
+                    }
+                },
+                separators=(",", ":"),
             ),
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
