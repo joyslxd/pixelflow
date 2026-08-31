@@ -39,7 +39,7 @@ class VideoGenerationProvider(Protocol):
         user_id: str,
         conversation_id: str,
     ) -> ProviderJobSnapshot:
-        """重启后仅用部署服务凭据查询既有 Job。"""
+        """用创建该任务的进程内用户授权查询既有 Job；凭据不持久化。"""
 
 
 __all__ = ["VideoGenerationProvider"]

@@ -9,7 +9,7 @@ from pixelflow.capabilities.video_generation.providers.content_app import (
     ContentAppVideoGenerationProvider,
     ContentAppVideoProviderSettings,
 )
-from pixelflow.operations.jobs.providers import ProviderJobOutcome
+from pixelflow.operations.jobs.providers import ProviderJobMappingError, ProviderJobOutcome
 
 
 def _provider(handler) -> ContentAppVideoGenerationProvider:
@@ -26,8 +26,8 @@ def _provider(handler) -> ContentAppVideoGenerationProvider:
 
 
 @pytest.mark.asyncio
-async def test_start_and_status_use_separate_authorizations(monkeypatch) -> None:
-    """start 使用用户授权；恢复 status 只使用环境注入的服务授权。"""
+async def test_start_and_status_reuse_browser_authorization_without_environment_secret() -> None:
+    """start 与 status 复用同一浏览器 Authorization，配置文件不保存用户凭据。"""
 
     requests: list[httpx.Request] = []
 
@@ -51,7 +51,6 @@ async def test_start_and_status_use_separate_authorizations(monkeypatch) -> None
             },
         )
 
-    monkeypatch.setenv("PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION", "Bearer service-status-token")
     provider = _provider(handler)
     request = provider.prepare_operation_request(
         {
@@ -88,17 +87,33 @@ async def test_start_and_status_use_separate_authorizations(monkeypatch) -> None
     assert requests[0].headers["billType"] == "3"
     assert requests[0].headers["duration"] == "5"
     assert json.loads(requests[0].headers["apiModelParamObj"]) == {"size": "720p"}
-    assert requests[1].headers["Authorization"] == "Bearer service-status-token"
+    assert requests[1].headers["Authorization"] == "Bearer user-start-token"
     body = json.loads(requests[0].content)
     assert body["videoCount"] == 1
     assert body["sound"] == "on"
 
 
 @pytest.mark.asyncio
-async def test_402_and_expired_map_to_stable_outcomes(monkeypatch) -> None:
+async def test_status_fails_closed_when_browser_authorization_lease_is_absent() -> None:
+    """未由本进程创建的任务不能借用或猜测其他用户 Authorization。"""
+
+    provider = _provider(lambda _request: httpx.Response(500))
+
+    with pytest.raises(ProviderJobMappingError, match="provider_status_authorization_unavailable"):
+        await provider.status("task-without-lease", user_id="user", conversation_id="conversation")
+
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_402_and_expired_map_to_stable_outcomes() -> None:
     """402 与缺失任务不泄露下游正文，分别映射额度暂停和 expired。"""
 
-    responses = iter((httpx.Response(402), httpx.Response(404)))
+    responses = iter((
+        httpx.Response(402),
+        httpx.Response(200, json={"success": True, "data": {"taskId": "task-expired", "status": "processing"}}),
+        httpx.Response(404),
+    ))
     provider = _provider(lambda _request: next(responses))
     request = provider.prepare_operation_request(
         {
@@ -114,19 +129,24 @@ async def test_402_and_expired_map_to_stable_outcomes(monkeypatch) -> None:
             "audio_urls": [],
         }
     )
-    monkeypatch.setenv("PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION", "Bearer service-status-token")
     paused = await provider.start(
         request,
         authorization="Bearer user-start-token",
         idempotency_key="operation:v1:test-402",
     )
-    expired = await provider.status("task-missing", user_id="user", conversation_id="conversation")
+    started = await provider.start(
+        request,
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:test-expired",
+    )
+    expired = await provider.status("task-expired", user_id="user", conversation_id="conversation")
     await provider.aclose()
 
     assert paused.outcome is ProviderJobOutcome.PAUSED_QUOTA
     assert paused.provider_job_id is None
+    assert started.outcome is ProviderJobOutcome.POLLING
     assert expired.outcome is ProviderJobOutcome.EXPIRED
-    assert expired.provider_job_id == "task-missing"
+    assert expired.provider_job_id == "task-expired"
 
 
 @pytest.mark.asyncio

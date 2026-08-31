@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -63,6 +64,42 @@ class _ContentAppHTTPError(RuntimeError):
         super().__init__("content_app_provider_request_failed")
 
 
+class _TransientStatusAuthorizationCache:
+    """仅在 Gateway 进程内短暂保留创建任务的浏览器 Authorization。"""
+
+    def __init__(self, *, ttl: timedelta = timedelta(hours=1)) -> None:
+        self._ttl = ttl
+        self._values: dict[str, tuple[str, datetime]] = {}
+        self._lock = asyncio.Lock()
+
+    async def put(self, *, provider_job_id: str, authorization: str) -> None:
+        async with self._lock:
+            self._discard_expired_locked()
+            self._values[provider_job_id] = (authorization, datetime.now(UTC) + self._ttl)
+
+    async def borrow(self, *, provider_job_id: str) -> str:
+        async with self._lock:
+            self._discard_expired_locked()
+            item = self._values.get(provider_job_id)
+            if item is None:
+                raise ProviderJobMappingError("provider_status_authorization_unavailable")
+            return item[0]
+
+    async def discard(self, *, provider_job_id: str) -> None:
+        async with self._lock:
+            self._values.pop(provider_job_id, None)
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            self._values.clear()
+
+    def _discard_expired_locked(self) -> None:
+        now = datetime.now(UTC)
+        expired = [job_id for job_id, (_authorization, expires_at) in self._values.items() if expires_at <= now]
+        for job_id in expired:
+            self._values.pop(job_id, None)
+
+
 @dataclass(frozen=True)
 class ContentAppVideoProviderSettings:
     """部署环境注入的 Provider 连接配置；用户凭据不属于此配置。"""
@@ -93,7 +130,7 @@ class ContentAppVideoProviderSettings:
 
 
 class ContentAppVideoGenerationProvider:
-    """将稳定场景生成请求映射到 content-app，并用服务凭据恢复轮询。"""
+    """将稳定场景生成请求映射到 content-app，并复用浏览器授权轮询。"""
 
     def __init__(
         self,
@@ -105,6 +142,9 @@ class ContentAppVideoGenerationProvider:
         self.provider_id = settings.provider_id
         self.profile_version = settings.profile_version
         self._owns_client = client is None
+        # 用途：复用浏览器请求的 content-app Authorization 轮询同一异步任务；影响：
+        # 凭据仅存在于 Gateway 内存，进程重启或一小时后必须由用户重新发起授权。
+        self._status_authorizations = _TransientStatusAuthorizationCache()
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=settings.connect_timeout_seconds,
@@ -165,7 +205,13 @@ class ContentAppVideoGenerationProvider:
                 },
                 json=body,
             )
-            return _to_snapshot(_raise_or_json(response), expected_job_id=None)
+            snapshot = _to_snapshot(_raise_or_json(response), expected_job_id=None)
+            if snapshot.provider_job_id is not None and snapshot.outcome.value == "polling":
+                await self._status_authorizations.put(
+                    provider_job_id=snapshot.provider_job_id,
+                    authorization=user_authorization,
+                )
+            return snapshot
         except _ContentAppHTTPError as exc:
             if exc.status_code == 402:
                 return _quota_snapshot()
@@ -184,25 +230,30 @@ class ContentAppVideoGenerationProvider:
 
         del user_id, conversation_id
         job_id = _required_identifier(provider_job_id)
-        service_authorization = _status_authorization()
+        user_authorization = await self._status_authorizations.borrow(provider_job_id=job_id)
         try:
             response = await self._client.get(
                 self._url(_STATUS_ENDPOINT.format(provider_job_id=job_id)),
-                headers={"Authorization": service_authorization},
+                headers={"Authorization": user_authorization},
             )
-            return _to_snapshot(_raise_or_json(response), expected_job_id=job_id)
+            snapshot = _to_snapshot(_raise_or_json(response), expected_job_id=job_id)
+            if snapshot.outcome.value != "polling":
+                await self._status_authorizations.discard(provider_job_id=job_id)
+            return snapshot
         except _ContentAppHTTPError as exc:
             if exc.status_code == 402:
                 return _quota_snapshot(provider_job_id=job_id)
             if exc.status_code == 404:
+                await self._status_authorizations.discard(provider_job_id=job_id)
                 return _expired_snapshot(job_id)
             raise
         finally:
-            service_authorization = ""
+            user_authorization = ""
 
     async def aclose(self) -> None:
         """仅关闭本 Adapter 自建的 HTTP Client。"""
 
+        await self._status_authorizations.aclose()
         if self._owns_client:
             await self._client.aclose()
 
@@ -516,11 +567,6 @@ def _bearer(value: str) -> str:
     if not normalized.startswith("Bearer ") or not normalized.removeprefix("Bearer ").strip():
         raise ProviderJobMappingError("provider_start_authorization_missing")
     return normalized
-
-
-def _status_authorization() -> str:
-    value = os.environ.get("PIXELFLOW_CONTENT_APP_STATUS_AUTHORIZATION", "")
-    return _bearer(value)
 
 
 def _required_identifier(value: str) -> str:
