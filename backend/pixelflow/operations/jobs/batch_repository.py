@@ -79,6 +79,14 @@ class OperationBatchRepository(Protocol):
     async def mark_child_terminal(self, *, batch_id: str, child_key: str, status: ChildStatus, job_id: str) -> OperationBatchRecord: ...
 
     async def get_batch_for_child_job(self, *, user_id: str, conversation_id: str, job_id: str) -> OperationBatchRecord | None: ...
+    async def get_batch(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        batch_id: str,
+    ) -> OperationBatchRecord | None: ...
 
 
 class MemoryOperationBatchRepository:
@@ -246,6 +254,27 @@ class MemoryOperationBatchRepository:
                     record.user_id == user_id
                     and record.conversation_id == conversation_id
                     and any(child.job_id == job_id for child in record.children)
+                ):
+                    return record
+            return None
+
+    async def get_batch(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        batch_id: str,
+    ) -> OperationBatchRecord | None:
+        """按权威 owner、会话和工作区读取批次，拒绝跨 Workspace 枚举。"""
+
+        async with self._lock:
+            for record in self._records.values():
+                if (
+                    record.batch_id == batch_id
+                    and record.user_id == user_id
+                    and record.conversation_id == conversation_id
+                    and record.workspace_id == workspace_id
                 ):
                     return record
             return None
@@ -463,6 +492,38 @@ class SQLOperationBatchRepository:
             batch = await session.get(PixelFlowOperationBatchRow, row.batch_id)
             if batch is None:
                 raise AgentRuntimeRecordConflictError("OperationBatch 子项缺少父批次")
+            children = list(
+                (
+                    await session.scalars(
+                        select(PixelFlowOperationBatchChildRow).where(
+                            PixelFlowOperationBatchChildRow.batch_id == batch.batch_id
+                        )
+                    )
+                ).all()
+            )
+            return _record(batch, children)
+
+    async def get_batch(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        batch_id: str,
+    ) -> OperationBatchRecord | None:
+        """按已验证的业务归属读取单一批次，不向模型开放列表扫描。"""
+
+        async with self._session_factory() as session:
+            batch = await session.scalar(
+                select(PixelFlowOperationBatchRow).where(
+                    PixelFlowOperationBatchRow.batch_id == batch_id,
+                    PixelFlowOperationBatchRow.user_id == user_id,
+                    PixelFlowOperationBatchRow.conversation_id == conversation_id,
+                    PixelFlowOperationBatchRow.workspace_id == workspace_id,
+                )
+            )
+            if batch is None:
+                return None
             children = list(
                 (
                     await session.scalars(

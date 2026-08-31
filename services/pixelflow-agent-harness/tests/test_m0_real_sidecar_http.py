@@ -1,4 +1,4 @@
-"""通过真实进程、HTTP、SQLite 与 Ark 模型验证最小 Sidecar Run 链路。"""
+"""通过真实进程、HTTP、SQLite 与当前配置模型验证最小 Sidecar Run 链路。"""
 
 from __future__ import annotations
 

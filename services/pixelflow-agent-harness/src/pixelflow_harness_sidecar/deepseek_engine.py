@@ -253,6 +253,20 @@ def build_deepseek_harness_config(
         # 用途：把 Gateway 冻结的计费批次上限传给 Sidecar Policy；影响：模型无法在单个 Run 内绕过 M5 费用边界。
         "PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS": str(request.limits.max_billable_batch_starts),
         "PIXELFLOW_HARNESS_DEADLINE_SECONDS": str(request.limits.deadline_seconds),
+        # 用途：向 Cordis Context Policy 提供 Gateway 已冻结的业务投影；影响：插件在
+        # Engine 启动前验证它，且不接触模型 Provider、凭据或运行时环境字段。
+        "PIXELFLOW_HARNESS_CONTEXT_PROJECTION_JSON": json.dumps(
+            {
+                "conversation": request.context.conversation_projection,
+                "workspace": request.context.workspace_projection,
+                "preferences": request.context.preference_projection,
+                "brand_profile": request.context.brand_profile_projection,
+                "long_term_memory": request.context.long_term_memory_projection,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
     return config_factory(
         provider="deepseek-official",

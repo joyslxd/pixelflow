@@ -32,6 +32,19 @@ export function apply(ctx, config = {}) {
     if (!Number.isSafeInteger(max) || max < 1)
         throw new Error("context_policy_config_invalid");
     const policy = new ContextPolicy(max);
+    // Composition 启动时验证本 Run 的冻结投影，使 Policy 在真实 Engine 调用前生效。
+    if (config.projection !== undefined)
+        policy.validate(config.projection);
     const release = ctx.provide("pixelflowContextPolicy", policy);
-    return () => { policy.dispose(); release(); };
+    // `agent/request` 的完整载荷包含 Runtime/Provider 元数据，不能把它当成业务上下文
+    // 直接校验。只有 Gateway 明确标记的投影才属于本 Policy 的输入边界。
+    const stopValidation = ctx.on("agent/request", (payload, next) => {
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+            const projection = payload.pixelflow_context_projection;
+            if (projection !== undefined)
+                policy.validate(projection);
+        }
+        return typeof next === "function" ? next() : undefined;
+    });
+    return () => { stopValidation(); policy.dispose(); release(); };
 }

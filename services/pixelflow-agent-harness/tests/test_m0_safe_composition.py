@@ -115,7 +115,7 @@ def test_fixed_sdk_performs_real_ark_deepseek_turn(tmp_path: Path) -> None:
         pytest.skip("缺少仅用于测试的 DEEPSEEK_API_KEY")
     base_url = os.environ.get("DEEPSEEK_BASE_URL")
     if not base_url:
-        pytest.skip("缺少 Ark OpenAI 兼容端点 DEEPSEEK_BASE_URL")
+        pytest.skip("缺少当前部署的 DEEPSEEK_BASE_URL")
 
     deepseek_harness = pytest.importorskip("deepseek_harness")
     root = tmp_path / "agent-home"

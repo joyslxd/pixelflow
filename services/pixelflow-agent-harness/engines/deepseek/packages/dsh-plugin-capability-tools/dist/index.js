@@ -6,7 +6,7 @@ const BROKER_REQUEST_TIMEOUT_MS = 60_000;
 /** 声明供 Cordis Loader 识别的稳定 Plugin 名称。 */
 export const name = "pixelflow-capability-tools";
 /** 声明 Plugin 只依赖官方 Tool Registry。 */
-export const inject = ["tools", "pixelflowRunPolicy"];
+export const inject = ["tools", "pixelflowRunPolicy", "pixelflowEventBridge"];
 /** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
 export function apply(ctx) {
     const manifest = frozenManifestFromEnvironment();
@@ -43,6 +43,9 @@ export function apply(ctx) {
                 const activeSettings = settings ??= settingsFromEnvironment();
                 const expectedRevision = workspaceRevision ??= activeSettings.workspaceRevision;
                 const observation = await callBroker(tool, args, String(exec.callId), activeSettings, expectedRevision);
+                // 公开 Tool 摘要必须经过 Event Bridge；不安全文本在 Sidecar 内拒绝，不能进入
+                // Runtime 输出、Run Event Store 或 Gateway Outbox。
+                ctx.pixelflowEventBridge.publish({ type: "public_summary", text: observation.public_summary });
                 workspaceRevision = nextWorkspaceRevision(observation, expectedRevision);
                 if (tool.cost_level === "billable" && observation.status === "pending_operation") {
                     ctx.pixelflowRunPolicy.assertBillableBatchStart();
@@ -119,7 +122,7 @@ function validateManifestTool(value) {
     };
 }
 function isCostLevel(value) {
-    return value === "none" || value === "billable";
+    return value === "none" || value === "external_read" || value === "billable" || value === "destructive";
 }
 /** 通过唯一 Gateway Broker 执行调用，Sidecar 不直连 Repository、Provider 或文件系统。 */
 async function callBroker(tool, args, toolCallId, settings, workspaceRevision) {

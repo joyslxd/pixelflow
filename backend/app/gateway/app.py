@@ -312,12 +312,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     plan_repository=video_agent_repository,
                     scene_generation_batch_operation_port=scene_batch_port,
                     video_understanding_port=video_understanding_adapter,
+                    operation_batch_repository=batch_repository,
                 )
             else:
                 app.state.pixelflow_operation_batch_dispatcher_worker = None
                 video_tools = runtime_video_tool_registry(
                     plan_repository=video_agent_repository,
                     video_understanding_port=video_understanding_adapter,
+                    operation_batch_repository=batch_repository,
                 )
             if image_provider is not None:
                 from pixelflow.video.adapters.operations import (
@@ -353,6 +355,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     scene_generation_batch_operation_port=scene_batch_port if video_provider is not None else None,
                     video_understanding_port=video_understanding_adapter,
                     image_generation_batch_operation_port=image_batch_port,
+                    operation_batch_repository=batch_repository,
                 )
             else:
                 app.state.pixelflow_image_batch_dispatcher_worker = None

@@ -355,6 +355,9 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
 
     assert {item["name"] for item in manifest().tools} >= {
         "inspect_video_workspace",
+        "inspect_operation_batch",
+        "review_generated_scenes",
+        "compose_or_export_video",
         "inspect_scene",
         "patch_scene",
         "replace_scene_asset",

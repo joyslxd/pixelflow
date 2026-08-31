@@ -20,4 +20,4 @@ python -m ruff check src tests
 
 本地 macOS ARM64 与 Linux 服务器都必须使用同一 `uv.lock`。生产镜像在原生 Linux 架构执行 `uv sync --locked`，不得复制本机 macOS Runtime 二进制；本机若 `uv` 在 Rosetta x86_64 下运行，应使用 ARM64 Python venv 执行 M0 Runtime 测试。环境变量逐项含义、默认值、重启影响和 Secret 要求见 [配置说明](CONFIGURATION.md)。
 
-真实模型 M0 用例默认跳过，避免本地全量测试意外消耗 token。仅在隔离测试账号已由 Secret Manager 或进程环境注入后，显式设置 `PIXELFLOW_RUN_REAL_M0=1`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3` 和可选的 `PIXELFLOW_M0_DEEPSEEK_MODEL`，再执行 `python -m pytest -m m0_real -q`。测试只报告终态和非空回复，不写入 API key、用户正文或模型原始响应；该用例只验证官方 Composition 的真实模型 Turn，不能替代 Gateway、Tool Broker、Repository 和 SSE 的完整 M0 准入链路。
+真实模型 M0 用例默认跳过，避免本地全量测试意外消耗 token。仅在隔离测试账号已由 Secret Manager 或进程环境注入后，显式设置 `PIXELFLOW_RUN_REAL_M0=1`、`DEEPSEEK_API_KEY`、当前部署使用的 `DEEPSEEK_BASE_URL` 和可选的 `PIXELFLOW_M0_DEEPSEEK_MODEL`，再执行 `python -m pytest -m m0_real -q`。测试只报告终态和非空回复，不写入 API key、用户正文或模型原始响应；该用例只验证官方 Composition 的真实模型 Turn，不能替代 Gateway、Tool Broker、Repository 和 SSE 的完整 M0 准入链路。

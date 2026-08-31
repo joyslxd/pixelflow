@@ -8,6 +8,15 @@ interface RunPolicy {
     assertBillableBatchStart(): void;
     suspend(kind: SuspensionKind): void;
 }
+interface EventBridge {
+    publish(event: {
+        type: "public_summary" | "response";
+        text: string;
+    }): {
+        type: "public_summary" | "response";
+        text: string;
+    };
+}
 type SuspensionKind = "pending_operation" | "awaiting_confirmation" | "authorization_required";
 interface ToolDefinition {
     name: string;
@@ -40,5 +49,6 @@ export declare const inject: string[];
 /** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
 export declare function apply(ctx: ToolRegistryContext & {
     pixelflowRunPolicy: RunPolicy;
+    pixelflowEventBridge: EventBridge;
 }): void;
 export {};

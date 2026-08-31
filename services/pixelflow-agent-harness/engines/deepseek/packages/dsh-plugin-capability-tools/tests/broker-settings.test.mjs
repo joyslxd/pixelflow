@@ -40,17 +40,20 @@ globalThis.fetch = async (url, init) => {
 const { apply } = await import("../dist/index.js");
 const registered = [];
 const suspensions = [];
+const publicEvents = [];
 apply({
   tools: { register(tool) { registered.push(tool); } },
   pixelflowRunPolicy: {
     assertBillableBatchStart() {},
     suspend(kind) { suspensions.push(kind); },
   },
+  pixelflowEventBridge: { publish(event) { publicEvents.push(event); return event; } },
 });
 
 const result = await registered[0].execute({}, { callId: "call-1" });
 assert.equal(requestedUrl, "http://gateway:8001/agent/internal/agent-tools/calls");
 assert.equal(result.status, "completed");
+assert.deepEqual(publicEvents, [{ type: "public_summary", text: "已读取工作区。" }]);
 
 globalThis.fetch = async (_url, init) => {
   requestedBodies.push(JSON.parse(String(init.body)));

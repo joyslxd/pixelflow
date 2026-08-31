@@ -21,20 +21,23 @@
     # 用途：限制单 Run 墙钟时长（秒）；影响：超时后拒绝继续执行。
     deadlineSeconds: !!js "Number(process.env.PIXELFLOW_HARNESS_DEADLINE_SECONDS)"
 
-# 用途：加载真实 PixelFlow Capability Tool Plugin；只经内部 Broker 读取受绑定工作区，不授予模型数据库、文件或 Provider 权限。
-- id: pixelflow-capability-tools
-  name: '../packages/dsh-plugin-capability-tools/dist/index.js' # 用途：加载 PixelFlow Tool 插件；影响：模型仅能调用已发布 Manifest，挂起结果会停止本 Run。
-
 # 用途：校验 Gateway 输入的安全上下文投影；影响：凭据类字段或超长字符串会使 Run 失败关闭。
 - id: pixelflow-context-policy
   name: '../packages/dsh-plugin-context-policy/dist/index.js' # 用途：加载上下文安全策略；影响：不负责业务上下文拼装。
   config:
     # 用途：限制单个上下文字段长度；影响：超限内容不得进入 Harness。
     maxStringLength: 32000
+    # 用途：校验 Gateway 冻结的上下文投影；影响：不读取 Provider 或运行时元数据。
+    projection: !!js "JSON.parse(process.env.PIXELFLOW_HARNESS_CONTEXT_PROJECTION_JSON || '{}')"
 
 # 用途：提供公开事件的过滤服务；影响：reasoning、Prompt 和不安全文本不能进入稳定事件流。
 - id: pixelflow-event-bridge
   name: '../packages/dsh-plugin-event-bridge/dist/index.js' # 用途：加载公开事件桥；影响：不直接连接 Gateway SSE 或数据库。
+
+# 用途：加载真实 PixelFlow Capability Tool Plugin；只经内部 Broker 读取受绑定工作区，不授予模型数据库、文件或 Provider 权限。
+# 影响：依赖上方 Event Bridge 过滤公开摘要，模型仅能调用已发布 Manifest，挂起结果会停止本 Run。
+- id: pixelflow-capability-tools
+  name: '../packages/dsh-plugin-capability-tools/dist/index.js'
 
 # 用途：组装唯一原生 Agent loop；关闭动态工作区指令、Bash、通用后台任务和 Goal，避免 Sidecar 获得未授权能力。
 - id: agent-spine

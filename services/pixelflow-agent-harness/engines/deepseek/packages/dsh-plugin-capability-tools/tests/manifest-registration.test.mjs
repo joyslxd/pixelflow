@@ -11,6 +11,13 @@ process.env.PIXELFLOW_HARNESS_TOOL_MANIFEST_JSON = JSON.stringify({
   digest: `sha256:${"a".repeat(64)}`,
   tools: [
     {
+      name: "analyze_video",
+      description: "分析已授权视频",
+      parameters_schema: { type: "object", properties: { video_url: { type: "string" } } },
+      cost_level: "external_read",
+      confirmation_required: false,
+    },
+    {
       name: "inspect_video_workspace",
       description: "读取视频工作区",
       parameters_schema: { type: "object", properties: {} },
@@ -38,10 +45,11 @@ apply({
     assertBillableBatchStart() {},
     suspend() {},
   },
+  pixelflowEventBridge: { publish(event) { return event; } },
 });
 
-assert.deepEqual(registered.map((tool) => tool.name), ["inspect_video_workspace", "patch_scene"]);
-assert.deepEqual(registered[1].parameters, { type: "object", properties: { scene_id: { type: "string" } } });
+assert.deepEqual(registered.map((tool) => tool.name), ["analyze_video", "inspect_video_workspace", "patch_scene"]);
+assert.deepEqual(registered[2].parameters, { type: "object", properties: { scene_id: { type: "string" } } });
 assert.deepEqual(registered[0].output.schema.required, ["status", "public_summary", "model_observation"]);
 assert.deepEqual(registered[0].output.schema.properties.status.enum, [
   "completed",

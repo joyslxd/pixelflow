@@ -8,11 +8,13 @@ import pytest
 from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.image_assets import GenerateImageAssetsTool
 from pixelflow.agent_tools.video.image_asset_inspection import InspectImageAssetsTool
+from pixelflow.agent_tools.video.operation_batch import InspectOperationBatchTool
 from pixelflow.capabilities.image_generation import (
     ContentAppImageGenerationAdapter,
     ContentAppImageProviderSettings,
 )
 from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepository
+from pixelflow.operations.jobs.batch import build_operation_batch_plan
 from pixelflow.video.adapters.operations.images import M06ImageGenerationBatchOperationPort
 from pixelflow.video.adapters.operations.projector import build_image_asset_success_patch
 from pixelflow.video.contracts import VideoWorkspace
@@ -110,6 +112,50 @@ async def test_inspect_image_assets_reports_safe_per_asset_status() -> None:
     assert result.model_observation["failed"] == 1
     assert result.model_observation["can_generate_scenes"] is False
     assert "image_url" not in result.model_observation
+
+
+@pytest.mark.asyncio
+async def test_inspect_operation_batch_only_reads_current_workspace_batch() -> None:
+    repository = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "a" * 32,
+        tool_call_id="tool-batch-inspect",
+        scene_ids=("asset-character-host", "asset-kitchen"),
+        variant_count=1,
+        attempt=1,
+        stage_prefix="generate_image_asset",
+    )
+    batch = await repository.create_or_read(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images",
+        plan=plan,
+    )
+    first = (await repository.claim_children(batch_id=batch.batch_id, max_concurrent=1))[0]
+    await repository.mark_child_polling(
+        batch_id=batch.batch_id,
+        child_key=first.operation_idempotency_key,
+        job_id="operation:image:one",
+    )
+    result = await InspectOperationBatchTool(batch_repository=repository).execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-images",
+                conversation_id="conversation-images",
+                revision=1,
+            ),
+        ),
+        {"batch_id": batch.batch_id},
+    )
+
+    assert result.model_observation["batch_id"] == batch.batch_id
+    assert result.model_observation["total"] == 2
+    assert result.model_observation["polling"] == 1
+    assert any(
+        child["job_id"] == "operation:image:one"
+        for child in result.model_observation["children"]
+    )
 
 
 def json_load(value: bytes) -> object:

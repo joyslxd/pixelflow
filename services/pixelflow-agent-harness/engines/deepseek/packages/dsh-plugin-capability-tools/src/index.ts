@@ -11,6 +11,10 @@ interface RunPolicy {
   suspend(kind: SuspensionKind): void;
 }
 
+interface EventBridge {
+  publish(event: { type: "public_summary" | "response"; text: string }): { type: "public_summary" | "response"; text: string };
+}
+
 type SuspensionKind = "pending_operation" | "awaiting_confirmation" | "authorization_required";
 
 interface ToolDefinition {
@@ -70,10 +74,10 @@ const BROKER_REQUEST_TIMEOUT_MS = 60_000;
 export const name = "pixelflow-capability-tools";
 
 /** 声明 Plugin 只依赖官方 Tool Registry。 */
-export const inject = ["tools", "pixelflowRunPolicy"];
+export const inject = ["tools", "pixelflowRunPolicy", "pixelflowEventBridge"];
 
 /** 只按本 Run 经过 Gateway 摘要校验的 Manifest 注册 Tool，禁止硬编码额外能力。 */
-export function apply(ctx: ToolRegistryContext & { pixelflowRunPolicy: RunPolicy }): void {
+export function apply(ctx: ToolRegistryContext & { pixelflowRunPolicy: RunPolicy; pixelflowEventBridge: EventBridge }): void {
   const manifest = frozenManifestFromEnvironment();
   // 配置只在模型真正选择 Capability Tool 时读取。这样 Manifest 加载仍可独立验证，
   // 同时 Run 内的 revision 状态不会跨 Plugin/Session 共享。
@@ -108,6 +112,9 @@ export function apply(ctx: ToolRegistryContext & { pixelflowRunPolicy: RunPolicy
         const activeSettings = settings ??= settingsFromEnvironment();
         const expectedRevision = workspaceRevision ??= activeSettings.workspaceRevision;
         const observation = await callBroker(tool, args, String(exec.callId), activeSettings, expectedRevision);
+        // 公开 Tool 摘要必须经过 Event Bridge；不安全文本在 Sidecar 内拒绝，不能进入
+        // Runtime 输出、Run Event Store 或 Gateway Outbox。
+        ctx.pixelflowEventBridge.publish({ type: "public_summary", text: observation.public_summary });
         workspaceRevision = nextWorkspaceRevision(observation, expectedRevision);
         if (tool.cost_level === "billable" && observation.status === "pending_operation") {
           ctx.pixelflowRunPolicy.assertBillableBatchStart();
@@ -186,8 +193,8 @@ function validateManifestTool(value: unknown): ManifestTool {
   };
 }
 
-function isCostLevel(value: unknown): value is "none" | "billable" {
-  return value === "none" || value === "billable";
+function isCostLevel(value: unknown): value is "none" | "external_read" | "billable" | "destructive" {
+  return value === "none" || value === "external_read" || value === "billable" || value === "destructive";
 }
 
 /** 通过唯一 Gateway Broker 执行调用，Sidecar 不直连 Repository、Provider 或文件系统。 */

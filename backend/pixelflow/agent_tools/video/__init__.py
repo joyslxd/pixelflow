@@ -22,6 +22,8 @@ from .creative_brief import (
 from .credential_store import TransientBatchCredentialStore, TransientRunCredentialStore
 from .image_assets import GenerateImageAssetsInput, GenerateImageAssetsTool
 from .image_asset_inspection import InspectImageAssetsInput, InspectImageAssetsTool
+from .operation_batch import InspectOperationBatchInput, InspectOperationBatchTool
+from .delivery import ComposeOrExportVideoTool
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
 from .production_contract import SetVideoGenerationContractTool
 from .registry import VideoToolRegistry
@@ -33,6 +35,7 @@ from .scene import (
     PatchSceneTool,
     ReplaceSceneAssetInput,
     ReplaceSceneAssetTool,
+    ReviewGeneratedScenesTool,
     SceneGenerationBatchResult,
 )
 from .script_plan import (
@@ -72,6 +75,9 @@ __all__ = [
     "GenerateImageAssetsTool",
     "InspectImageAssetsInput",
     "InspectImageAssetsTool",
+    "InspectOperationBatchInput",
+    "InspectOperationBatchTool",
+    "ComposeOrExportVideoTool",
     "SetVideoGenerationContractTool",
     "AnalyzeVideoInput",
     "AnalyzeVideoTool",
@@ -87,6 +93,7 @@ __all__ = [
     "PatchSceneTool",
     "ReplaceSceneAssetInput",
     "ReplaceSceneAssetTool",
+    "ReviewGeneratedScenesTool",
     "UpdateScriptInput",
     "UpdateScriptTool",
     "UpdateVideoPlanInput",
