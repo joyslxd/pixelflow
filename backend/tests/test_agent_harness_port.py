@@ -207,6 +207,11 @@ def test_harness_run_request_rejects_unknown_or_invalid_digest() -> None:
     request = HarnessRunRequest.model_validate(payload)
     assert request.trigger_type == "user_turn"
 
+    authorization_resume = HarnessRunRequest.model_validate(
+        {**payload, "trigger_type": "authorization_resume"},
+    )
+    assert authorization_resume.trigger_type == "authorization_resume"
+
     invalid = dict(payload, context_digest="sha256:not-a-valid-digest")
     try:
         HarnessRunRequest.model_validate(invalid)

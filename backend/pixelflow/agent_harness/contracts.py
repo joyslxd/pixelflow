@@ -21,7 +21,14 @@ class HarnessRunRequest(_StrictModel):
     workspace_id: str = Field(min_length=1, max_length=64)
     workspace_revision: int = Field(ge=1)
     trigger_id: str = Field(min_length=1, max_length=200)
-    trigger_type: Literal["user_turn", "operation_resume", "confirmation_resume", "run_recovery"] = "user_turn"
+    trigger_type: Literal[
+        "user_turn",
+        "operation_resume",
+        "confirmation_resume",
+        "authorization_resume",
+        "form_resume",
+        "run_recovery",
+    ] = "user_turn"
     user_input: str = Field(min_length=1, max_length=32_000)
     system_instruction: str = Field(min_length=1, max_length=32_000)
     context_digest: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
