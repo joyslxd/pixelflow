@@ -23,7 +23,7 @@ from pixelflow_harness_sidecar.client import AgentHarnessSidecarClient
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 
 
-def _request_payload() -> dict[str, object]:
+def _request_payload(*, user_input: str = "请用不超过六个汉字说明连接状态。") -> dict[str, object]:
     """构造不含用户身份或供应商参数的真实 Sidecar 网络 DTO。"""
 
     return {
@@ -54,7 +54,7 @@ def _request_payload() -> dict[str, object]:
         "toolset": {"version": "agent-tools-v1", "manifest_digest": "sha256:m0-real-manifest"},
         "context": {
             "system_instruction": "你是 PixelFlow 的安全测试 Agent。不要调用未声明能力。",
-            "user_input": "请用不超过六个汉字说明连接状态。",
+            "user_input": user_input,
             "workspace_projection": {},
             "conversation_projection": {},
             "preference_projection": {},
@@ -72,10 +72,15 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _start_manifest_broker(manifest: dict[str, object]) -> tuple[str, ThreadingHTTPServer, threading.Thread]:
-    """为不调用 Tool 的真实模型 Case 提供最小受控 Manifest HTTP 边界。"""
+def _start_manifest_broker(
+    manifest: dict[str, object],
+    *,
+    tool_observation: dict[str, object] | None = None,
+) -> tuple[str, ThreadingHTTPServer, threading.Thread, list[dict[str, object]]]:
+    """提供最小真实 Broker HTTP 边界，并记录经过 Plugin 的 Tool 调用。"""
 
     encoded = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    calls: list[dict[str, object]] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - HTTP 标准回调名称。
@@ -88,6 +93,23 @@ def _start_manifest_broker(manifest: dict[str, object]) -> tuple[str, ThreadingH
             self.end_headers()
             self.wfile.write(encoded)
 
+        def do_POST(self) -> None:  # noqa: N802 - HTTP 标准回调名称。
+            if self.path != "/agent/internal/agent-tools/calls" or tool_observation is None:
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(body, dict):
+                self.send_error(400)
+                return
+            calls.append(body)
+            response = json.dumps(tool_observation, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
         def log_message(self, _format: str, *_args: object) -> None:
             """测试 Broker 禁止输出请求头，避免服务 JWT 进入测试日志。"""
 
@@ -95,7 +117,7 @@ def _start_manifest_broker(manifest: dict[str, object]) -> tuple[str, ThreadingH
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
-    return f"http://{host}:{port}", server, thread
+    return f"http://{host}:{port}", server, thread, calls
 
 
 def _gateway_service_jwt(signing_key: str) -> str:
@@ -204,7 +226,7 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
     if os.environ.get("PIXELFLOW_RUN_REAL_M0") != "1":
         pytest.skip("未显式开启会消耗测试 token 的真实 M0 用例")
     if not os.environ.get("DEEPSEEK_API_KEY") or not os.environ.get("DEEPSEEK_BASE_URL"):
-        pytest.skip("缺少真实 Ark 模型测试凭据或端点")
+        pytest.skip("缺少真实 DeepSeek 直连测试凭据或端点")
 
     root = tmp_path / "agent-home"
     skill_file = root / "skills" / "m0-probe-skill" / "SKILL.md"
@@ -215,7 +237,7 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
     )
     jwt_signing_key = "m0-loopback-jwt-signing-key-at-least-32-bytes"
     service_jwt = _gateway_service_jwt(jwt_signing_key)
-    broker_base_url, broker_server, broker_thread = _start_manifest_broker(
+    broker_base_url, broker_server, broker_thread, _calls = _start_manifest_broker(
         {
             "protocol_version": "v1",
             "version": "agent-tools-v1",
@@ -239,7 +261,9 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-http",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
+            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
+                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": source_root,
         },
@@ -338,6 +362,130 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
 
 
 @pytest.mark.m0_real
+def test_real_sidecar_http_calls_external_read_capability_with_direct_deepseek(
+    tmp_path: Path,
+) -> None:
+    """直连 DeepSeek 必须能调用 external_read Tool 并收敛为公开最终回复。"""
+
+    if os.environ.get("PIXELFLOW_RUN_REAL_M0") != "1":
+        pytest.skip("未显式开启会消耗测试 token 的真实 Tool Calling 用例")
+    if not os.environ.get("DEEPSEEK_API_KEY") or not os.environ.get("DEEPSEEK_BASE_URL"):
+        pytest.skip("缺少真实 DeepSeek 直连凭据或端点")
+
+    root = tmp_path / "tool-calling-agent-home"
+    skill_file = root / "skills" / "tool-calling-probe" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "---\nname: tool-calling-probe\ndescription: 验证安全 Capability Tool 调用。\n---\n"
+        "需要读取工作区时，只调用已发布 Tool。",
+        encoding="utf-8",
+    )
+    jwt_signing_key = "m0-tool-calling-jwt-signing-key-at-least-32-bytes"
+    service_jwt = _gateway_service_jwt(jwt_signing_key)
+    broker_base_url, broker_server, broker_thread, calls = _start_manifest_broker(
+        {
+            "protocol_version": "v1",
+            "version": "agent-tools-v1",
+            "digest": "sha256:m0-real-tool-manifest",
+            "tools": [
+                {
+                    "name": "analyze_video",
+                    "description": "读取已授权视频的安全测试状态；仅在当前测试要求时调用。",
+                    "parameters_schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {},
+                    },
+                    "cost_level": "external_read",
+                    "confirmation_required": False,
+                }
+            ],
+        },
+        tool_observation={
+            "status": "completed",
+            "public_summary": "已读取安全测试状态",
+            "model_observation": {"status": "completed"},
+        },
+    )
+    port = _free_port()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PIXELFLOW_AGENT_HOME": str(root),
+            "PIXELFLOW_HARNESS_RUN_STORE": str(root / "run-events" / "runs.sqlite3"),
+            "PIXELFLOW_GATEWAY_JWT_VERIFY_KEY": jwt_signing_key,
+            "PIXELFLOW_GATEWAY_JWT_ISSUER": "pixelflow-gateway",
+            "PIXELFLOW_GATEWAY_JWT_AUDIENCE": "pixelflow-harness-sidecar",
+            "PIXELFLOW_TOOL_BROKER_BASE_URL": broker_base_url,
+            "PIXELFLOW_TOOL_BROKER_JWT_SIGNING_KEY": "m0-tool-calling-broker-signing-key-at-least-32-bytes",
+            "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
+            "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
+            "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-tool-calling",
+            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-flash-vision-exp",
+            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
+                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
+            "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
+            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
+        },
+    )
+    process = _start_real_sidecar_process(port=port, environment=environment)
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_ready(base_url, service_jwt)
+        payload = _request_payload(
+            user_input=(
+                "请先且仅调用一次 analyze_video 工具（无参数）。"
+                "收到工具结果后，只回复“已确认”。"
+            )
+        )
+        payload["run_request_key"] = "sha256:m0-real-direct-deepseek-tool"
+        payload["request_digest"] = "sha256:m0-real-direct-deepseek-tool-request"
+        payload["session_id"] = "pfh_m0_real_direct_deepseek_tool"
+        payload["toolset"] = {
+            "version": "agent-tools-v1",
+            "manifest_digest": "sha256:m0-real-tool-manifest",
+        }
+
+        async def create_and_activate_run() -> object:
+            client = AgentHarnessSidecarClient(
+                base_url=base_url, service_jwt=service_jwt, timeout_seconds=10
+            )
+            try:
+                accepted = await client.create_run(HarnessRunRequest.model_validate(payload))
+                await client.activate_run(accepted.run_id)
+                return accepted
+            finally:
+                await client.aclose()
+
+        accepted = asyncio.run(create_and_activate_run())
+        for _ in range(180):
+            status, snapshot = _http_json(
+                "GET", f"{base_url}/internal/v1/runs/{accepted.run_id}", token=service_jwt
+            )
+            assert status == 200
+            if snapshot.get("status") in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.25)
+        else:
+            pytest.fail("真实 Tool Calling Run 未在限定时间结束")
+
+        assert snapshot["status"] == "completed", snapshot
+        assert len(calls) == 1
+        assert calls[0]["tool_name"] == "analyze_video"
+        assert calls[0]["arguments"] == {}
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        broker_server.shutdown()
+        broker_thread.join(timeout=5)
+
+
+@pytest.mark.m0_real
 def test_real_sidecar_kill_restart_safely_closes_unfinished_run(tmp_path: Path) -> None:
     """真实 kill/restart 后不得续跑旧 Session，必须追加可恢复所需的固定失败事件。"""
 
@@ -370,7 +518,9 @@ def test_real_sidecar_kill_restart_safely_closes_unfinished_run(tmp_path: Path) 
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-restart",
             "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
+            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
+                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
+            ),
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
         },
