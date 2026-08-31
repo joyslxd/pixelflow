@@ -240,12 +240,19 @@ class AgentToolBroker:
             )
             raise
         except Exception as error:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
+            traceback = error.__traceback__
+            while traceback is not None and traceback.tb_next is not None:
+                traceback = traceback.tb_next
+            failure_function = traceback.tb_frame.f_code.co_name if traceback is not None else "unknown"
+            failure_line = traceback.tb_lineno if traceback is not None else 0
             # 只记录稳定定位字段；用户正文、Tool 参数、凭据和 Provider 原文都不能进入日志。
             logger.warning(
-                "agent_tool_execution_failed run_id=%s tool_name=%s error_type=%s",
+                "agent_tool_execution_failed run_id=%s tool_name=%s error_type=%s failure_function=%s failure_line=%s",
                 request.run_id,
                 tool.spec.name,
                 type(error).__name__,
+                failure_function,
+                failure_line,
             )
             summary = (
                 "图片资产生成提交失败，请稍后重试"
