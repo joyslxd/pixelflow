@@ -184,8 +184,8 @@ async def test_generate_scenes_rejects_missing_creation_contract_before_creating
 
 
 @pytest.mark.asyncio
-async def test_prepare_tool_returns_safe_validation_field_for_agent_self_correction() -> None:
-    """模型拼错分镜字段时只得到字段路径，不会回显用户正文或 Pydantic 原文。"""
+async def test_prepare_tool_returns_safe_validation_hint_for_agent_self_correction() -> None:
+    """模型拼错分镜字段时得到安全纠正提示，不会回显用户正文或 Pydantic 原文。"""
 
     registry = VideoToolRegistry((PrepareScenePackagesTool(),))
     result = await registry.execute(
@@ -203,9 +203,16 @@ async def test_prepare_tool_returns_safe_validation_field_for_agent_self_correct
         },
     )
 
-    assert result.public_summary == "工具参数无效，请修正字段：scenes.0.duration_sec、scenes.0.reference_asset_ids"
+    assert result.public_summary == (
+        "工具参数无效，请修正：scenes.0.duration_sec（缺少必填字段）、"
+        "scenes.0.reference_asset_ids（缺少必填字段）"
+    )
     assert result.model_observation == {
         "validation_fields": ["scenes.0.duration_sec", "scenes.0.reference_asset_ids"],
+        "validation_hints": [
+            "scenes.0.duration_sec（缺少必填字段）",
+            "scenes.0.reference_asset_ids（缺少必填字段）",
+        ],
     }
 
 
@@ -277,11 +284,10 @@ async def test_prepare_tool_keeps_uploaded_material_and_allows_agent_to_enrich_i
         ),
         {
             "script": "产品展示",
-            "asset_registry": [{
+            "asset_updates": [{
                 "asset_id": f"asset_material_{material_id}",
                 "kind": "product_reference",
                 "role": "美的 M20 冰箱产品外观",
-                "generation_prompt": "不会使用：该图为用户已上传的产品参考图",
             }],
             "scenes": [{
                 "scene_id": "SC01", "prompt": "参考产品图展示冰箱", "duration_sec": 8,
@@ -296,6 +302,82 @@ async def test_prepare_tool_keeps_uploaded_material_and_allows_agent_to_enrich_i
     assert asset["origin"] == "existing_material"
     assert asset["source_material_id"] == material_id
     assert asset["usable_for_video"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_rejects_existing_material_in_planned_asset_registry_with_safe_reason() -> None:
+    """上传素材不得经 asset_registry 重传，避免模型伪造 Artifact、状态或来源。"""
+
+    material_id = "material-product-3"
+    result = await VideoToolRegistry((PrepareScenePackagesTool(),)).execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-material-registry",
+                conversation_id="conversation-material-registry",
+                payload={"materials": [{
+                    "material_id": material_id,
+                    "kind": "image",
+                    "name": "冰箱图",
+                    "url": "https://example.invalid/m20.jpg",
+                }]},
+            ),
+        ),
+        "prepare_scene_packages",
+        {
+            "script": "产品展示",
+            "asset_registry": [{
+                "asset_id": f"asset_material_{material_id}",
+                "kind": "product_reference",
+                "role": "美的 M20 冰箱产品外观",
+                "generation_prompt": "不应重传已有素材",
+            }],
+            "scenes": [{
+                "scene_id": "SC01", "prompt": "参考产品图展示冰箱", "duration_sec": 8,
+                "reference_asset_ids": [f"asset_material_{material_id}"],
+            }],
+        },
+    )
+
+    assert result.public_summary == "asset_registry 只能登记新的待生成资产；已有素材请使用 asset_updates"
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_rejects_partial_existing_material_record_with_actionable_hint() -> None:
+    """错误提示应说明 DTO 角色，不再只暴露 asset_registry.0。"""
+
+    result = await VideoToolRegistry((PrepareScenePackagesTool(),)).execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-partial-material",
+                conversation_id="conversation-partial-material",
+            ),
+        ),
+        "prepare_scene_packages",
+        {
+            "script": "产品展示",
+            "asset_registry": [{
+                "asset_id": "asset_material_existing",
+                "kind": "product_reference",
+                "role": "冰箱产品图",
+                "origin": "existing_material",
+            }],
+            "scenes": [{
+                "scene_id": "SC01", "prompt": "展示冰箱", "duration_sec": 8,
+                "reference_asset_ids": ["asset_material_existing"],
+            }],
+        },
+    )
+
+    assert result.public_summary == (
+        "工具参数无效，请修正：asset_registry.0.generation_prompt（缺少必填字段）、"
+        "asset_registry.0.origin（不允许该字段）"
+    )
+    assert result.model_observation["validation_hints"] == [
+        "asset_registry.0.generation_prompt（缺少必填字段）",
+        "asset_registry.0.origin（不允许该字段）",
+    ]
 
 
 @pytest.mark.asyncio

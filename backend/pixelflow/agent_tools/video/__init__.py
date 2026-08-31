@@ -45,6 +45,8 @@ from .script_plan import (
 )
 from .storyboard import (
     CreateStoryboardTool,
+    ExistingMaterialAssetUpdate,
+    PlannedAssetInput,
     PrepareScenePackagesInput,
     PrepareScenePackagesTool,
     ReviseStoryboardInput,
@@ -85,6 +87,8 @@ __all__ = [
     "UpdateVideoPlanTool",
     "PrepareScenePackagesInput",
     "PrepareScenePackagesTool",
+    "ExistingMaterialAssetUpdate",
+    "PlannedAssetInput",
     "CreateStoryboardTool",
     "StoryboardSceneInput",
     "ReviseStoryboardInput",

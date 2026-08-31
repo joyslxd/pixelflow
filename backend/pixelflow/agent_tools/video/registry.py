@@ -66,17 +66,21 @@ class VideoToolRegistry:
             validated = tool.spec.input_model.model_validate(dict(arguments))
         except ValidationError as error:
             fields = _safe_validation_fields(error)
+            hints = _safe_validation_hints(error)
             summary = "工具参数无效，请修正后重试"
-            if fields:
+            if hints:
+                summary = f"工具参数无效，请修正：{'、'.join(hints)}"
+            elif fields:
                 summary = f"工具参数无效，请修正字段：{'、'.join(fields)}"
+            observation: dict[str, object] = {}
+            if "validation_fields" in tool.spec.model_observation_keys:
+                observation["validation_fields"] = fields
+            if "validation_hints" in tool.spec.model_observation_keys:
+                observation["validation_hints"] = hints
             return VideoToolResult(
                 tool_name=tool.spec.name,
                 public_summary=summary,
-                model_observation=(
-                    {"validation_fields": fields}
-                    if "validation_fields" in tool.spec.model_observation_keys
-                    else {}
-                ),
+                model_observation=observation,
             )
         try:
             result = await tool.execute(
@@ -155,6 +159,48 @@ def _safe_validation_fields(error: ValidationError) -> list[str]:
             break
     # 嵌套 DTO 缺少字段时，Pydantic 还会附带父数组“元素不足”错误；优先返回可修正的
     # 详细路径，避免模型把 scenes 误认为需要替换为另一种数据类型。
+    return (detailed or top_level)[:8]
+
+
+def _safe_validation_hints(error: ValidationError) -> list[str]:
+    """返回仅由 DTO 类型生成的纠正提示，绝不回显模型输入或底层异常正文。"""
+
+    detailed: list[str] = []
+    top_level: list[str] = []
+    reason_by_type = {
+        "missing": "缺少必填字段",
+        "extra_forbidden": "不允许该字段",
+        "literal_error": "取值不符合允许范围",
+        "string_too_short": "文本过短或为空",
+        "string_too_long": "文本超过长度限制",
+        "too_short": "列表项不足",
+        "too_long": "列表项过多",
+        "int_parsing": "必须是整数",
+        "int_type": "必须是整数",
+        "greater_than_equal": "数值低于允许下限",
+        "less_than_equal": "数值超过允许上限",
+        "value_error": "字段组合不符合合同",
+    }
+    for item in error.errors():
+        location = item.get("loc")
+        if not isinstance(location, tuple):
+            continue
+        parts = [str(part) for part in location if isinstance(part, (str, int))]
+        if not parts:
+            continue
+        field = ".".join(parts)
+        if not 0 < len(field) <= 160:
+            continue
+        error_type = item.get("type")
+        reason = reason_by_type.get(error_type, "字段值无效")
+        hint = f"{field}（{reason}）"
+        target = detailed if len(parts) > 1 else top_level
+        if hint not in target:
+            target.append(hint)
+        if len(detailed) >= 8:
+            break
+    # 与字段路径相同：嵌套项缺失时 Pydantic 会并列返回父数组的“列表项不足”，
+    # 优先给模型更可执行的子字段提示。
     return (detailed or top_level)[:8]
 
 

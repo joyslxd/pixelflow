@@ -51,6 +51,51 @@ class StoryboardSceneInput(BaseModel):
     camera_movement: str | None = Field(default=None, max_length=512)
 
 
+class PlannedAssetInput(BaseModel):
+    """本轮新规划的待生成资产；不能伪造已有素材的状态或 Artifact。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str = Field(min_length=1, max_length=128)
+    slot: str | None = Field(default=None, max_length=64)
+    kind: str = Field(min_length=1, max_length=64)
+    role: str = Field(min_length=1, max_length=256)
+    generation_prompt: str = Field(min_length=1, max_length=20_000)
+    reference_asset_ids: tuple[str, ...] = Field(default=(), max_length=32)
+
+    def to_workspace_asset(self) -> WorkspaceAssetRecord:
+        """由 Gateway 固定待生成资产的运行态，模型不能提交这些字段。"""
+
+        return WorkspaceAssetRecord(
+            asset_id=self.asset_id,
+            slot=self.slot,
+            kind=self.kind,
+            role=self.role,
+            origin="planned_generation",
+            generation_prompt=self.generation_prompt,
+            state="planned",
+            reference_asset_ids=self.reference_asset_ids,
+            usable_for_video=False,
+        )
+
+
+class ExistingMaterialAssetUpdate(BaseModel):
+    """对已上传素材的受限语义补充，身份和运行态始终以 Workspace 为准。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str = Field(min_length=1, max_length=128)
+    slot: str | None = Field(default=None, max_length=64)
+    kind: str | None = Field(default=None, min_length=1, max_length=64)
+    role: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_semantic_patch(self) -> ExistingMaterialAssetUpdate:
+        if not self.model_fields_set - {"asset_id"}:
+            raise ValueError("已有素材语义补充至少需要 slot、kind 或 role 之一")
+        return self
+
+
 class PrepareScenePackagesInput(BaseModel):
     """脚本与分镜一次性准备；长片总时长由业务计划和 Provider 能力决定。"""
 
@@ -63,7 +108,10 @@ class PrepareScenePackagesInput(BaseModel):
     )
     creative_brief: WorkspaceCreativeBrief | None = None
     narrative_plan: dict[str, JsonValue] = Field(default_factory=dict)
-    asset_registry: tuple[WorkspaceAssetRecord, ...] = ()
+    # 该字段只接收本轮待生成资产。已有素材的 Artifact、状态和可用性来自 Workspace，
+    # 模型只能通过 asset_updates 补充其产品/角色/场景等语义。
+    asset_registry: tuple[PlannedAssetInput, ...] = ()
+    asset_updates: tuple[ExistingMaterialAssetUpdate, ...] = Field(default=(), max_length=120)
     # 可与分镜一起冻结；若模型/档案尚未选定，Agent 也可稍后用
     # set_video_generation_contract 单独写入，避免为补参数重写整份脚本。
     creation_contract: WorkspaceCreationContract | None = None
@@ -73,6 +121,9 @@ class PrepareScenePackagesInput(BaseModel):
         scene_ids = [scene.scene_id.strip() for scene in self.scenes]
         if len(set(scene_ids)) != len(scene_ids):
             raise ValueError("分镜 scene_id 不能重复")
+        update_ids = [item.asset_id.strip() for item in self.asset_updates]
+        if len(set(update_ids)) != len(update_ids):
+            raise ValueError("已有素材语义补充 asset_id 不能重复")
         return self
 
 
@@ -97,6 +148,24 @@ def _validate_and_canonicalize_scene_references(
             raise VideoToolValidationError(f"分镜 {scene_id or '未命名'} 引用了未登记资产")
         # 保留声明顺序并去重；顺序会成为后续 Provider 参考图绑定顺序。
         scene["reference_asset_ids"] = list(dict.fromkeys(canonical))
+
+
+def _apply_existing_material_updates(
+    asset_by_id: dict[str, dict[str, JsonValue]],
+    updates: tuple[ExistingMaterialAssetUpdate, ...],
+) -> None:
+    """只允许更新已上传素材的语义字段，拒绝模型伪造资产身份或运行态。"""
+
+    for update in updates:
+        asset = asset_by_id.get(update.asset_id)
+        if asset is None or asset.get("origin") != "existing_material":
+            raise VideoToolValidationError(
+                "已有素材语义补充目标无效；请使用当前 Workspace 中已上传素材的 asset_id"
+            )
+        patch = update.model_dump(mode="json", exclude_unset=True)
+        for key in ("slot", "kind", "role"):
+            if key in patch:
+                asset[key] = patch[key]
 
 
 class StoryboardRevisionPatch(BaseModel):
@@ -148,8 +217,10 @@ class PrepareScenePackagesTool:
         description=(
             "写入脚本和分镜包；面向 Seedance 2.5 时，先使用已加载的导演/提示词 Skill "
             "将每段 prompt 编排为可提交的完整正文，再原样写入，不得仅写摘要；"
-            "必须同时登记已有素材（origin=existing_material）与待生成素材"
-            "（origin=planned_generation），每段 reference_asset_ids 必须只引用这张资产表的 asset_id；"
+            "asset_registry 只登记新的待生成素材（必须含 generation_prompt）；用户已上传素材已经"
+            "由 Gateway 登记，若要补充产品/角色/场景语义，只能用 asset_updates 提交其 asset_id、"
+            "slot、kind 或 role，不能提交或覆盖 Artifact、状态、来源。每段 reference_asset_ids "
+            "必须只引用当前资产表的 asset_id；"
             "单镜最长 30 秒，长片生成由 M06 批次拆分，完成后再请求生成确认。"
         ),
         input_model=PrepareScenePackagesInput,
@@ -175,6 +246,7 @@ class PrepareScenePackagesTool:
             "total_duration_sec",
             "workspace_revision_required",
             "validation_fields",
+            "validation_hints",
         ),
     )
 
@@ -219,11 +291,18 @@ class PrepareScenePackagesTool:
             for item in asset_registry
             if str(item.get("asset_id") or "").strip()
         }
+        material_assets = material_asset_records(payload)
+        material_asset_ids = {str(item["asset_id"]) for item in material_assets}
         for asset in request.asset_registry:
-            asset_by_id[asset.asset_id] = asset.model_dump(mode="json")
+            if asset.asset_id in asset_by_id or asset.asset_id in material_asset_ids:
+                raise VideoToolValidationError(
+                    "asset_registry 只能登记新的待生成资产；已有素材请使用 asset_updates"
+                )
+            asset_by_id[asset.asset_id] = asset.to_workspace_asset().model_dump(mode="json")
         # 已上传材料不是模型可自由伪造的资产：Gateway 从权威 Workspace 派生稳定引用。
-        # Agent 可以补充产品/角色/道具等语义，但不能覆盖材料来源、Artifact 或就绪状态。
-        for material_asset in material_asset_records(payload):
+        # Agent 可以通过 asset_updates 补充产品/角色/道具等语义，但不能覆盖材料来源、
+        # Artifact 或就绪状态。
+        for material_asset in material_assets:
             asset_id = str(material_asset["asset_id"])
             proposed = asset_by_id.get(asset_id)
             if proposed is not None:
@@ -231,6 +310,7 @@ class PrepareScenePackagesTool:
                     if proposed.get(key) is not None:
                         material_asset[key] = proposed[key]
             asset_by_id[asset_id] = material_asset
+        _apply_existing_material_updates(asset_by_id, request.asset_updates)
         if not asset_by_id:
             raise VideoToolValidationError("请先登记至少一个已有素材或待生成素材")
         _validate_and_canonicalize_scene_references(scenes, asset_by_id)
@@ -380,15 +460,21 @@ class CreateStoryboardTool(PrepareScenePackagesTool):
         **{
             **PrepareScenePackagesTool.spec.__dict__,
             "name": "create_storyboard",
-            "description": "创建或覆盖当前项目分镜；单镜最长 30 秒，长片生成由 M06 批次拆分。",
+            "description": (
+                "创建或覆盖当前项目分镜；asset_registry 仅登记新的待生成资产，用户上传素材"
+                "只能通过 asset_updates 补充语义，不能覆盖其 Artifact、状态或来源；单镜最长 30 秒，"
+                "长片生成由 M06 批次拆分。"
+            ),
         }
     )
 
 
 __all__ = [
     "CreateStoryboardTool",
+    "ExistingMaterialAssetUpdate",
     "MAX_SCENE_DURATION_SEC",
     "MAX_STORYBOARD_SCENE_COUNT",
+    "PlannedAssetInput",
     "PrepareScenePackagesInput",
     "PrepareScenePackagesTool",
     "StoryboardSceneInput",
