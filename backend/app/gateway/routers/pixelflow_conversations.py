@@ -1225,15 +1225,20 @@ async def resume_harness_interrupt_authorization(
     interrupt = await repository.get_interrupt(interrupt_id)
     if original is None or interrupt is None or interrupt.kind != "authorization_required":
         raise HTTPException(status_code=404, detail={"code": "harness_interrupt_not_found"})
-    try:
-        responded = await repository.respond_interrupt(
-            interrupt_id=interrupt_id,
-            binding=original,
-            client_response_id=str(body.client_response_id),
-            expected_workspace_revision=body.expected_workspace_revision,
-        )
-    except (LookupError, AgentToolBindingConflictError) as error:
-        raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
+    if interrupt.status == "responded":
+        # 前一次请求可能在原子写入响应后、绑定恢复 Run 前失败。授权凭据仍只来自
+        # 当前 HTTP Header；这里回读原 response_id 继续收口，不要求刷新后的浏览器保留旧 UUID。
+        responded = interrupt
+    else:
+        try:
+            responded = await repository.respond_interrupt(
+                interrupt_id=interrupt_id,
+                binding=original,
+                client_response_id=str(body.client_response_id),
+                expected_workspace_revision=body.expected_workspace_revision,
+            )
+        except (LookupError, AgentToolBindingConflictError) as error:
+            raise HTTPException(status_code=409, detail={"code": "harness_interrupt_response_conflict"}) from error
     if responded.resumed_run_id is None:
         resumed_run_id = await _start_harness_interrupt_resume(
             request=request,
@@ -1251,7 +1256,7 @@ async def resume_harness_interrupt_authorization(
         )
         responded = await repository.bind_interrupt_resume_run(
             interrupt_id=interrupt_id,
-            client_response_id=str(body.client_response_id),
+            client_response_id=responded.response_id or str(body.client_response_id),
             resumed_run_id=resumed_run_id,
         )
     await _publish_harness_interrupt_event(request, responded, closed=False)
