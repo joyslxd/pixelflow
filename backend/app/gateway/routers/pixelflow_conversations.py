@@ -989,7 +989,9 @@ async def confirm_harness_interrupt(
         conversation_id=conversation_id,
         workspace_id=workspace_id,
     )
-    if workspace.revision != body.expected_workspace_revision:
+    # 确认卡绑定的是创建时 revision；恢复 Run 读取当前 Workspace，来源 revision
+    # 仍由 Repository 在提交时校验。客户端不能声明未来版本。
+    if body.expected_workspace_revision > workspace.revision:
         raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
     repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
     if not isinstance(repository, SQLAgentToolRepository):
@@ -1091,7 +1093,8 @@ async def respond_to_harness_interrupt(
         conversation_id=conversation_id,
         workspace_id=workspace_id,
     )
-    if workspace.revision != body.expected_workspace_revision:
+    # 表单/确认卡可在同一 Run 的后续安全写入后提交；Repository 仍校验来源 revision。
+    if body.expected_workspace_revision > workspace.revision:
         raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
     repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
     if not isinstance(repository, SQLAgentToolRepository):
@@ -1189,7 +1192,8 @@ async def resume_harness_interrupt_authorization(
     workspace = await _require_conversation_workspace(
         request, user_id=user_id, conversation_id=conversation_id, workspace_id=workspace_id,
     )
-    if workspace.revision != body.expected_workspace_revision:
+    # 授权恢复沿用中断创建时 revision，并以当前 Workspace 作为新 Run 的权威输入。
+    if body.expected_workspace_revision > workspace.revision:
         raise HTTPException(status_code=409, detail={"code": "harness_workspace_revision_conflict"})
     repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
     if not isinstance(repository, SQLAgentToolRepository):
