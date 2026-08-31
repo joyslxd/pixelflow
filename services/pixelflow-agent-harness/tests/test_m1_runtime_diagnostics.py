@@ -20,6 +20,7 @@ from pixelflow_harness_sidecar.deepseek_engine import (
 from pixelflow_harness_sidecar.event_store import SqliteRunEventStore
 from pixelflow_harness_sidecar.run_service import RunService
 from pixelflow_harness_sidecar.skill_snapshot import snapshot_skill_root
+from deepseek_harness.errors import JsonRpcError
 
 
 def _request() -> HarnessRunRequest:
@@ -154,6 +155,37 @@ def test_non_timeout_runtime_error_also_projects_failure_phase() -> None:
     assert diagnostic.failure_phase == "model_execution"
     assert diagnostic.failure_reason is None
     assert diagnostic.timeout_phase is None
+
+
+def test_jsonrpc_error_projects_allowlisted_fields_without_message_or_data() -> None:
+    """JSON-RPC 失败只公开白名单字段，禁止泄露供应商 message/data。"""
+
+    error = JsonRpcError(
+        -32602,
+        "secret provider prompt and token",
+        {"type": "invalid_params", "category": "invalid_request", "secret": "do-not-leak"},
+    )
+    diagnostic = _execution_diagnostic(error, "model_execution")
+
+    assert diagnostic.failure_code == "-32602"
+    assert diagnostic.failure_type == "invalid_params"
+    assert diagnostic.failure_category == "invalid_request"
+    assert diagnostic.failure_reason == "invalid_request"
+    assert "secret" not in str(diagnostic)
+
+
+def test_jsonrpc_error_unknown_fields_fail_closed() -> None:
+    """未知 JSON-RPC code/category 不得成为公开错误原因。"""
+
+    diagnostic = _execution_diagnostic(
+        JsonRpcError(49001, "private detail", {"type": "private_type", "category": "private_category"}),
+        "model_execution",
+    )
+
+    assert diagnostic.failure_code is None
+    assert diagnostic.failure_type == "private_type"
+    assert diagnostic.failure_category is None
+    assert diagnostic.failure_reason is None
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,9 @@ class HarnessExecutionDiagnostic:
     failure_phase: str
     failure_reason: str | None
     timeout_phase: str | None
+    failure_code: str | None = None
+    failure_type: str | None = None
+    failure_category: str | None = None
 
 
 class HarnessExecutionError(RuntimeError):
@@ -293,12 +296,50 @@ def _execution_diagnostic(error: Exception, phase: str) -> HarnessExecutionDiagn
         "WriteTimeout",
     }
     is_timeout = isinstance(error, TimeoutError) or exception_type in timeout_names
+    code, error_type, category, reason = _safe_jsonrpc_fields(error)
     return HarnessExecutionDiagnostic(
         exception_type=exception_type if exception_type.isidentifier() else "RuntimeError",
         failure_phase=phase,
-        failure_reason=(error.reason_code if isinstance(error, HarnessProjectionError) else None),
+        failure_reason=(error.reason_code if isinstance(error, HarnessProjectionError) else reason),
         timeout_phase=phase if is_timeout else None,
+        failure_code=code,
+        failure_type=error_type,
+        failure_category=category,
     )
+
+
+_JSONRPC_CODE_ALLOWLIST = {
+    -32600: "jsonrpc_invalid_request",
+    -32601: "jsonrpc_method_not_found",
+    -32602: "jsonrpc_invalid_params",
+    -32603: "jsonrpc_internal_error",
+}
+_JSONRPC_CATEGORY_ALLOWLIST = {
+    "authentication_failed": "authentication_failed",
+    "context_length_exceeded": "context_length_exceeded",
+    "invalid_request": "invalid_request",
+    "model_unavailable": "model_unavailable",
+    "rate_limited": "rate_limited",
+    "timeout": "timeout",
+    "tool_protocol_error": "tool_protocol_error",
+}
+
+
+def _safe_jsonrpc_fields(error: Exception) -> tuple[str | None, str | None, str | None, str | None]:
+    """仅从 JsonRpcError 提取固定字段；拒绝透传 message/data 原文。"""
+
+    if type(error).__name__ != "JsonRpcError":
+        return None, None, None, None
+    raw_code = getattr(error, "code", None)
+    code = str(raw_code) if isinstance(raw_code, int) and raw_code in _JSONRPC_CODE_ALLOWLIST else None
+    raw_data = getattr(error, "data", None)
+    fields = raw_data if isinstance(raw_data, dict) else {}
+    raw_type = fields.get("type")
+    error_type = raw_type.strip()[:64] if isinstance(raw_type, str) and raw_type.strip().replace("_", "").isalnum() else None
+    raw_category = fields.get("category")
+    category = _JSONRPC_CATEGORY_ALLOWLIST.get(raw_category) if isinstance(raw_category, str) else None
+    reason = category or (_JSONRPC_CODE_ALLOWLIST.get(raw_code) if isinstance(raw_code, int) else None)
+    return code, error_type, category, reason
 
 
 def _project_harness_result(

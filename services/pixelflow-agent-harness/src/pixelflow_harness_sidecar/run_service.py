@@ -258,16 +258,25 @@ class RunService:
                         {"code": "harness_run_recovery_required"},
                     )
                     return
+                failure_payload = {
+                    "code": "engine_execution_failed",
+                    "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
+                    "failure_phase": failure_phase,
+                    "failure_reason": diagnostic.failure_reason if diagnostic is not None else None,
+                    "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
+                }
+                if diagnostic is not None:
+                    for key, value in (
+                        ("failure_code", diagnostic.failure_code),
+                        ("failure_type", diagnostic.failure_type),
+                        ("failure_category", diagnostic.failure_category),
+                    ):
+                        if value is not None:
+                            failure_payload[key] = value
                 await self._store.append_event(
                     run_id,
                     "run.failed",
-                    {
-                        "code": "engine_execution_failed",
-                        "exception_type": diagnostic.exception_type if diagnostic is not None else type(error).__name__,
-                        "failure_phase": failure_phase,
-                        "failure_reason": diagnostic.failure_reason if diagnostic is not None else None,
-                        "timeout_phase": diagnostic.timeout_phase if diagnostic is not None else None,
-                    },
+                    failure_payload,
                 )
         finally:
             async with self._lock:
