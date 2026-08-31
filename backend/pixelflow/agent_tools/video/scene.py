@@ -178,6 +178,24 @@ class GenerateScenesInput(BaseModel):
         return self
 
 
+def _require_complete_creation_contract(payload: Mapping[str, object]) -> None:
+    """在创建 M06 批次前拒绝不完整的 Provider 路由，避免子 Operation 空转失败。"""
+
+    contract = payload.get("creation_contract")
+    source = contract if isinstance(contract, Mapping) else {}
+    required = ("video_model", "video_ratio", "video_size", "video_sound")
+    missing = [key for key in required if not isinstance(source.get(key), str) or not str(source[key]).strip()]
+    if str(source.get("video_sound") or "").strip().lower() not in {"on", "off"}:
+        if "video_sound" not in missing:
+            missing.append("video_sound")
+    if missing:
+        raise VideoToolValidationError(
+            "当前工作区尚未冻结视频生产合同（缺少 "
+            + "、".join(missing)
+            + "）；请先由 Agent 选择参数并调用 set_video_generation_contract"
+        )
+
+
 class ReviewGeneratedSceneInput(SceneIdInput):
     variant_id: str = Field(min_length=1, max_length=128)
     decision: Literal["approve", "reject"]
@@ -679,6 +697,7 @@ class GenerateScenesTool:
         if not scene_ids:
             raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
         selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
+        _require_complete_creation_contract(payload)
         if self._batch_operation_port is None:
             raise VideoToolExecutionError("镜头生成Operation尚未装配")
         jobs_by_scene: dict[str, list[SceneGenerationJob]] = {

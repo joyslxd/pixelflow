@@ -18,6 +18,17 @@ AssetOrigin = Literal["existing_material", "planned_generation", "provider_outpu
 GenerationMode = Literal["independent", "extend", "reference"]
 
 
+class WorkspaceCreationContract(BaseModel):
+    """一次视频生成所需的冻结 Provider 路由参数，不包含任何授权信息。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    video_model: str = Field(min_length=1, max_length=128)
+    video_ratio: str = Field(min_length=1, max_length=32)
+    video_size: str = Field(min_length=1, max_length=32)
+    video_sound: Literal["on", "off"]
+
+
 class WorkspaceAssetRecord(BaseModel):
     """资产注册表中的稳定记录，不保存授权或 Provider 原始响应。"""
 
@@ -107,6 +118,8 @@ class WorkspacePayloadV2(BaseModel):
     narrative_plan: dict[str, JsonValue] = Field(default_factory=dict)
     asset_registry: tuple[WorkspaceAssetRecord, ...] = ()
     prompt_packages: tuple[WorkspacePromptPackage, ...] = ()
+    # 生产合同可以在脚本阶段尚未选定模型时为空；开始计费生成前必须由 Tool 完整写入。
+    creation_contract: WorkspaceCreationContract | None = None
 
 
 def migrate_workspace_payload(payload: Mapping[str, object] | None) -> dict[str, JsonValue]:
@@ -258,6 +271,7 @@ __all__ = [
     "WORKSPACE_SCHEMA_VERSION",
     "WorkspaceAssetRecord",
     "WorkspaceCreativeBrief",
+    "WorkspaceCreationContract",
     "WorkspacePayloadV2",
     "WorkspacePromptPackage",
     "material_asset_records",

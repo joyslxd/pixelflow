@@ -112,6 +112,20 @@ def _safe_v2_creative_brief(payload: Mapping[str, Any]) -> dict[str, str | int]:
     return result
 
 
+def _safe_creation_contract(payload: Mapping[str, Any]) -> dict[str, str] | None:
+    """投影已冻结的生成路由；合同只含用户可见参数，不含授权或 Provider 原始配置。"""
+
+    source = _as_mapping(payload.get("creation_contract"))
+    if source is None:
+        return None
+    result = {
+        key: value
+        for key in ("video_model", "video_ratio", "video_size", "video_sound")
+        if (value := _bounded_text(source.get(key), maximum=128)) is not None
+    }
+    return result or None
+
+
 def _safe_v2_narrative_plan(payload: Mapping[str, Any]) -> dict[str, str]:
     """投影脚本大纲与声音骨架；脚本长度与 Tool 合同保持一致。"""
 
@@ -515,6 +529,7 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "revision": workspace.revision,
             "workspace_schema_version": v2_payload.get("workspace_schema_version"),
             "creative_brief": _safe_v2_creative_brief(v2_payload) or None,
+            "creation_contract": _safe_creation_contract(v2_payload),
             "narrative_plan": _safe_v2_narrative_plan(v2_payload) or None,
             "asset_registry": _safe_v2_asset_registry(v2_payload) or None,
             "prompt_packages": _safe_v2_prompt_packages(v2_payload) or None,

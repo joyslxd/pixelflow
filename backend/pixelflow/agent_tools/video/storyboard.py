@@ -11,6 +11,7 @@ from pixelflow.video.contracts import VideoToolResult
 from pixelflow.video.workspace.payload import (
     WORKSPACE_SCHEMA_VERSION,
     WorkspaceAssetRecord,
+    WorkspaceCreationContract,
     WorkspaceCreativeBrief,
     WorkspacePromptPackage,
     material_asset_records,
@@ -63,6 +64,9 @@ class PrepareScenePackagesInput(BaseModel):
     creative_brief: WorkspaceCreativeBrief | None = None
     narrative_plan: dict[str, JsonValue] = Field(default_factory=dict)
     asset_registry: tuple[WorkspaceAssetRecord, ...] = ()
+    # 可与分镜一起冻结；若模型/档案尚未选定，Agent 也可稍后用
+    # set_video_generation_contract 单独写入，避免为补参数重写整份脚本。
+    creation_contract: WorkspaceCreationContract | None = None
 
     @model_validator(mode="after")
     def validate_duration_and_ids(self) -> PrepareScenePackagesInput:
@@ -158,6 +162,7 @@ class PrepareScenePackagesTool:
             "creative_brief",
             "narrative_plan",
             "asset_registry",
+            "creation_contract",
             "prompt_packages",
             "script",
             "scenes",
@@ -240,6 +245,12 @@ class PrepareScenePackagesTool:
         narrative_plan = dict(payload.get("narrative_plan") or {})
         narrative_plan.update(request.narrative_plan)
         narrative_plan["script"] = request.script.strip()
+        current_contract = payload.get("creation_contract")
+        creation_contract = (
+            request.creation_contract.model_dump(mode="json")
+            if request.creation_contract is not None
+            else (dict(current_contract) if isinstance(current_contract, Mapping) else None)
+        )
         return VideoToolResult(
             tool_name=self.spec.name,
             public_summary=f"已准备 {len(scenes)} 个分镜，总时长 {total} 秒；长片将按 M06 批次拆分，下一步可请求生成确认。",
@@ -248,6 +259,7 @@ class PrepareScenePackagesTool:
                 "creative_brief": creative_brief,
                 "narrative_plan": narrative_plan,
                 "asset_registry": list(asset_by_id.values()),
+                **({"creation_contract": creation_contract} if creation_contract is not None else {}),
                 "prompt_packages": prompt_packages,
                 "script": script_data,
                 "scenes": scenes,

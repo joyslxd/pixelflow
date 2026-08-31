@@ -71,7 +71,9 @@ class GatewayOperationBatchResumePort(OperationBatchResumePort):
             max_business_tools=limits.max_business_tools,
             max_billable_batch_starts=limits.max_billable_batch_starts,
             deadline_seconds=limits.deadline_seconds,
-            max_output_tokens=192,
+            # 用途：批次终态恢复仍要让 Agent 读取结果、给出面向用户的最终结论；影响：避免旧的
+            # 192 token 预算在仅产出 reasoning 时直接失败，计费次数仍由 operation_resume_v1 限制。
+            max_output_tokens=32_768,
             **projection,
         )
         return (await self._bridge.start(request)).run_id

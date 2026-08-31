@@ -21,6 +21,7 @@ from .creative_brief import (
 )
 from .credential_store import TransientBatchCredentialStore, TransientRunCredentialStore
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
+from .production_contract import SetVideoGenerationContractTool
 from .registry import VideoToolRegistry
 from .scene import (
     GenerateScenesInput,
@@ -63,6 +64,7 @@ __all__ = [
     "VideoToolRegistry",
     "InspectVideoWorkspaceInput",
     "InspectVideoWorkspaceTool",
+    "SetVideoGenerationContractTool",
     "AnalyzeVideoInput",
     "AnalyzeVideoTool",
     "InspectScriptInput",

@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext
+from pixelflow.agent_tools.video.production_contract import SetVideoGenerationContractTool
 from pixelflow.agent_tools.video.registry import VideoToolRegistry
+from pixelflow.agent_tools.video.scene import GenerateScenesTool
 from pixelflow.agent_tools.video.storyboard import PrepareScenePackagesTool
 from pixelflow.video.contracts import VideoWorkspace
 from pixelflow.video.services.tool_executor import VideoToolExecutor
@@ -44,6 +46,12 @@ async def test_prepare_tool_writes_four_layers_and_legacy_projections_together()
         {
             "script": "母女与时间胶囊",
             "creative_brief": {"platform": "douyin", "aspect_ratio": "9:16"},
+            "creation_contract": {
+                "video_model": "seedance-2.0",
+                "video_ratio": "9:16",
+                "video_size": "1080p",
+                "video_sound": "on",
+            },
             "narrative_plan": {"concept": "把爱变成分担"},
             "asset_registry": [
                 {"asset_id": "image-1", "kind": "character", "role": "母亲", "generation_prompt": "家庭厨房中的母亲角色设定图"}
@@ -67,6 +75,7 @@ async def test_prepare_tool_writes_four_layers_and_legacy_projections_together()
     )
     assert result.workspace_patch["workspace_schema_version"] == 2
     assert result.workspace_patch["creative_brief"]["platform"] == "douyin"
+    assert result.workspace_patch["creation_contract"]["video_model"] == "seedance-2.0"
     assert result.workspace_patch["narrative_plan"]["concept"] == "把爱变成分担"
     assert result.workspace_patch["asset_registry"][0]["asset_id"] == "image-1"
     package = result.workspace_patch["prompt_packages"][0]
@@ -110,6 +119,68 @@ async def test_prepare_tool_executor_accepts_all_declared_workspace_roots() -> N
     assert updated.revision == 2
     assert updated.payload["creative_brief"]["brand"] == "美的"
     assert updated.payload["prompt_packages"][0]["segment_id"] == "A"
+
+
+@pytest.mark.asyncio
+async def test_set_generation_contract_writes_complete_non_billable_provider_route() -> None:
+    """Agent 可单独补齐生产参数，无需为修复路由而重写已确认的分镜。"""
+
+    workspace = VideoWorkspace(workspace_id="workspace-contract", conversation_id="conversation-contract")
+    result = await SetVideoGenerationContractTool().execute(
+        VideoToolContext(user_id="user", workspace=workspace),
+        {
+            "video_model": "seedance-2.0",
+            "video_ratio": "9:16",
+            "video_size": "1080p",
+            "video_sound": "on",
+        },
+    )
+
+    assert result.workspace_patch == {
+        "creation_contract": {
+            "video_model": "seedance-2.0",
+            "video_ratio": "9:16",
+            "video_size": "1080p",
+            "video_sound": "on",
+        }
+    }
+    assert result.model_observation["creation_contract_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_generate_scenes_rejects_missing_creation_contract_before_creating_batch() -> None:
+    """缺路由参数时不得创建注定会在 Dispatcher 中失败的 M06 子 Operation。"""
+
+    class BatchPort:
+        called = False
+
+        async def create_or_read_batch(self, *args, **kwargs):
+            self.called = True
+            raise AssertionError("不应创建批次")
+
+    port = BatchPort()
+    result = await VideoToolRegistry((GenerateScenesTool(batch_operation_port=port),)).execute(
+        VideoToolContext(
+            user_id="user",
+            workspace=VideoWorkspace(
+                workspace_id="workspace-generate-contract",
+                conversation_id="conversation-generate-contract",
+                payload={
+                    "dirty_scene_ids": ["SC01"],
+                    "scenes": [{
+                        "scene_id": "SC01",
+                        "prompt": "产品展示",
+                        "duration_sec": 8,
+                    }],
+                },
+            ),
+        ),
+        "generate_scenes",
+        {"scene_ids": ["SC01"]},
+    )
+
+    assert "尚未冻结视频生产合同" in result.public_summary
+    assert port.called is False
 
 
 @pytest.mark.asyncio

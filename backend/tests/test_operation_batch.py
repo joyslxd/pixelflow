@@ -721,3 +721,4 @@ async def test_gateway_resume_port_freezes_operation_resume_profile(monkeypatch)
     assert bridge.request.trigger_id == "evt_operation_batch_done_test"
     assert bridge.request.limit_profile == "operation_resume_v1"
     assert bridge.request.deadline_seconds == 150
+    assert bridge.request.max_output_tokens == 32_768
