@@ -9,9 +9,17 @@ _RATIO_PATTERN = re.compile(r"^(?:9:16|16:9|1:1)$")
 
 
 def workspace_resolved_aspect_ratio(payload: Mapping[str, object]) -> str | None:
-    """从权威工作区读取已确认画幅；不触发模型调用或旧 Prompt 链。"""
+    """从创意与生产约束读取已确认画幅；不触发模型调用或旧 Prompt 链。"""
 
-    candidates: list[object] = [payload.get("aspect_ratio")]
+    # 已冻结的生产合同优先于创意 Brief；二者都缺失时才兼容历史平面字段。
+    candidates: list[object] = []
+    creation_contract = payload.get("creation_contract")
+    if isinstance(creation_contract, Mapping):
+        candidates.append(creation_contract.get("video_ratio"))
+    creative_brief = payload.get("creative_brief")
+    if isinstance(creative_brief, Mapping):
+        candidates.append(creative_brief.get("aspect_ratio"))
+    candidates.append(payload.get("aspect_ratio"))
     form_values = payload.get("form_values")
     if isinstance(form_values, Mapping):
         candidates.extend((form_values.get("ratio"), form_values.get("aspect_ratio")))

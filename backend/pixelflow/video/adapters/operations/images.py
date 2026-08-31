@@ -26,6 +26,7 @@ from pixelflow.operations.jobs import (
     build_operation_request,
 )
 from pixelflow.operations.ports import OperationConflictError
+from pixelflow.video.services.production_fields import workspace_resolved_aspect_ratio
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
 
@@ -49,15 +50,7 @@ class M06ImageGenerationOperationPort:
         asset_id = str(asset.get("asset_id") or "").strip()
         if not asset_id:
             raise VideoToolExecutionError("图片资产缺少 asset_id")
-        request: Mapping[str, JsonValue] = {
-            "generation_mode": str(asset.get("generation_mode") or "text_to_image"),
-            "asset_id": asset_id,
-            "prompt": str(asset.get("generation_prompt") or ""),
-            "model": str(asset.get("model") or "seeddream-5.0"),
-            "ratio": str(asset.get("ratio") or "1:1"),
-            "size": str(asset.get("size") or "1080p"),
-            "reference_image_urls": asset.get("reference_image_urls") or [],
-        }
+        request = _image_generation_request(context.workspace.payload, asset)
         if self._transformer is not None:
             request = self._transformer(request)
         digest = hashlib.sha256(asset_id.encode()).hexdigest()[:12]
@@ -87,6 +80,31 @@ class M06ImageGenerationOperationPort:
         if operation.status is ExternalJobStatus.SUCCEEDED:
             return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="succeeded")
         return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="failed")
+
+
+def _image_generation_request(
+    workspace_payload: Mapping[str, object],
+    asset: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """构造图片 Provider 请求：画幅归属工作区，Prompt 归属资产注册表。"""
+
+    asset_id = str(asset.get("asset_id") or "").strip()
+    prompt = str(asset.get("generation_prompt") or "").strip()
+    if not asset_id or not prompt:
+        raise VideoToolExecutionError("图片资产缺少 asset_id 或 generation_prompt")
+    # 图片需要与创意/视频生产的画幅一致；未确认时保守回退为方图，不沿用资产侧旧 ratio。
+    ratio = workspace_resolved_aspect_ratio(workspace_payload) or "1:1"
+    return {
+        "generation_mode": str(asset.get("generation_mode") or "text_to_image"),
+        "asset_id": asset_id,
+        # 资产注册表是唯一 Prompt 来源，创意 Brief 和生产合同不得拼接到图片 Prompt。
+        "prompt": prompt,
+        "model": str(asset.get("model") or "seeddream-5.0"),
+        # 默认 2K；只有未来接入模型能力档案后才可将已声明支持 4K 的模型提升到 4K。
+        "size": "2k",
+        "ratio": ratio,
+        "reference_image_urls": asset.get("reference_image_urls") or [],
+    }
 
 
 class M06ImageGenerationBatchDispatcher:

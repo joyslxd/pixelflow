@@ -15,7 +15,10 @@ from pixelflow.capabilities.image_generation import (
 )
 from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepository
 from pixelflow.operations.jobs.batch import build_operation_batch_plan
-from pixelflow.video.adapters.operations.images import M06ImageGenerationBatchOperationPort
+from pixelflow.video.adapters.operations.images import (
+    M06ImageGenerationBatchOperationPort,
+    _image_generation_request,
+)
 from pixelflow.video.adapters.operations.projector import build_image_asset_success_patch
 from pixelflow.video.contracts import VideoWorkspace
 
@@ -84,6 +87,25 @@ async def test_generate_image_assets_creates_batch_for_planned_assets() -> None:
     assert result.model_observation["batch_ids"]
     batch = await repository.list_dispatchable_batches(limit=1)
     assert batch[0].children[0].scene_id == "asset-character-host"
+
+
+def test_image_generation_request_uses_workspace_ratio_2k_and_asset_prompt() -> None:
+    request = _image_generation_request(
+        {
+            "creative_brief": {"aspect_ratio": "9:16"},
+            "creation_contract": {"video_ratio": "16:9"},
+        },
+        {
+            "asset_id": "asset-character-host",
+            "generation_prompt": "资产注册表中的唯一图片提示词",
+            "ratio": "1:1",
+            "size": "1080p",
+        },
+    )
+
+    assert request["prompt"] == "资产注册表中的唯一图片提示词"
+    assert request["ratio"] == "16:9"
+    assert request["size"] == "2k"
 
 
 @pytest.mark.asyncio
