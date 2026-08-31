@@ -192,7 +192,15 @@ async def test_confirm_response_recovers_after_response_was_written_before_resum
     repository = Repository()
     app = FastAPI()
     app.state.pixelflow_agent_tool_repository = repository
-    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "app": app})
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [(b"authorization", b"Bearer confirmation-test-token")],
+            "app": app,
+        }
+    )
 
     async def current_user(_request):
         return "confirmation-owner"
@@ -200,7 +208,10 @@ async def test_confirm_response_recovers_after_response_was_written_before_resum
     async def current_workspace(*_args, **_kwargs):
         return workspace
 
-    async def start_resume(**_kwargs):
+    captured_resume: dict[str, object] = {}
+
+    async def start_resume(**kwargs):
+        captured_resume.update(kwargs)
         return "hrun_" + "b" * 32
 
     async def publish(*_args, **_kwargs):
@@ -225,3 +236,4 @@ async def test_confirm_response_recovers_after_response_was_written_before_resum
 
     assert result.run_id == "hrun_" + "b" * 32
     assert repository.bound_response_id == "response-written-before-crash"
+    assert captured_resume["authorization"] == "Bearer confirmation-test-token"

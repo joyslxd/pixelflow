@@ -1160,6 +1160,13 @@ async def respond_to_harness_interrupt(
                     "若响应不足以安全继续，提出最少必要问题，不得猜测或沿用旧 Run 状态。"
                 )
             ),
+            # 确认恢复的瞬时 Authorization 只转交给新 Run 的进程内票据仓；绝不写入
+            # 中断、Workspace、Run DTO 或事件。计费 Tool 才能在已确认边界内领取它。
+            authorization=(
+                request.headers.get("Authorization", "").strip()
+                if responded.kind == "awaiting_confirmation"
+                else ""
+            ),
         )
         responded = await repository.bind_interrupt_resume_run(
             interrupt_id=interrupt_id,
