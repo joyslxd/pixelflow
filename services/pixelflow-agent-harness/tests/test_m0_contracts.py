@@ -124,6 +124,17 @@ def test_fake_tool_is_strict_and_returns_safe_observation() -> None:
         )
 
 
+def test_sidecar_accepts_gateway_authorization_resume_trigger() -> None:
+    """授权恢复必须穿过 Sidecar 的稳定 Run Trigger 合同，不得在第二跳被拒绝。"""
+
+    payload = _request().model_dump(mode="json")
+    payload["trigger"] = {"type": "authorization_resume", "trigger_id": "authorization-retry"}
+
+    request = HarnessRunRequest.model_validate(payload)
+
+    assert request.trigger.type == "authorization_resume"
+
+
 def test_sidecar_compose_gateway_endpoint_is_limited_to_fixed_service_name(monkeypatch) -> None:
     """Docker Compose 内网只允许固定 Gateway 服务名，任意明文地址仍不能通过。"""
 

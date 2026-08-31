@@ -45,7 +45,15 @@ class TerminationReason(StrEnum):
 class RunTrigger(StrictModel):
     """绑定能够稳定去重的 PixelFlow 触发事件。"""
 
-    type: Literal["user_turn", "confirmation_resume", "operation_resume", "quota_resume", "run_recovery"]
+    type: Literal[
+        "user_turn",
+        "confirmation_resume",
+        "authorization_resume",
+        "form_resume",
+        "operation_resume",
+        "quota_resume",
+        "run_recovery",
+    ]
     trigger_id: str = Field(min_length=1, max_length=200)
 
 
