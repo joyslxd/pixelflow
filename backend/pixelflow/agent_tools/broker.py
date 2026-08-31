@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
 from pixelflow.agent_tools.video.registry import VideoToolRegistry
@@ -18,6 +21,7 @@ from .repository import (
 
 _OBSERVATION_MAX_BYTES = 8_192
 _OBSERVATION_FORBIDDEN = ("authorization", "credential", "secret", "token", "password", "api_key", "provider")
+logger = logging.getLogger(__name__)
 
 
 class AgentToolBroker:
@@ -91,6 +95,7 @@ class AgentToolBroker:
                 public_summary="该 Tool 调用正在执行，请使用同一调用标识重试",
                 model_observation={"code": "tool_call_in_progress"},
             )
+        _trace_generate_scenes(request.run_id, "claimed", request.tool_name)
         tool = self._video_tools.resolve(request.tool_name)
         if tool is None:
             return self._rejected("当前 Run 未授权该 Tool")
@@ -98,6 +103,7 @@ class AgentToolBroker:
             run_id=request.run_id,
             tool_name=tool.spec.name,
         )
+        _trace_generate_scenes(request.run_id, "confirmation_checked", tool.spec.name)
         if tool.spec.confirmation_required and not confirmation_granted:
             # 计费或破坏性 Tool 不得在模型首次调用时执行。这里先把稳定 Observation
             # 写入 Tool Ledger，M5 InterruptHost 再依据该唯一结果落库并创建恢复 Run。
@@ -133,6 +139,7 @@ class AgentToolBroker:
             binding.user_id,
             binding.workspace_id,
         )
+        _trace_generate_scenes(request.run_id, "workspace_loaded", tool.spec.name)
         if workspace is None or workspace.conversation_id != binding.conversation_id:
             return await self._complete_rejection(
                 tool_call_key=tool_call_key,
@@ -148,11 +155,25 @@ class AgentToolBroker:
         credential = None
         if tool.spec.cost_level.value != "none":
             if self._credential_store is None:
-                return self._authorization_required()
+                return await self._authorization_required(
+                    tool_call_key=tool_call_key,
+                    binding=binding,
+                    tool_name=tool.spec.name,
+                    confirmation_granted=confirmation_granted,
+                    request_digest=digest,
+                )
             credential = await self._credential_store.take(request.run_id)
+            _trace_generate_scenes(request.run_id, "credential_taken", tool.spec.name)
             if credential is None:
-                return self._authorization_required()
+                return await self._authorization_required(
+                    tool_call_key=tool_call_key,
+                    binding=binding,
+                    tool_name=tool.spec.name,
+                    confirmation_granted=confirmation_granted,
+                    request_digest=digest,
+                )
         try:
+            _trace_generate_scenes(request.run_id, "executor_started", tool.spec.name)
             result = await self._executor.execute_tool_call(
                 context=VideoToolContext(
                     user_id=binding.user_id,
@@ -176,6 +197,7 @@ class AgentToolBroker:
                 allowed_keys=tool.spec.model_observation_keys,
             )
             pending_operation_job_ids = result.pending_operation_job_ids
+            _trace_generate_scenes(request.run_id, "executor_completed", tool.spec.name)
             response = ToolCallResponse(
                 protocol_version="v1",
                 status=("pending_operation" if pending_operation_job_ids else "completed"),
@@ -200,6 +222,23 @@ class AgentToolBroker:
                     else None
                 ),
             )
+        except asyncio.CancelledError:
+            # 上游 Runtime 断开时也必须尝试收口幂等账本，禁止把该调用永久留在
+            # executing。仍向上抛出取消，让 HTTP 生命周期按原语义结束。
+            response = ToolCallResponse(
+                protocol_version="v1",
+                status="failed",
+                public_summary="该 Tool 调用被中断，请基于当前工作区重新发起",
+                model_observation={"code": "tool_call_cancelled"},
+            )
+            await asyncio.shield(
+                self._repository.complete_tool_call(
+                    tool_call_key=tool_call_key,
+                    request_digest=digest,
+                    response=response.model_dump(mode="json"),
+                )
+            )
+            raise
         except Exception:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
             response = ToolCallResponse(
                 protocol_version="v1",
@@ -245,23 +284,60 @@ class AgentToolBroker:
         )
         return ToolCallResponse.model_validate(persisted)
 
-    @staticmethod
-    def _authorization_required() -> ToolCallResponse:
+    async def _authorization_required(
+        self,
+        *,
+        tool_call_key: str,
+        binding: object,
+        tool_name: str,
+        confirmation_granted: bool,
+        request_digest: str,
+    ) -> ToolCallResponse:
         """缺少当前用户瞬时授权时挂起，禁止以服务级 Provider 凭据代替计费 start。"""
 
-        return ToolCallResponse(
+        from .repository import RunBinding
+
+        if not isinstance(binding, RunBinding):
+            raise AgentToolBindingConflictError("Harness Run binding 类型不符合合同")
+        interrupt = await self._repository.get_or_create_interrupt(
+            tool_call_key=tool_call_key,
+            binding=binding,
+            kind="authorization_required",
+            payload={
+                "tool_name": tool_name,
+                "confirmation_granted": confirmation_granted,
+            },
+        )
+        response = ToolCallResponse(
             protocol_version="v1",
             status="authorization_required",
             public_summary="需要重新授权后才能启动该计费操作",
             model_observation={"code": "tool_authorization_required"},
-            suspension={"kind": "authorization_required"},
+            suspension={
+                "kind": "authorization_required",
+                "tool_name": tool_name,
+                "interrupt_id": interrupt.interrupt_id,
+            },
         )
+        persisted = await self._repository.complete_tool_call(
+            tool_call_key=tool_call_key,
+            request_digest=request_digest,
+            response=response.model_dump(mode="json"),
+        )
+        return ToolCallResponse.model_validate(persisted)
 
     @property
     def manifest_snapshot(self) -> ToolManifestResponse:
         """返回与本 Broker 冻结 Registry 完全一致的 Manifest。"""
 
         return self._manifest_snapshot
+
+
+def _trace_generate_scenes(run_id: str, stage: str, tool_name: str) -> None:
+    """记录生成 Tool 的固定阶段名，排障时不泄漏参数、授权或供应商数据。"""
+
+    if tool_name == "generate_scenes":
+        logger.info("generate_scenes_broker_stage run_id=%s stage=%s", run_id, stage)
 
 
 __all__ = ["AgentToolBindingConflictError", "AgentToolBroker"]
