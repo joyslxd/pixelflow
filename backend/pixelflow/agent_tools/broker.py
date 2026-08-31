@@ -239,7 +239,14 @@ class AgentToolBroker:
                 )
             )
             raise
-        except Exception:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
+        except Exception as error:  # noqa: BLE001 - Tool 失败必须写入同一幂等结果，禁止再次执行业务副作用。
+            # 只记录稳定定位字段；用户正文、Tool 参数、凭据和 Provider 原文都不能进入日志。
+            logger.warning(
+                "agent_tool_execution_failed run_id=%s tool_name=%s error_type=%s",
+                request.run_id,
+                tool.spec.name,
+                type(error).__name__,
+            )
             response = ToolCallResponse(
                 protocol_version="v1",
                 status="failed",
