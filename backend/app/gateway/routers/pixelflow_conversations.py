@@ -61,6 +61,8 @@ _HARNESS_CONTEXT_HISTORY_TOTAL_CHAR_LIMIT = 48_000
 _ASSET_THUMBNAIL_MAX_BYTES = 8 * 1024 * 1024
 # 用途：限定缩略图代理只访问已验证的 TOS 域；影响：浏览器仍不获得原始媒体地址，避免 SSRF。
 _ASSET_THUMBNAIL_ALLOWED_HOST_SUFFIXES = (".tos-cn-beijing.volces.com", ".vitamazing.top")
+# 用途：兼容历史 TOS 域的错误证书；影响：仅在已白名单且无凭据的素材 URL 上放宽 TLS 主机名校验。
+_ASSET_THUMBNAIL_LEGACY_INSECURE_TLS_HOSTS = frozenset({"devtos.vitamazing.top"})
 
 
 class ConversationCreateRequest(BaseModel):
@@ -1029,7 +1031,8 @@ async def get_workspace_asset_thumbnail(
     ):
         raise HTTPException(status_code=404, detail={"code": "workspace_asset_thumbnail_not_found"})
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        verify_tls = host not in _ASSET_THUMBNAIL_LEGACY_INSECURE_TLS_HOSTS
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False, verify=verify_tls) as client:
             response = await client.get(source_url)
     except httpx.HTTPError as error:
         raise HTTPException(status_code=502, detail={"code": "workspace_asset_thumbnail_unavailable"}) from error
