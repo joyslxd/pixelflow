@@ -20,16 +20,6 @@ type AgentWorkspaceProps = {
   conversationId?: string;
 };
 
-function statusLabel(status: string | undefined): string {
-  return ({
-    accepted: "已受理",
-    running: "正在处理",
-    completed: "已完成",
-    failed: "处理失败",
-    cancelled: "已取消",
-  } as Record<string, string>)[status ?? ""] ?? "未启动";
-}
-
 /** 只消费 Gateway 公开 Snapshot/SSE 的新工作台，不保留旧任务轮询或业务状态副本。 */
 export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   const { conversationId: routeConversationId } = useParams();
@@ -48,8 +38,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     submitFormInterrupt,
     resumeAuthorizationInterrupt,
     confirmationSubmittingId,
-    refreshActiveRun,
-    cancelActiveRun,
     recoverActiveRun,
     recoveringRunId,
   } = useAgentConversation(conversationId ?? routeConversationId);
@@ -57,7 +45,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
   const recoveryRequired = isRecoveryRequired(snapshot)
     && detail?.latest_harness_run_is_user_turn === true;
-  const progressText = visible.progressLines.join("\n") || "等待公开进度";
   const quotaInterrupt = (() => {
     const workspace = runtime.videoWorkspace ?? snapshot?.workspace;
     const interruptId = workspace?.summary.quota_interrupt_id;
@@ -144,28 +131,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
       )}
       workspace={(
         <>
-          <div className="flex items-center justify-between gap-2">
-            <p>运行：{snapshot?.run_id ?? "未启动"}</p>
-            <button
-              className="rounded border border-line px-2 py-1 text-xs"
-              onClick={() => void refreshActiveRun()}
-              disabled={!snapshot}
-            >
-              刷新
-            </button>
-          </div>
-          <p className="mt-1">状态：{recoveryRequired ? "等待继续" : statusLabel(snapshot?.status)}</p>
-          {snapshot && snapshot.status === "running" ? (
-            <button
-              className="mt-3 rounded border border-red-200 px-2 py-1 text-xs text-red-700"
-              onClick={() => void cancelActiveRun()}
-            >
-              取消当前运行
-            </button>
-          ) : null}
-          <h2 className="mt-6 text-sm font-medium">公开进度</h2>
-          <pre className="mt-2 whitespace-pre-wrap text-xs text-ink-soft">{progressText}</pre>
-          <h2 className="mt-6 text-sm font-medium">业务工作区</h2>
           {runtime.videoWorkspace ? (
             <WorkspaceV2Panel
               summary={runtime.videoWorkspace.summary}
@@ -175,8 +140,8 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
               operations={runtime.operations}
             />
           ) : (
-            <p className="mt-2 text-xs text-ink-soft">
-              尚无可恢复的 Workspace 投影。当前不接入付费 Tool 或旧轮询。
+            <p className="text-xs text-ink-soft">
+              尚无可查看的 Workspace 投影。
             </p>
           )}
         </>
