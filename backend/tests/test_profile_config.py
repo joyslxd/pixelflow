@@ -20,8 +20,10 @@ def test_dev_profile_maps_sidecar_database_and_memory_without_legacy_runtime(mon
         assert os.environ["PIXELFLOW_GATEWAY_INSTANCE_ID"] == "pixelflow-dev"
         assert os.environ["PIXELFLOW_LONG_TERM_MEMORY_SEARCH_LIMIT"] == "5"
         profiles = json.loads(os.environ["PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES"])
-        assert profiles["video_interactive_v1"]["max_model_steps"] == 12
+        assert profiles["video_interactive_v1"]["max_model_steps"] == 24
         assert LimitProfileResolver().resolve("confirmation_resume").profile == "confirmation_resume_v1"
+        assert LimitProfileResolver().resolve("authorization_resume").profile == "confirmation_resume_v1"
+        assert LimitProfileResolver().resolve("form_resume").profile == "confirmation_resume_v1"
         assert LimitProfileResolver().resolve("run_recovery").max_billable_batch_starts == 0
         assert "DEER_FLOW_CONFIG_PATH" not in os.environ
     finally:
