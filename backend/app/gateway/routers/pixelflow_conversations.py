@@ -994,7 +994,7 @@ async def confirm_harness_interrupt(
     repository = getattr(request.app.state, "pixelflow_agent_tool_repository", None)
     if not isinstance(repository, SQLAgentToolRepository):
         raise HTTPException(status_code=503, detail={"code": "harness_interrupt_repository_unavailable"})
-    bridge = _harness_run_bridge(request)
+    bridge = _agent_run_bridge(request)
     # 先按 interrupt 的原 Run 回查 owner binding，禁止客户端把确认提交到另一会话或工作区。
     original = await repository.get_run_binding_by_interrupt(interrupt_id)
     if original is None:
@@ -1267,7 +1267,7 @@ async def _start_harness_interrupt_resume(
         grant_id = f"credential-grant:{uuid.uuid4()}"
         await credential_store.put_grant(grant_id=grant_id, authorization=authorization)
     try:
-        handle = await _harness_run_bridge(request).start(HarnessRunRequest(
+        handle = await _agent_run_bridge(request).start(HarnessRunRequest(
             user_id=user_id,
             conversation_id=conversation_id,
             workspace_id=workspace.workspace_id,
