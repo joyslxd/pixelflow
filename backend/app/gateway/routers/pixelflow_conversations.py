@@ -16,8 +16,9 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.content_app_auth import is_admin_user
@@ -56,6 +57,10 @@ _HARNESS_CONTEXT_HISTORY_MESSAGE_LIMIT = 16
 _HARNESS_CONTEXT_HISTORY_MESSAGE_CHAR_LIMIT = 6_000
 # 用途：限制当前会话历史总字符数；影响：优先保留最新 Turn，长期偏好仍由独立 Memory 投影提供。
 _HARNESS_CONTEXT_HISTORY_TOTAL_CHAR_LIMIT = 48_000
+# 用途：限制缩略图响应体积；影响：避免大文件占用 Gateway 内存。
+_ASSET_THUMBNAIL_MAX_BYTES = 8 * 1024 * 1024
+# 用途：限定缩略图代理只访问已验证的 TOS 域；影响：浏览器仍不获得原始媒体地址，避免 SSRF。
+_ASSET_THUMBNAIL_ALLOWED_HOST_SUFFIXES = (".tos-cn-beijing.volces.com", ".vitamazing.top")
 
 
 class ConversationCreateRequest(BaseModel):
@@ -968,6 +973,73 @@ async def apply_harness_workspace_command(
     return HarnessWorkspaceCommandResponse(
         client_command_id=body.client_command_id,
         workspace=_workspace_projection(workspace),
+    )
+
+
+@router.get("/{conversation_id}/workspaces/{workspace_id}/assets/{asset_id}/thumbnail")
+async def get_workspace_asset_thumbnail(
+    conversation_id: str,
+    workspace_id: str,
+    asset_id: str,
+    request: Request,
+) -> Response:
+    """按归属校验后代理用户上传素材缩略图，浏览器不接触 TOS 原始地址。"""
+
+    from pixelflow.video.workspace.payload import migrate_workspace_payload
+
+    user_id = await get_current_user(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "not_authenticated"})
+    workspace = await _require_conversation_workspace(
+        request,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+    )
+    payload = workspace.payload if isinstance(workspace.payload, dict) else {}
+    migrated = migrate_workspace_payload(payload)
+    asset = next(
+        (
+            item for item in migrated.get("asset_registry", [])
+            if isinstance(item, dict)
+            and item.get("asset_id") == asset_id
+            and item.get("origin") == "existing_material"
+        ),
+        None,
+    )
+    material_id = asset.get("source_material_id") if isinstance(asset, dict) else None
+    material = next(
+        (
+            item for item in payload.get("materials", [])
+            if isinstance(item, dict)
+            and item.get("material_id") == material_id
+            and item.get("kind") == "image"
+        ),
+        None,
+    )
+    source_url = material.get("url") if isinstance(material, dict) else None
+    parsed = urlparse(source_url) if isinstance(source_url, str) else None
+    host = parsed.hostname.lower() if parsed and parsed.hostname else ""
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or not any(host.endswith(suffix) for suffix in _ASSET_THUMBNAIL_ALLOWED_HOST_SUFFIXES)
+    ):
+        raise HTTPException(status_code=404, detail={"code": "workspace_asset_thumbnail_not_found"})
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            response = await client.get(source_url)
+    except httpx.HTTPError as error:
+        raise HTTPException(status_code=502, detail={"code": "workspace_asset_thumbnail_unavailable"}) from error
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if response.status_code != 200 or not content_type.startswith("image/") or len(response.content) > _ASSET_THUMBNAIL_MAX_BYTES:
+        raise HTTPException(status_code=502, detail={"code": "workspace_asset_thumbnail_unavailable"})
+    return Response(
+        content=response.content,
+        media_type=content_type,
+        headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
     )
 
 
