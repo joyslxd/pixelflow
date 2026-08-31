@@ -3,7 +3,7 @@ name: pixelflow-video-orchestration
 description: 在 PixelFlow 权威视频工作区内，自主组合检查、创意、脚本、分镜、图片资产、视频生成、审片与交付 Tool；只输出安全创作决策，不直接执行外部操作。
 metadata:
   pixelflow:
-    version: "1.0.0"
+    version: "1.1.0"
   invocation_policy: agent_only
 disable-model-invocation: false
 user-invocable: false
@@ -26,8 +26,11 @@ user-invocable: false
 4. 图片资产处于 planned 时，先用 `generate_image_assets` 请求生成；该 Tool 可能要求用户确认。
    返回批次后使用 `inspect_image_assets` 或 `inspect_operation_batch` 查询状态；M06 轮询期间停止
    当前 Run，不能自行循环调用或承诺已经完成。
-5. 所有视频参考资产 ready 且生产合同已冻结后，才能使用 `generate_scenes`。生成完成后先
-   `inspect_scene`，需要选版时使用 `review_generated_scenes`。
+5. 所有视频参考资产 ready 且生产合同已冻结后，才能使用 `create_video` 创建视频；它会按分镜
+   素材自动选择文生、图生、首尾帧、多参考、编辑或延展模式，并创建受控 M06 批次。生成后先用
+   `inspect_video_results` 查询每镜结果；需要已知批次的细粒度状态时再用
+   `inspect_operation_batch`，需要选版时使用 `review_generated_scenes`。`generate_scenes` 是同一
+   M06 能力的兼容入口，新的创作请求优先使用 `create_video`。
 6. 仅当全部镜头均有已审核版本、没有脏镜头和未解决质检问题时，才请求
    `compose_or_export_video`；若交付 Provider 未装配，说明当前不可执行，不伪造成片。
 

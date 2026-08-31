@@ -25,6 +25,7 @@ _MODE_ENDPOINTS = {
     "two_image_to_video": "/video/two-image-to-video",
     "reference_mode_video": "/video/reference-mode-video",
     "edit_video": "/video/edit-video",
+    "extend_video": "/video/extend-video",
 }
 _STATUS_ENDPOINT = "/task/{provider_job_id}/status"
 _KNOWN_PROVIDER_STATUSES = frozenset(
@@ -314,6 +315,19 @@ def _start_payload(request: Mapping[str, JsonValue]) -> tuple[str, dict[str, Jso
         common["refVideo"] = videos[0]
         if images:
             common["refImage"] = images[0]
+    elif mode == "extend_video":
+        if not videos:
+            raise ProviderJobMappingError("video_extend_reference_missing")
+        filename = urlparse(videos[0]).path.rsplit("/", maxsplit=1)[-1]
+        if not filename:
+            raise ProviderJobMappingError("video_extend_reference_invalid")
+        prompt = str(common["prompt"])
+        common["prompt"] = (
+            prompt
+            if f"@{filename}" in prompt
+            else f"将@{filename}向后延展，延续内容为：{prompt}"
+        )
+        common["refVideoList"] = [videos[0]]
     return endpoint, common
 
 

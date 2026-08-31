@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from .video import (
     AnalyzeVideoTool,
-    CreateStoryboardTool,
-    GenerateImageAssetsTool,
     ComposeOrExportVideoTool,
-    InspectImageAssetsTool,
-    InspectOperationBatchTool,
+    CreateStoryboardTool,
+    CreateVideoTool,
+    GenerateImageAssetsTool,
     GenerateScenesTool,
     InspectCreativeBriefTool,
+    InspectImageAssetsTool,
+    InspectOperationBatchTool,
     InspectSceneTool,
     InspectScriptTool,
     InspectVideoPlanTool,
+    InspectVideoResultsTool,
     InspectVideoWorkspaceTool,
     PatchSceneTool,
     PrepareScenePackagesTool,
@@ -42,6 +44,7 @@ def runtime_video_tool_registry(
 
     tools = [
             InspectVideoWorkspaceTool(),
+            InspectVideoResultsTool(),
             InspectImageAssetsTool(),
             InspectOperationBatchTool(batch_repository=operation_batch_repository),
             InspectCreativeBriefTool(),
@@ -64,6 +67,7 @@ def runtime_video_tool_registry(
     # 三类外部能力始终发布到 Manifest，由 Agent 自主判断是否调用；未装配 Provider 时，
     # Handler 返回明确的不可执行观察，不伪造成功，也不影响基础只读 Tool 启动。
     tools.append(GenerateScenesTool(batch_operation_port=scene_generation_batch_operation_port))
+    tools.append(CreateVideoTool(batch_operation_port=scene_generation_batch_operation_port))
     tools.append(GenerateImageAssetsTool(batch_operation_port=image_generation_batch_operation_port))
     tools.append(AnalyzeVideoTool(video_understanding_port))
     return VideoToolRegistry(tuple(tools))

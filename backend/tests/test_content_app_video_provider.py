@@ -165,6 +165,56 @@ async def test_submitted_start_status_maps_to_polling() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extend_video_uses_legacy_content_app_contract() -> None:
+    """延展沿用旧能力的 refVideoList 与 @文件名引用约束，但仍由新 M06 接管。"""
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"taskId": "task-extend", "status": "submitted"}},
+        )
+
+    provider = _provider(handler)
+    request = provider.prepare_operation_request(
+        {
+            "generation_mode": "extend_video",
+            "prompt": "镜头继续向前推进",
+            "model": "seedance-2.0",
+            "ratio": "16:9",
+            "size": "720p",
+            "duration": 5,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": ["https://cdn.example.invalid/previous.mp4"],
+            "audio_urls": [],
+        }
+    )
+    started = await provider.start(
+        request,
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:test-extend",
+    )
+    await provider.aclose()
+
+    assert started.outcome is ProviderJobOutcome.POLLING
+    assert seen["path"] == "/api/video/extend-video"
+    assert seen["body"] == {
+        "prompt": "将@previous.mp4向后延展，延续内容为：镜头继续向前推进",
+        "model": "seedance-2.0",
+        "ratio": "16:9",
+        "size": "720p",
+        "duration": 5,
+        "videoCount": 1,
+        "sound": "on",
+        "refVideoList": ["https://cdn.example.invalid/previous.mp4"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_unknown_start_status_with_task_id_maps_to_polling() -> None:
     """厂商新增启动枚举时，只要 taskId 已存在就交给严格 status 轮询恢复。"""
 

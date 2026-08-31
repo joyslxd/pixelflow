@@ -664,6 +664,12 @@ class GenerateScenesTool:
             "quota_interrupt",
             "scene_video_progress",
         ),
+        model_observation_keys=(
+            "status",
+            "batch_ids",
+            "scene_ids",
+            "workspace_revision_required",
+        ),
     )
 
     def __init__(
@@ -936,7 +942,52 @@ class GenerateScenesTool:
                 if job.status in {"queued", "polling", "start_paused_quota"}
             ),
             requires_confirmation=True,
+            model_observation={
+                "status": "submitted",
+                "batch_ids": [result.batch_id for result in batch_results],
+                "scene_ids": scene_ids,
+                "workspace_revision_required": True,
+            },
         )
+
+
+class CreateVideoTool(GenerateScenesTool):
+    """创建当前 Workspace 已确认分镜的视频；复用 M06 场景生成批次。"""
+
+    spec = VideoToolSpec(
+        name="create_video",
+        description=(
+            "为当前 Workspace 已确认的指定分镜创建视频生成批次。支持文生、图生、首尾帧、"
+            "多参考、编辑与延展模式；具体模式由分镜素材和 generation_mode 决定。"
+        ),
+        input_model=GenerateScenesInput,
+        cost_level=VideoToolCostLevel.BILLABLE,
+        confirmation_required=True,
+        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
+        recovery_mode=VideoToolRecoveryMode.OPERATION,
+        workspace_mutations=(
+            "scenes",
+            "scene_packages",
+            "dirty_scene_ids",
+            "assets",
+            "quota_interrupt",
+            "scene_video_progress",
+        ),
+        model_observation_keys=(
+            "status",
+            "batch_ids",
+            "scene_ids",
+            "workspace_revision_required",
+        ),
+    )
+
+    async def execute(
+        self,
+        context: VideoToolContext,
+        arguments: Mapping[str, object],
+    ) -> VideoToolResult:
+        result = await super().execute(context, arguments)
+        return result.model_copy(update={"tool_name": self.spec.name})
 
 
 class ReviewGeneratedScenesTool:
