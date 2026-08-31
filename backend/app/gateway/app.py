@@ -364,7 +364,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 credential_store=credential_store,
                 manifest_snapshot=tool_manifest,
             )
-            if video_provider is not None:
+            if video_provider is not None or image_provider is not None:
                 from pixelflow.operations.jobs import (
                     MappingProviderJobAdapterResolver,
                     OperationRecoveryRuntime,
