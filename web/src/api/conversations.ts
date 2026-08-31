@@ -49,3 +49,17 @@ export function createConversation(): Promise<ConversationV1> {
     body: JSON.stringify({ title: "新的 Harness 对话" }),
   });
 }
+
+export function updateConversationTitle(
+  conversationId: string,
+  title: string,
+  expectedRevision: number,
+): Promise<ConversationV1> {
+  /** 仅修改会话导航标题；使用 revision 防止覆盖另一端刚完成的重命名。 */
+
+  return agentRequest<ConversationV1>(`/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, expected_revision: expectedRevision }),
+  });
+}

@@ -19,6 +19,7 @@ import {
   createConversation,
   getConversation,
   listConversations,
+  updateConversationTitle,
   type ConversationDetailV1,
   type ConversationV1,
 } from "@/api/conversations";
@@ -54,6 +55,15 @@ function latestRunId(detail: ConversationDetailV1): string | null {
 
 function isHarnessConversation(detail: ConversationDetailV1 | null): boolean {
   return detail?.conversation.orchestration_mode === HARNESS_ORCHESTRATION_MODE;
+}
+
+const DEFAULT_CONVERSATION_TITLES = new Set(["新的 Harness 对话", "新的对话"]);
+
+function titleFromFirstTurn(content: string): string {
+  /** 导航标题仅作摘要，不改写用户原始消息。 */
+
+  const normalized = content.replace(/\s+/gu, " ").trim();
+  return [...normalized].slice(0, 24).join("") || "新的 Harness 对话";
 }
 
 export function useAgentConversation(initialConversationId?: string) {
@@ -188,6 +198,23 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [openConversation, refreshConversations]);
 
+  const renameConversation = useCallback(async (conversation: ConversationV1, title: string) => {
+    /** 会话标题是导航元数据，可独立于 Workspace 以 revision 安全更新。 */
+
+    const normalized = title.replace(/\s+/gu, " ").trim().slice(0, 80);
+    if (!normalized || normalized === conversation.title) return;
+    try {
+      const updated = await updateConversationTitle(conversation.conversation_id, normalized, conversation.revision);
+      setConversations((items) => items.map((item) => item.conversation_id === updated.conversation_id ? updated : item));
+      setDetail((current) => current?.conversation.conversation_id === updated.conversation_id
+        ? { ...current, conversation: updated }
+        : current);
+    } catch (caught) {
+      setError(publicErrorMessage(caught instanceof AgentApiError ? caught.code : undefined));
+      throw caught;
+    }
+  }, []);
+
   const submitTurn = useCallback(async (content: string, materials: TurnMaterialV1[] = []) => {
     /** 提交一个冻结 Turn；网络失败必须复用同一个 client_input_id。 */
 
@@ -202,6 +229,14 @@ export function useAgentConversation(initialConversationId?: string) {
       throw new Error("harness_workspace_not_found");
     }
     const trimmed = content.trim();
+    const shouldGenerateTitle = DEFAULT_CONVERSATION_TITLES.has(detail.conversation.title) && trimmed.length > 0;
+    if (shouldGenerateTitle) {
+      try {
+        await renameConversation(detail.conversation, titleFromFirstTurn(trimmed));
+      } catch {
+        // 标题仅用于导航；失败不能阻断用户的主请求。
+      }
+    }
     const pending = pendingTurnRef.current;
     const clientInputId = pending !== null && pending.content === trimmed
       ? pending.client_input_id
@@ -271,7 +306,7 @@ export function useAgentConversation(initialConversationId?: string) {
       setError(publicErrorMessage(code));
       throw caught;
     }
-  }, [detail, hydrateRun, runtime.videoWorkspace, startEventStream]);
+  }, [detail, hydrateRun, renameConversation, runtime.videoWorkspace, startEventStream]);
 
   const refreshActiveRun = useCallback(async () => {
     /** 用户主动刷新可恢复事实，不创建新的 Run 或重新发送输入。 */
@@ -542,6 +577,7 @@ export function useAgentConversation(initialConversationId?: string) {
     loading,
     canSend: isHarnessConversation(detail),
     newConversation,
+    renameConversation,
     openConversation,
     submitTurn,
     submitWorkspaceCommand,

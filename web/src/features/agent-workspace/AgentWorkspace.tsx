@@ -6,7 +6,6 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useAgentConversation } from "@/features/agent-runtime/useAgentConversation";
 import { isRecoveryRequired, projectVisible } from "@/features/agent-runtime/state";
 import { WorkspaceV2Panel } from "@/features/agent-runtime/WorkspaceV2Panel";
-import { createClientUuid } from "@/lib/uuid";
 import { ConversationList } from "@/features/conversations/ConversationList";
 import { ConversationMessages } from "@/features/conversations/ConversationMessages";
 
@@ -43,6 +42,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     loading,
     canSend,
     newConversation,
+    renameConversation,
     submitTurn,
     confirmInterrupt,
     submitFormInterrupt,
@@ -52,7 +52,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     cancelActiveRun,
     recoverActiveRun,
     recoveringRunId,
-    submitWorkspaceCommand,
   } = useAgentConversation(conversationId ?? routeConversationId);
   const snapshot = runtime.snapshot;
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
@@ -76,16 +75,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   const interrupts = quotaInterrupt === null
     ? runtime.interrupts
     : [...runtime.interrupts.filter((item) => item.interrupt_id !== quotaInterrupt.interrupt_id), quotaInterrupt];
-  const updateWorkspace = async (patch: Record<string, unknown>) => {
-    const workspace = runtime.videoWorkspace;
-    if (workspace === null) throw new Error("harness_workspace_not_found");
-    await submitWorkspaceCommand({
-      client_command_id: createClientUuid(),
-      workspace_id: workspace.workspace_id,
-      expected_workspace_revision: workspace.revision,
-      patch,
-    });
-  };
   const openFromList = (nextConversationId: string) => {
     /** URL 是最后停留会话的唯一浏览器恢复来源，刷新后不应回跳旧会话。 */
 
@@ -97,6 +86,10 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     const created = await newConversation();
     navigate(`/c/${encodeURIComponent(created.conversation_id)}`, { replace: true });
   };
+  const renameFromList = (conversation: typeof conversations[number]) => {
+    const title = window.prompt("请输入会话名称", conversation.title);
+    if (title !== null) void renameConversation(conversation, title);
+  };
 
   return (
     <WorkspaceShell
@@ -106,6 +99,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           activeConversationId={detail?.conversation.conversation_id}
           onCreate={() => void createFromList()}
           onOpen={openFromList}
+          onRename={renameFromList}
         />
       )}
       header={(
@@ -175,9 +169,10 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           {runtime.videoWorkspace ? (
             <WorkspaceV2Panel
               summary={runtime.videoWorkspace.summary}
+              conversationId={detail?.conversation.conversation_id ?? ""}
+              workspaceId={runtime.videoWorkspace.workspace_id}
               revision={runtime.videoWorkspace.revision}
               operations={runtime.operations}
-              onApplyPatch={updateWorkspace}
             />
           ) : (
             <p className="mt-2 text-xs text-ink-soft">
