@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from .base import Base
 
@@ -42,7 +43,14 @@ async def init_engine(
     await close_engine()
     if backend == "sqlite":
         Path(sqlite_dir or ".").mkdir(parents=True, exist_ok=True)
-        _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
+        # SQLite/aioSQLite 连接在取消中的 ASGI 请求后不能安全复用；每个 Repository
+        # 事务新建连接可避免连接池返还已关闭连接导致 ``no active connection``。
+        _engine = create_async_engine(
+            url,
+            echo=echo,
+            json_serializer=_json_serializer,
+            poolclass=NullPool,
+        )
 
         @event.listens_for(_engine.sync_engine, "connect")
         def _configure_sqlite(dbapi_connection, _connection_record) -> None:  # noqa: ANN001

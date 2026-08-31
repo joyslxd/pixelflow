@@ -119,24 +119,37 @@ export function useAgentConversation(initialConversationId?: string) {
     stopStream();
     const controller = new AbortController();
     streamAbortRef.current = controller;
-    await reconnectingEventStream(conversationId, runId, controller.signal, {
-      getAfterSequence: () => runtimeRef.current.snapshot?.last_sequence ?? 0,
-      shouldContinue: () => !isTerminalSnapshot(runtimeRef.current.snapshot),
-      onConnecting: (reconnecting) => {
-        setRuntime((current) => setConnection(current, reconnecting ? "reconnecting" : "connecting"));
-      },
-      onEvent: async (event) => {
-        const [next, result] = applyPublicEvent(runtimeRef.current, event);
-        runtimeRef.current = next;
-        setRuntime(next);
-        if (shouldReloadSnapshot(event, result)) {
+    try {
+      await reconnectingEventStream(conversationId, runId, controller.signal, {
+        getAfterSequence: () => runtimeRef.current.snapshot?.last_sequence ?? 0,
+        shouldContinue: () => !isTerminalSnapshot(runtimeRef.current.snapshot),
+        onConnecting: (reconnecting) => {
+          setRuntime((current) => setConnection(current, reconnecting ? "reconnecting" : "connecting"));
+        },
+        onEvent: async (event) => {
+          const [next, result] = applyPublicEvent(runtimeRef.current, event);
+          runtimeRef.current = next;
+          setRuntime(next);
+          if (shouldReloadSnapshot(event, result)) {
+            await hydrateRun(conversationId, runId);
+            return "reload";
+          }
+          return "continue";
+        },
+        onDisconnected: () => setRuntime((current) => setConnection(current, "disconnected")),
+      });
+    } finally {
+      // SSE 在代理断开或终态事件丢失时仍须回读权威 Snapshot，避免任务看板永久停在运行中。
+      const active = runtimeRef.current.snapshot;
+      if (!controller.signal.aborted && active?.run_id === runId) {
+        try {
           await hydrateRun(conversationId, runId);
-          return "reload";
+        } catch {
+          // 流已经结束时不让补偿读取变成未处理 Promise；用户仍可使用“刷新”回读。
+          setRuntime((current) => setConnection(current, "disconnected"));
         }
-        return "continue";
-      },
-      onDisconnected: () => setRuntime((current) => setConnection(current, "disconnected")),
-    });
+      }
+    }
   }, [hydrateRun, stopStream]);
 
   const openConversation = useCallback(async (conversationId: string) => {

@@ -247,10 +247,15 @@ class AgentToolBroker:
                 tool.spec.name,
                 type(error).__name__,
             )
+            summary = (
+                "图片资产生成提交失败，请稍后重试"
+                if tool.spec.name == "generate_image_assets"
+                else "该 Tool 调用未完成，请基于当前工作区继续"
+            )
             response = ToolCallResponse(
                 protocol_version="v1",
                 status="failed",
-                public_summary="该 Tool 调用未完成，请基于当前工作区继续",
+                public_summary=summary,
                 model_observation={"code": "tool_call_failed"},
             )
         finally:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
@@ -26,6 +27,9 @@ from pixelflow.operations.jobs import (
 )
 from pixelflow.operations.ports import OperationConflictError
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImageGenerationJob:
@@ -117,30 +121,43 @@ class M06ImageGenerationBatchOperationPort:
         if context.run_id is None or context.tool_call_id is None:
             raise VideoToolExecutionError("图片生成批次缺少冻结 Run 绑定")
         results = []
-        for index in range(0, len(assets), MAX_CHILD_OPERATIONS_PER_BATCH):
-            group = assets[index:index + MAX_CHILD_OPERATIONS_PER_BATCH]
-            plan = build_operation_batch_plan(
-                run_id=context.run_id,
-                tool_call_id=context.tool_call_id,
-                scene_ids=tuple(str(x.get("asset_id") or "") for x in group),
-                variant_count=1,
-                attempt=attempt,
-                batch_index=index // MAX_CHILD_OPERATIONS_PER_BATCH + 1,
-                stage_prefix="generate_image_asset",
+        stage = "batch_plan"
+        try:
+            for index in range(0, len(assets), MAX_CHILD_OPERATIONS_PER_BATCH):
+                group = assets[index:index + MAX_CHILD_OPERATIONS_PER_BATCH]
+                plan = build_operation_batch_plan(
+                    run_id=context.run_id,
+                    tool_call_id=context.tool_call_id,
+                    scene_ids=tuple(str(x.get("asset_id") or "") for x in group),
+                    variant_count=1,
+                    attempt=attempt,
+                    batch_index=index // MAX_CHILD_OPERATIONS_PER_BATCH + 1,
+                    stage_prefix="generate_image_asset",
+                )
+                stage = "batch_persist"
+                batch = await self._batches.create_or_read(
+                    user_id=context.user_id,
+                    conversation_id=context.workspace.conversation_id,
+                    workspace_id=context.workspace.workspace_id,
+                    plan=plan,
+                    run_id=context.run_id,
+                    tool_call_id=context.tool_call_id,
+                    attempt=attempt,
+                    source_workspace_revision=context.workspace.revision,
+                )
+                stage = "credential_handoff"
+                if self._credentials and context.credential:
+                    await self._credentials.put(batch_id=batch.batch_id, authorization=context.credential.borrow_authorization())
+                results.append((batch.batch_id, tuple(ImageGenerationJob(job_id=c.job_id or c.operation_idempotency_key, asset_id=c.scene_id, status="polling" if c.job_id else "queued") for c in batch.children)))
+        except ValueError as error:
+            # 仅记录受控阶段与异常类型；提示词、资产身份、授权和 Provider 数据不进日志。
+            logger.warning(
+                "image_batch_submission_failed run_id=%s stage=%s error_type=%s",
+                context.run_id,
+                stage,
+                type(error).__name__,
             )
-            batch = await self._batches.create_or_read(
-                user_id=context.user_id,
-                conversation_id=context.workspace.conversation_id,
-                workspace_id=context.workspace.workspace_id,
-                plan=plan,
-                run_id=context.run_id,
-                tool_call_id=context.tool_call_id,
-                attempt=attempt,
-                source_workspace_revision=context.workspace.revision,
-            )
-            if self._credentials and context.credential:
-                await self._credentials.put(batch_id=batch.batch_id, authorization=context.credential.borrow_authorization())
-            results.append((batch.batch_id, tuple(ImageGenerationJob(job_id=c.job_id or c.operation_idempotency_key, asset_id=c.scene_id, status="polling" if c.job_id else "queued") for c in batch.children)))
+            raise
         return tuple(results)
 
 

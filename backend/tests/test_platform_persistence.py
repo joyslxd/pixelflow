@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Integer, String, inspect, select, text
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.pool import NullPool
 
 from pixelflow.platform.persistence import Base, close_engine, ensure_schema, get_engine, get_session_factory, init_engine
 
@@ -31,6 +32,7 @@ async def test_platform_persistence_owns_sqlite_engine_and_metadata(tmp_path) ->
     factory = get_session_factory()
     assert engine is not None
     assert factory is not None
+    assert isinstance(engine.sync_engine.pool, NullPool)
     try:
         await ensure_schema(engine)
         async with factory() as session:
