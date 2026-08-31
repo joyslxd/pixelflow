@@ -40,6 +40,7 @@ def build_operation_batch_plan(
     variant_count: int,
     attempt: int,
     batch_index: int = 1,
+    stage_prefix: str = "generate_scene",
 ) -> OperationBatchPlan:
     """由冻结 Run/Tool 身份生成批次及子 Operation 的双重幂等键。"""
 
@@ -51,6 +52,9 @@ def build_operation_batch_plan(
         raise ValueError("attempt 必须为正整数")
     if isinstance(batch_index, bool) or batch_index < 1:
         raise ValueError("batch_index 必须为正整数")
+    normalized_stage_prefix = stage_prefix.strip()
+    if not normalized_stage_prefix or len(normalized_stage_prefix) > 48 or ":" in normalized_stage_prefix:
+        raise ValueError("批次 stage_prefix 无效")
     normalized_scenes = tuple(scene_id.strip() for scene_id in scene_ids)
     if not normalized_scenes or any(not scene_id for scene_id in normalized_scenes):
         raise ValueError("计费批次至少需要一个非空 scene_id")
@@ -84,7 +88,7 @@ def build_operation_batch_plan(
             # 幂等，但不能使用两套不相关的身份，否则崩溃重领会误判为新付费 start。
             operation_idempotency_key=build_operation_idempotency_key(
                 batch_id,
-                f"generate_scene:{hashlib.sha256(scene_id.encode()).hexdigest()[:12]}:v{variant_index}",
+                f"{normalized_stage_prefix}:{hashlib.sha256(scene_id.encode()).hexdigest()[:12]}:v{variant_index}",
                 1,
                 attempt,
             ),

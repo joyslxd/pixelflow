@@ -44,6 +44,12 @@ class WorkspaceAssetRecord(BaseModel):
     source_material_id: str | None = Field(default=None, max_length=128)
     # 待生成资产的可审阅生产提示词；已有素材不复制原始 URL，也不要求重新生成。
     generation_prompt: str | None = Field(default=None, max_length=20_000)
+    # Provider 完成后的可生产引用；已有素材仍由 materials 私有 URL 解析，不在此复制。
+    image_url: str | None = Field(default=None, max_length=4_096)
+    completed_at: str | None = Field(default=None, max_length=64)
+    failure_status: str | None = Field(default=None, max_length=32)
+    failure_reason_code: str | None = Field(default=None, max_length=128)
+    failed_at: str | None = Field(default=None, max_length=64)
     state: AssetState = "planned"
     reference_asset_ids: tuple[str, ...] = Field(default=(), max_length=32)
     provider_artifact_ref: str | None = Field(default=None, max_length=256)

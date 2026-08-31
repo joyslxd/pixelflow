@@ -5,6 +5,7 @@ from __future__ import annotations
 from .video import (
     AnalyzeVideoTool,
     CreateStoryboardTool,
+    GenerateImageAssetsTool,
     GenerateScenesTool,
     InspectCreativeBriefTool,
     InspectSceneTool,
@@ -29,6 +30,7 @@ def runtime_video_tool_registry(
     plan_repository: object | None = None,
     scene_generation_batch_operation_port: object | None = None,
     video_understanding_port: object | None = None,
+    image_generation_batch_operation_port: object | None = None,
 ) -> VideoToolRegistry:
     """构造当前可安全发布给 Sidecar 的非计费视频 Tool 集合。"""
 
@@ -56,6 +58,8 @@ def runtime_video_tool_registry(
                 batch_operation_port=scene_generation_batch_operation_port,  # type: ignore[arg-type]
             )
         )
+    if image_generation_batch_operation_port is not None:
+        tools.append(GenerateImageAssetsTool(batch_operation_port=image_generation_batch_operation_port))
     if video_understanding_port is not None:
         tools.append(AnalyzeVideoTool(video_understanding_port))
     return VideoToolRegistry(tuple(tools))

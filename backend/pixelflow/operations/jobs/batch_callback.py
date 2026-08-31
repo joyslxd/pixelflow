@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,8 @@ from pixelflow.agent_control_plane.persistence.repositories import (
 )
 from pixelflow.operations.namespace import OperationExecutionNamespace
 from pixelflow.video.adapters.operations.projector import (
+    build_image_asset_failure_patch,
+    build_image_asset_success_patch,
     build_scene_generation_failure_patch,
     build_scene_generation_success_patch,
 )
@@ -119,7 +122,7 @@ class OperationBatchTerminalCallback:
         )
         if child is None:
             raise AgentRuntimeRecordConflictError("OperationBatch Job 绑定漂移")
-        await self._project_scene_terminal(
+        await self._project_terminal(
             batch_workspace_id=batch.workspace_id,
             user_id=user_id,
             conversation_id=conversation_id,
@@ -137,6 +140,51 @@ class OperationBatchTerminalCallback:
         if self._on_child_terminal is not None:
             await self._on_child_terminal()
         return True
+
+    async def _project_terminal(self, **kwargs: object) -> None:
+        """按 Operation stage 将视频分镜或图片资产结果投影到 Workspace。"""
+
+        payload = kwargs["payload"]
+        assert isinstance(payload, Mapping)
+        stage = _required_text(payload, "stage")
+        if stage.startswith("generate_image_asset:"):
+            await self._project_image_asset_terminal(
+                batch_workspace_id=str(kwargs["batch_workspace_id"]),
+                user_id=str(kwargs["user_id"]),
+                asset_stage=stage,
+                status=str(kwargs["status"]),
+                payload=payload,
+                now=kwargs["now"],
+            )
+            return
+        await self._project_scene_terminal(**kwargs)
+
+    async def _project_image_asset_terminal(
+        self,
+        *,
+        batch_workspace_id: str,
+        user_id: str,
+        asset_stage: str,
+        status: str,
+        payload: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        digest = asset_stage.removeprefix("generate_image_asset:").split(":", 1)[0]
+        workspace = await self._video_repository.get_workspace(user_id, batch_workspace_id)
+        if workspace is None:
+            raise AgentRuntimeRecordConflictError("图片资产权威工作区不可用")
+        assets = workspace.payload.get("asset_registry", []) if isinstance(workspace.payload, Mapping) else []
+        asset_id = next((str(item.get("asset_id")) for item in assets if isinstance(item, Mapping) and hashlib.sha256(str(item.get("asset_id") or "").encode()).hexdigest()[:12] == digest), None)
+        if asset_id is None:
+            raise AgentRuntimeRecordConflictError("图片资产终态无法匹配资产身份")
+        result = payload.get("result")
+        patch = (
+            build_image_asset_success_patch(workspace.payload, asset_id=asset_id, result=result, now=now)
+            if status == "succeeded" and isinstance(result, Mapping)
+            else build_image_asset_failure_patch(workspace.payload, asset_id=asset_id, status=status, reason_code=_optional_text(payload.get("reason_code")), now=now)
+        )
+        if patch is not None:
+            await self._video_repository.apply_workspace_patch(user_id, workspace.workspace_id, patch, expected_revision=workspace.revision, now=now)
 
     async def owns_operation(
         self,

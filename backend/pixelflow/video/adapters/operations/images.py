@@ -1,0 +1,221 @@
+"""M06 图片资产生成批次：按资产槽位启动、轮询并回写 Workspace。"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from collections.abc import Mapping
+from datetime import timedelta
+from typing import Any
+
+from pydantic import JsonValue
+
+from pixelflow.agent_control_plane.contracts import ExternalJobStatus
+from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRepository
+from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
+from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
+from pixelflow.operations.jobs import (
+    MAX_CHILD_OPERATIONS_PER_BATCH,
+    OperationBatchRecord,
+    OperationBatchRepository,
+    OperationStartCoordinator,
+    OperationStartQuotaPausedError,
+    ProviderJobAdapter,
+    build_operation_batch_plan,
+    build_operation_request,
+)
+from pixelflow.operations.ports import OperationConflictError
+from pixelflow.video.workspace.repository import VideoWorkspaceRepository
+
+
+class ImageGenerationJob:
+    def __init__(self, *, job_id: str, asset_id: str, status: str, artifact_ref: str | None = None, image_url: str | None = None) -> None:
+        self.job_id, self.asset_id, self.status = job_id, asset_id, status
+        self.artifact_ref, self.image_url = artifact_ref, image_url
+
+
+class M06ImageGenerationOperationPort:
+    """把一项图片资产转为通用 M06 Operation；授权仅在 start 时借用。"""
+
+    def __init__(self, *, repository: AgentRuntimeRepository, adapter: ProviderJobAdapter, lease_owner: str, provider_request_transformer: Any = None) -> None:
+        self._repository, self._adapter, self._lease_owner = repository, adapter, lease_owner
+        self._transformer = provider_request_transformer
+
+    async def start_asset(self, context: VideoToolContext, *, asset: Mapping[str, JsonValue], attempt: int, workflow_id: str, expected_operation_idempotency_key: str) -> ImageGenerationJob:
+        asset_id = str(asset.get("asset_id") or "").strip()
+        if not asset_id:
+            raise VideoToolExecutionError("图片资产缺少 asset_id")
+        request: Mapping[str, JsonValue] = {
+            "generation_mode": str(asset.get("generation_mode") or "text_to_image"),
+            "asset_id": asset_id,
+            "prompt": str(asset.get("generation_prompt") or ""),
+            "model": str(asset.get("model") or "seeddream-5.0"),
+            "ratio": str(asset.get("ratio") or "1:1"),
+            "size": str(asset.get("size") or "1080p"),
+            "reference_image_urls": asset.get("reference_image_urls") or [],
+        }
+        if self._transformer is not None:
+            request = self._transformer(request)
+        digest = hashlib.sha256(asset_id.encode()).hexdigest()[:12]
+        operation_request = build_operation_request(
+            workflow_id=workflow_id,
+            stage=f"generate_image_asset:{digest}",
+            stage_version=1,
+            attempt=attempt,
+            provider_request=request,
+        )
+        if operation_request.idempotency_key != expected_operation_idempotency_key:
+            raise VideoToolExecutionError("图片资产批次子项幂等身份不一致")
+        coordinator = OperationStartCoordinator(self._repository, adapter=self._adapter, user_id=context.user_id, conversation_id=context.workspace.conversation_id)
+        try:
+            operation = await coordinator.start(
+                operation_request,
+                provider_request=request,
+                authorization_provider=lambda: context.credential.borrow_authorization() if context.credential else "",
+                lease_owner=self._lease_owner,
+            )
+        except OperationStartQuotaPausedError as exc:
+            return ImageGenerationJob(job_id=exc.operation.job_id, asset_id=asset_id, status="paused_quota")
+        except (OperationConflictError, ValueError) as exc:
+            raise VideoToolExecutionError("图片资产 Operation 启动失败") from exc
+        if operation.status in {ExternalJobStatus.CREATED, ExternalJobStatus.POLLING}:
+            return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="polling")
+        if operation.status is ExternalJobStatus.SUCCEEDED:
+            return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="succeeded")
+        return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="failed")
+
+
+class M06ImageGenerationBatchDispatcher:
+    def __init__(self, *, batch_repository: OperationBatchRepository, operation_port: M06ImageGenerationOperationPort, max_concurrent: int = 6) -> None:
+        if not 1 <= max_concurrent <= 6:
+            raise ValueError("图片批次并发槽位必须在 1 到 6 之间")
+        self._batches, self._operations, self._max = batch_repository, operation_port, max_concurrent
+
+    async def dispatch_start_slots(self, *, batch: OperationBatchRecord, context: VideoToolContext, assets_by_id: Mapping[str, Mapping[str, JsonValue]], attempt: int) -> dict[str, ImageGenerationJob]:
+        jobs: dict[str, ImageGenerationJob] = {}
+        for child in await self._batches.claim_children(batch_id=batch.batch_id, max_concurrent=self._max):
+            asset = assets_by_id.get(child.scene_id)
+            if asset is None:
+                job = ImageGenerationJob(job_id=child.operation_idempotency_key, asset_id=child.scene_id, status="failed")
+            else:
+                job = await self._operations.start_asset(context, asset=asset, attempt=attempt, workflow_id=batch.batch_id, expected_operation_idempotency_key=child.operation_idempotency_key)
+            if job.status == "succeeded":
+                await self._batches.mark_child_terminal(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, status="succeeded", job_id=job.job_id)
+            elif job.status == "polling":
+                await self._batches.mark_child_polling(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, job_id=job.job_id)
+            else:
+                await self._batches.mark_child_terminal(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, status="failed", job_id=job.job_id)
+            jobs[child.operation_idempotency_key] = job
+        return jobs
+
+
+class M06ImageGenerationBatchOperationPort:
+    def __init__(self, *, batch_repository: OperationBatchRepository, credential_store: TransientBatchCredentialStore | None = None) -> None:
+        self._batches, self._credentials = batch_repository, credential_store
+
+    async def create_or_read_batches(self, context: VideoToolContext, *, assets: list[Mapping[str, JsonValue]], attempt: int) -> tuple[tuple[str, tuple[ImageGenerationJob, ...]], ...]:
+        if context.run_id is None or context.tool_call_id is None:
+            raise VideoToolExecutionError("图片生成批次缺少冻结 Run 绑定")
+        results = []
+        for index in range(0, len(assets), MAX_CHILD_OPERATIONS_PER_BATCH):
+            group = assets[index:index + MAX_CHILD_OPERATIONS_PER_BATCH]
+            plan = build_operation_batch_plan(
+                run_id=context.run_id,
+                tool_call_id=context.tool_call_id,
+                scene_ids=tuple(str(x.get("asset_id") or "") for x in group),
+                variant_count=1,
+                attempt=attempt,
+                batch_index=index // MAX_CHILD_OPERATIONS_PER_BATCH + 1,
+                stage_prefix="generate_image_asset",
+            )
+            batch = await self._batches.create_or_read(
+                user_id=context.user_id,
+                conversation_id=context.workspace.conversation_id,
+                workspace_id=context.workspace.workspace_id,
+                plan=plan,
+                run_id=context.run_id,
+                tool_call_id=context.tool_call_id,
+                attempt=attempt,
+                source_workspace_revision=context.workspace.revision,
+            )
+            if self._credentials and context.credential:
+                await self._credentials.put(batch_id=batch.batch_id, authorization=context.credential.borrow_authorization())
+            results.append((batch.batch_id, tuple(ImageGenerationJob(job_id=c.job_id or c.operation_idempotency_key, asset_id=c.scene_id, status="polling" if c.job_id else "queued") for c in batch.children)))
+        return tuple(results)
+
+
+class M06ImageGenerationBatchDispatcherWorker:
+    """Gateway 生命周期 Worker：重启后继续领取 queued 图片资产。"""
+
+    def __init__(
+        self,
+        *,
+        batch_repository: OperationBatchRepository,
+        video_repository: VideoWorkspaceRepository,
+        dispatcher: M06ImageGenerationBatchDispatcher,
+        credential_store: TransientBatchCredentialStore,
+        worker_id: str,
+        scan_interval: timedelta = timedelta(seconds=1),
+    ) -> None:
+        self._batches, self._videos, self._dispatcher, self._credentials = batch_repository, video_repository, dispatcher, credential_store
+        self._worker_id, self._scan_interval = worker_id, scan_interval
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+        self._wake = asyncio.Event()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    async def run_once(self) -> int:
+        dispatched = 0
+        for batch in await self._batches.list_dispatchable_batches(limit=100):
+            credential = await self._credentials.get(batch_id=batch.batch_id)
+            if credential is None or batch.run_id is None or batch.tool_call_id is None or batch.attempt is None:
+                continue
+            workspace = await self._videos.get_workspace(batch.user_id, batch.workspace_id)
+            if workspace is None or workspace.conversation_id != batch.conversation_id:
+                continue
+            payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
+            assets = {str(item.get("asset_id") or "").strip(): item for item in payload.get("asset_registry", []) if isinstance(item, Mapping)}
+            await self._dispatcher.dispatch_start_slots(
+                batch=batch,
+                context=VideoToolContext(
+                    user_id=batch.user_id,
+                    workspace=workspace,
+                    run_id=batch.run_id,
+                    tool_call_id=batch.tool_call_id,
+                    credential=credential,
+                ),
+                assets_by_id=assets,
+                attempt=batch.attempt,
+            )
+            dispatched += 1
+        return dispatched
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name=f"image-batch-dispatch:{self._worker_id}")
+
+    async def aclose(self) -> None:
+        self._closed = True
+        self._wake.set()
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+
+    async def _run(self) -> None:
+        while not self._closed:
+            try:
+                await self.run_once()
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self._scan_interval.total_seconds())
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(self._scan_interval.total_seconds())
+
+
+__all__ = ["ImageGenerationJob", "M06ImageGenerationOperationPort", "M06ImageGenerationBatchDispatcher", "M06ImageGenerationBatchOperationPort", "M06ImageGenerationBatchDispatcherWorker"]

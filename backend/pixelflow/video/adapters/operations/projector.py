@@ -625,10 +625,63 @@ def build_scene_generation_failure_patch(
     }
 
 
+def build_image_asset_success_patch(
+    payload: Mapping[str, Any],
+    *,
+    asset_id: str,
+    result: Mapping[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    """把图片 Provider 成功结果回写资产注册表；只更新匹配资产。"""
+
+    image_url = str(result.get("image_url") or "").strip()
+    artifact_ref = str(result.get("artifact_ref") or "").strip()
+    if not image_url.startswith("https://") or not artifact_ref.startswith("artifact:"):
+        return None
+    assets = _as_list(payload.get("asset_registry"))
+    changed = False
+    next_assets: list[Any] = []
+    for item in assets:
+        if not isinstance(item, Mapping) or str(item.get("asset_id") or "").strip() != asset_id:
+            next_assets.append(item)
+            continue
+        if item.get("origin") != "planned_generation":
+            return None
+        next_assets.append({**dict(item), "state": "ready", "usable_for_video": True, "provider_artifact_ref": artifact_ref, "image_url": image_url, "completed_at": now.isoformat()})
+        changed = True
+    return {"asset_registry": next_assets} if changed else None
+
+
+def build_image_asset_failure_patch(
+    payload: Mapping[str, Any],
+    *,
+    asset_id: str,
+    status: str,
+    reason_code: str | None,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """把图片 Provider 失败结果回写为不可用于视频的 failed。"""
+
+    assets = _as_list(payload.get("asset_registry"))
+    changed = False
+    next_assets: list[Any] = []
+    for item in assets:
+        if not isinstance(item, Mapping) or str(item.get("asset_id") or "").strip() != asset_id:
+            next_assets.append(item)
+            continue
+        if item.get("origin") != "planned_generation":
+            return None
+        next_assets.append({**dict(item), "state": "failed", "usable_for_video": False, "failure_status": status, "failure_reason_code": (reason_code or "provider_failed")[:128], "failed_at": now.isoformat()})
+        changed = True
+    return {"asset_registry": next_assets} if changed else None
+
+
 __all__ = [
     "ScenePackageCompletionProjector",
     "build_scene_generation_success_patch",
     "build_scene_generation_failure_patch",
+    "build_image_asset_success_patch",
+    "build_image_asset_failure_patch",
     "count_polling_scene_generation_jobs",
     "scene_package_result_from_events",
     "workspace_has_scene_packages",
