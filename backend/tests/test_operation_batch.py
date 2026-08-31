@@ -120,9 +120,11 @@ async def test_dispatcher_worker_reclaims_persisted_queued_child_after_restart()
         operation_port=operation_port,  # type: ignore[arg-type] - 验证持久化 Dispatcher 边界。
         max_concurrent_child_operations_per_batch=1,
     )
+    credentials = TransientBatchCredentialStore()
     batch_port = M06SceneGenerationBatchOperationPort(
         batch_repository=batches,
         dispatcher=dispatcher,
+        credential_store=credentials,
     )
     context = VideoToolContext(
         user_id="user",
@@ -131,12 +133,21 @@ async def test_dispatcher_worker_reclaims_persisted_queued_child_after_restart()
         tool_call_id="tool-call-restart",
         credential=TransientVideoAgentCredential("Bearer test-only"),
     )
-    batch_id, _jobs = await batch_port.create_or_read_batch(
+    batch_id, initial_jobs = await batch_port.create_or_read_batch(
         context,
         scenes=tuple(workspace.payload["scenes"]),
         variant_count=1,
         attempt=1,
     )
+    assert [job.status for job in initial_jobs] == ["queued", "queued"]
+    worker = M06SceneGenerationBatchDispatcherWorker(
+        batch_repository=batches,
+        video_repository=videos,
+        dispatcher=dispatcher,
+        credential_store=credentials,
+        worker_id="test-restart-dispatcher",
+    )
+    assert await worker.run_once() == 1
     first = (await batches.get_batch_for_child_job(user_id="user", conversation_id="conversation", job_id="job-scene-1-1"))
     assert first is not None
     first_child = next(child for child in first.children if child.job_id == "job-scene-1-1")
@@ -146,22 +157,23 @@ async def test_dispatcher_worker_reclaims_persisted_queued_child_after_restart()
         status="succeeded",
         job_id="job-scene-1-1",
     )
-    credentials = TransientBatchCredentialStore()
-    worker = M06SceneGenerationBatchDispatcherWorker(
+    # 模拟 Gateway 重启后未重新授权：已持久化 queued 子项不被丢弃，也不越权 start。
+    await credentials.aclose()
+    restarted_credentials = TransientBatchCredentialStore()
+    restarted_worker = M06SceneGenerationBatchDispatcherWorker(
         batch_repository=batches,
         video_repository=videos,
         dispatcher=dispatcher,
-        credential_store=credentials,
-        worker_id="test-restart-dispatcher",
+        credential_store=restarted_credentials,
+        worker_id="test-restarted-dispatcher",
     )
-    # 模拟 Gateway 重启后未重新授权：已持久化 queued 子项不被丢弃，也不越权 start。
-    assert await worker.run_once() == 0
+    assert await restarted_worker.run_once() == 0
     queued = await batches.list_dispatchable_batches(limit=10)
     assert [item.batch_id for item in queued] == [batch_id]
-    await credentials.put(batch_id=batch_id, authorization="Bearer fresh-user-token")
-    assert await worker.run_once() == 1
+    await restarted_credentials.put(batch_id=batch_id, authorization="Bearer fresh-user-token")
+    assert await restarted_worker.run_once() == 1
     resumed = await batches.get_batch_for_child_job(user_id="user", conversation_id="conversation", job_id="job-scene-2-1")
-    await credentials.aclose()
+    await restarted_credentials.aclose()
     assert resumed is not None
     assert len(operation_port.started) == 2
 
@@ -297,8 +309,8 @@ async def test_batch_claim_limit_and_terminal_aggregation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scene_batch_port_uses_dispatcher_slots_instead_of_tool_loop() -> None:
-    """generate_scenes 批次 Port 只让 Dispatcher 领取两个 start 槽位。"""
+async def test_scene_batch_port_only_persists_queued_children_for_dispatcher_worker() -> None:
+    """generate_scenes 只落库队列，Provider start 必须交给生命周期 Dispatcher Worker。"""
 
     class FakeSceneOperationPort:
         def __init__(self) -> None:
@@ -352,9 +364,8 @@ async def test_scene_batch_port_uses_dispatcher_slots_instead_of_tool_loop() -> 
 
     assert batch_id.startswith("operation-batch-")
     assert len(jobs) == 4
-    assert len(child_port.started) == 2
-    assert sum(job.status == "queued" for job in jobs) == 2
-    assert sum(job.status == "polling" for job in jobs) == 2
+    assert child_port.started == []
+    assert sum(job.status == "queued" for job in jobs) == 4
 
 
 @pytest.mark.asyncio

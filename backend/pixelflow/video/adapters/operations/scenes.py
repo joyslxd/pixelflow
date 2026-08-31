@@ -415,22 +415,15 @@ class M06SceneGenerationBatchOperationPort:
                 batch_id=batch.batch_id,
                 authorization=context.credential.borrow_authorization(),
             )
-        scenes_by_id = {str(scene.get("scene_id") or "").strip(): scene for scene in scenes}
-        started = await self._dispatcher.dispatch_start_slots(
-            batch=batch,
-            context=context,
-            scenes_by_id=scenes_by_id,
-            attempt=attempt,
-        )
+        # Tool HTTP 请求只负责落库批次与短租约授权，绝不在 Sidecar 同步调用内等待
+        # Provider start。生命周期 Worker 会按持久化槽位领取 queued 子项，重启时也能
+        # 继续恢复；否则 Runtime 收束 Tool 调用会留下无法安全判定的 executing 占位。
         jobs = tuple(
-            started.get(
-                child.operation_idempotency_key,
-                SceneGenerationJob(
-                    job_id=child.job_id or child.operation_idempotency_key,
-                    scene_id=child.scene_id,
-                    variant_index=child.variant_index,
-                    status="polling" if child.job_id else "queued",
-                ),
+            SceneGenerationJob(
+                job_id=child.job_id or child.operation_idempotency_key,
+                scene_id=child.scene_id,
+                variant_index=child.variant_index,
+                status="polling" if child.job_id else "queued",
             )
             for child in batch.children
         )
