@@ -10,12 +10,9 @@ content-app JWT 本地解析和远程 ``/api/auth/verify`` 校验后，会把当
 更细粒度的资源权限检查仍由 ``authz.py`` 装饰器负责。
 """
 
-from collections.abc import Callable
-
-from fastapi import HTTPException, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import HTTPException, Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
@@ -57,7 +54,7 @@ def _is_internal_service_path(path: str) -> bool:
     )
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
+class AuthMiddleware:
     """严格认证门禁：非公开路径必须有有效 content-app Authorization。
 
     非公开路径分两步检查：
@@ -73,17 +70,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """
 
     def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """原生 ASGI 认证边界，避免 BaseHTTPMiddleware 取消下游 SQL 提交。"""
+
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive=receive)
         if _is_public(request.url.path) or _is_internal_service_path(request.url.path):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         authorization = request.headers.get("Authorization")
 
         # 非公开路径必须带 content-app Authorization；旧内部 token 绕过通道已删除。
         if not authorization:
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=401,
                 content={
                     "detail": AuthErrorResponse(
@@ -92,6 +96,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     ).model_dump()
                 },
             )
+            await response(scope, receive, send)
+            return
 
         # 严格 JWT 校验：垃圾 token、过期 token、禁用用户都在这里拒绝。
         #
@@ -103,7 +109,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             user = await get_current_user_from_request(request)
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            await response(scope, receive, send)
+            return
 
         # 同时写 request.state.user 和 request.state.auth。前者配合 ContextVar owner
         # 过滤，后者让 @require_permission 不必在同一请求里再次执行 JWT decode + DB 查询。
@@ -115,7 +123,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 供 pixelflow.tracing.record_trace_event_background 关联 vendor_call/llm_call。
         set_conversation_id_context(request.headers.get("X-Conversation-Id"))
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             if content_app_token is not None:
                 reset_current_content_app_auth(content_app_token)
