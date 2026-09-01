@@ -7,9 +7,7 @@ alwaysApply: true
 
 定位当前文件所在 git 根目录，读取（存在才读）：
 
-- `CLAUDE.md`
 - `.spec/ai-coding-context/index.md`
-- `.spec/ai-coding-context/ai-coding-context.md`
 
 调查代码前先检索：
 

@@ -6,7 +6,6 @@
 
 | File | Content | Load when |
 |------|---------|-----------|
-| [ai-coding-context.md](ai-coding-context.md) | 技术栈、启动、测试、硬约束 | 每次会话 |
 | [overview.md](overview.md) | 业务背景与主流程 | 设计 / 系分 |
 | [conventions.md](conventions.md) | 编码与协作约定 | 实现阶段 |
 
@@ -14,7 +13,6 @@
 
 | Path | When |
 |------|------|
-| `CLAUDE.md` | 项目定位与常改目录快照 |
 | `.spec/context-dict/` | 调查前 `rg` 检索历史结论 |
 | `.spec/security-checklists/` | 支付/权限/KYC/DB/API 变更对照 |
 | `docs/superpowers/specs/2026-08-04-unified-video-agent-design.md` | VideoAgent 设计真源 |

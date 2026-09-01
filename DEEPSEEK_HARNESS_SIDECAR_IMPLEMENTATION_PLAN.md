@@ -9,10 +9,12 @@
 > 接入方式：方案 B——DeepSeek Harness 作为独立内部 Sidecar 服务部署
 >
 > 发布原则：旧对话只读归档、运行中任务先排空、付费 Provider 不迁入 Sidecar；同一重构分支删除旧 VideoAgent、旧 LangGraph 任务流、DeerFlow 通用平台 API 和全部 LangChain/LangGraph/DeerFlow 运行依赖
+>
+> 术语说明：**External Operation Coordinator（外部异步任务协调器，历史代号 M06）** 是 PixelFlow 的外部任务可靠性模块，正式代码目录为 `backend/pixelflow/operations/`。后文简称“External Operation Coordinator（M06）”；`M06` 仅保留为历史实施里程碑、数据库/测试迁移记录的代称，不是第三方框架或业务概念。
 
 ## 1. 结论
 
-本次改造不改变 V2 已验证的业务规则，不重写图片、视频、合并、QA、剪映等 Provider Service，也不把 M06 Operation、额度恢复、Workspace revision 或 Snapshot/SSE 迁入 Harness。前端需要同步重构模块边界：保留现有用户旅程和视觉资产，删除 Legacy 页面编排、浏览器 job 轮询和多份业务状态，统一消费 PixelFlow Snapshot/SSE。第一阶段虽然从视频切入，但 Sidecar 对外合同、内部 Engine Port 和前端 Runtime 必须保持通用，后续新增 PPT、Excel、联网搜索等能力时不再创建另一套 Harness 服务或工作台。
+本次改造不改变 V2 已验证的业务规则，不重写图片、视频、合并、QA、剪映等 Provider Service，也不把 External Operation Coordinator（M06）的 Operation、额度恢复、Workspace revision 或 Snapshot/SSE 迁入 Harness。前端需要同步重构模块边界：保留现有用户旅程和视觉资产，删除 Legacy 页面编排、浏览器 job 轮询和多份业务状态，统一消费 PixelFlow Snapshot/SSE。第一阶段虽然从视频切入，但 Sidecar 对外合同、内部 Engine Port 和前端 Runtime 必须保持通用，后续新增 PPT、Excel、联网搜索等能力时不再创建另一套 Harness 服务或工作台。
 
 功能层只替换 V2 的 Agent 决策内核；工程层同时把业务合同从 `video_agent/agent_runtime/skills` 旧包迁到通用 Tool、领域 Service、控制面、Operation 和 Provider 分层，并删除 LangChain/LangGraph/DeerFlow 底座：
 
@@ -34,14 +36,14 @@ PixelFlow 继续负责：
 
 1. 用户、对话、Turn、各领域 Workspace 和 Artifact 的权威存储；
 2. 工具参数二次校验、权限、费用、确认和 revision 乐观锁；
-3. M06 Operation 幂等、start/poll lease、额度暂停、完成 Outbox 和崩溃恢复；
+3. External Operation Coordinator（M06）的 Operation 幂等、start/poll lease、额度暂停、完成 Outbox 和崩溃恢复；
 4. Provider Authorization 的瞬时使用与清理；
 5. 对前端发布稳定的 Snapshot/SSE 业务事件；
 6. 本地结构化用户偏好、品牌资料、火山引擎 Mem0 长期记忆、上下文预算和安全摘要。
 
 Harness Session 日志是 Agent 决策轨迹，不是 PixelFlow 业务真相源。任何脚本、素材、分镜、PPT、表格分析、生成结果、确认和 Operation 状态都必须先写入 PixelFlow 权威 Repository，Sidecar 只能读取投影或通过 Tool Broker 请求变更。
 
-PixelFlow 不实现固定 WorkflowCoordinator，不按 `VideoAgent/PptAgent/DataAnalysisAgent` 预编排步骤，也不由 Supervisor 决定工具顺序。领域差异由 Skill、Tool、Workspace 和 Capability Service 表达；模型在一个原生 Agent Session 内自主完成跨领域调用。M06、Tool Broker、权限和 revision 只是副作用保护，不参与决定下一步业务动作。
+PixelFlow 不实现固定 WorkflowCoordinator，不按 `VideoAgent/PptAgent/DataAnalysisAgent` 预编排步骤，也不由 Supervisor 决定工具顺序。领域差异由 Skill、Tool、Workspace 和 Capability Service 表达；模型在一个原生 Agent Session 内自主完成跨领域调用。External Operation Coordinator（M06）、Tool Broker、权限和 revision 只是副作用保护，不参与决定下一步业务动作。
 
 ## 2. 为什么采用独立 Sidecar
 
@@ -143,7 +145,7 @@ DeepSeek Harness 当前提供 JSON-RPC Runtime、Python SDK、插件化 Tool、S
 | `tools/plan.py` | `agent_tools/video/contracts.py` + `agent_control_plane/plan_service.py` | 删除 `StructuredTool/VideoPlanMiddleware`；保留观察 Plan DTO/Repository 和 `update_plan` Tool Handler | Plan 是权威业务投影，不是 Harness 内部 Todo |
 | `video_agent/workspace/` | `video/workspace/` | 原表、revision、Repository、digest 和 owner 语义迁移后删除旧目录 | 这是业务 Repository/聚合根，不能迁到 Harness |
 | `video_agent/adapters/` | `video/adapters/operations/`、`capabilities/*/providers/` | M06 Operation 适配和 Provider 防腐逻辑按职责拆分，随后删除旧目录 | 类似 Application Adapter 与 Feign Client，不是 Plugin |
-| `agent_runtime/jobs/` | `operations/` | 将 operation identity、lease、quota、recovery、completion Outbox 迁成通用外部任务模块，删除旧目录 | M06 是后端可靠性基础设施，不由模型调用，也不属于 Tool |
+| `agent_runtime/jobs/` | `operations/` | 将 operation identity、lease、quota、recovery、completion Outbox 迁成通用外部任务模块，删除旧目录 | External Operation Coordinator（M06）是后端可靠性基础设施，不由模型调用，也不属于 Tool |
 | `agent_runtime/persistence/`、`service.py`、上下文组件 | `agent_control_plane/persistence/`、`service.py`、`context/` | 保留 Turn、Snapshot/SSE、压缩队列和事务语义，改用 PixelFlow Base/Session 后删除旧目录 | 这是 Agent 控制面 Service/Repository，不属于 Harness Engine |
 | `agent_workflows/video/planning.py`、`scene_packages.py` | `video/services/script_service.py`、`scene_package_service.py` | 迁移 Plan 权威快照、脚本/场景包校验和版本化语义后删除旧文件 | 这是视频业务用例，不是 Workflow Coordinator 或 Harness Skill |
 | `agent_workflows/video/video_generation.py`、`postproduction.py`、`delivery.py` | `video/services/scene_service.py`、`inspection_service.py`、`delivery_service.py` + `video/adapters/operations/` | 迁移分镜生成、QA/后期、合并/剪映交付到领域 Service 和 M06 Adapter 后删除旧文件 | 外部副作用仍由 Capability Provider/M06 承担，不能保留为历史 Workflow 层 |
@@ -194,8 +196,8 @@ flowchart LR
     PLUGIN -->|"服务身份 + Tool Call"| BROKER["/agent/internal/agent-tools/calls"]
     BROKER --> GATE["Capability Tool Gateway"]
     GATE --> WS["Video/PPT/Spreadsheet Workspace Repository"]
-    GATE --> M06["M06 Operation Coordinator"]
-    M06 --> PROVIDER["图片/视频/PPT/搜索/剪辑 Provider 或 Worker"]
+    GATE --> EOC["External Operation Coordinator（M06）"]
+    EOC --> PROVIDER["图片/视频/PPT/搜索/剪辑 Provider 或 Worker"]
     SIDE --> EVENTS["Sidecar Run Event Store"]
     EVENTS -->|"断点事件流"| BRIDGE
     BRIDGE --> RT
@@ -251,7 +253,7 @@ Operation 完成事件   -> 一个新的 Harness Session / Run
 
 ### 6.2 不使用 Harness background job 承载 Provider
 
-DeepSeek Harness 支持 background job，但 PixelFlow 不使用它承载图片、视频、合并、QA 或剪映任务。原因是 M06 已经提供成熟的业务幂等、租约、额度暂停、完成 Outbox 和恢复机制。
+DeepSeek Harness 支持 background job，但 PixelFlow 不使用它承载图片、视频、合并、QA 或剪映任务。原因是 External Operation Coordinator（M06）已经提供成熟的业务幂等、租约、额度暂停、完成 Outbox 和恢复机制。
 
 工具启动外部任务时只返回：
 
@@ -263,9 +265,9 @@ DeepSeek Harness 支持 background job，但 PixelFlow 不使用它承载图片�
 }
 ```
 
-Sidecar 的 suspension policy 看到 `pending_operation` 后必须关闭本轮 Agent Run，禁止模型继续启动其他付费任务。M06 完成事件到达后，PixelFlow 使用 `completion_event_id` 创建新的恢复 Run，并注入最新 Workspace 结果。
+Sidecar 的 suspension policy 看到 `pending_operation` 后必须关闭本轮 Agent Run，禁止模型继续启动其他付费任务。External Operation Coordinator（M06）完成事件到达后，PixelFlow 使用 `completion_event_id` 创建新的恢复 Run，并注入最新 Workspace 结果。
 
-因此，视频生成的分钟级等待时间不计入 Sidecar `deadline_seconds`：`generate_video` Tool 只负责校验、创建或回读 M06 Operation、返回 `pending_operation`，通常应在秒级完成；M06 Worker 在 Sidecar 之外按 Provider 轮询策略持续查询。完成、失败、额度暂停或超时后，M06 以持久化事件创建新的短 Agent Run，让模型基于最新 Workspace 决定审片、修订、重生成或交付。
+因此，视频生成的分钟级等待时间不计入 Sidecar `deadline_seconds`：`generate_video` Tool 只负责校验、创建或回读 External Operation Coordinator（M06）的 Operation、返回 `pending_operation`，通常应在秒级完成；External Operation Coordinator（M06）Worker 在 Sidecar 之外按 Provider 轮询策略持续查询。完成、失败、额度暂停或超时后，External Operation Coordinator（M06）以持久化事件创建新的短 Agent Run，让模型基于最新 Workspace 决定审片、修订、重生成或交付。
 
 “导演式多步决策”也不等于在一个 Run 中连续启动多个计费批次。单个 Run 可以使用多个只读、规划和编辑 Tool，并启动一个计费批次 Tool Call；视频批次可包含多个 `scene × variant` 子 Operation。批次终态后才由一个新的 `operation_resume` Run 决定是否发起下一批。这样既支持一键并发生成多个镜头，又避免模型循环无限叠加批次和费用。
 
@@ -477,8 +479,8 @@ backend/pixelflow/agent_control_plane/
     models.py               # 使用 PixelFlow Base 的控制面 ORM
     repositories.py         # Turn/Snapshot/Outbox/压缩队列 Repository
 
-backend/pixelflow/operations/
-  identity.py               # M06 operation 身份与规范摘要
+backend/pixelflow/operations/ # External Operation Coordinator（外部异步任务协调器，历史代号 M06）
+  identity.py               # External Operation Coordinator（M06）的 operation 身份与规范摘要
   coordinator.py            # start/poll 事务协调
   leases.py                 # start/poll/completion lease
   quota.py                  # 402 暂停与恢复
@@ -594,7 +596,7 @@ flowchart LR
     HANDLER --> APP["video/services"]
     APP --> PORT["capabilities/video_generation/port"]
     PORT --> ADAPTER["capabilities/video_generation/providers/*"]
-    APP --> OP["operations/M06"]
+    APP --> OP["operations/External Operation Coordinator（M06）"]
     OP --> ADAPTER
     APP --> REPO["video/workspace Repository Protocol"]
     SQL["video/workspace/sql_repository"] -.实现.-> REPO
@@ -844,6 +846,7 @@ web/src/
 | `POST /agent/conversations/{id}/turns/start` | 原子保存用户消息并注册 Turn | 保留路径，以 `client_input_id` 幂等；返回 accepted/queued，不等待 Agent 完成 |
 | `POST /agent/conversations/{id}/interrupts/{interrupt_id}/responses` | 所有表单、确认、额度和授权响应 | 新通用入口替代 `video-agent/confirmations` 与 `video-agent/quota` 特例 |
 | `POST /agent/conversations/{id}/workspaces/{type}/commands/{command}` | 右侧编辑器的脚本、分镜、PPT 大纲等明确用户命令 | 携带 `expected_revision/client_command_id`，Controller 只调用同一业务 Service |
+| `GET /agent/conversations/{id}/workspaces/{type}/materials/{material_id}/preview` | 受控图片缩略预览 | 按 conversation、workspace、owner 和 Material 绑定校验后由 Gateway 代理输出图片字节；不返回 TOS/签名 URL |
 | `GET /agent/conversations/{id}/runs/{run_id}` | 人工诊断或页面降级查询 | 不作为正常轮询通道；正常状态只靠 Snapshot/SSE |
 
 `api/agentRuntime.ts` 和 `api/workspaces.ts` 只能依赖由 OpenAPI/schema 生成或合同测试锁定的 DTO。禁止在组件中手拼 URL，也禁止把 `/internal/v1/runs`、`/agent/internal/agent-tools/*`、Cordis Session ID 或 DeepSeek Engine 字段带到浏览器。
@@ -871,6 +874,71 @@ web/src/
 - 空状态只显示能力说明和示例输入；加载状态使用 Snapshot 骨架屏；SSE 暂时断开时保留最后权威视图并显示重连提示，不能把面板清空或自动重提任务；
 - 窄屏下左侧列表和右侧 Workspace 变为抽屉/全屏页签，中间消息与 Composer 保持主视图；Interrupt 仍在消息流中，不允许被右侧抽屉遮挡；
 - 旧对话以只读模式恢复消息、Artifact 和最终 Workspace，Composer 替换为“基于当前产物创建新对话”，避免调用已经删除的旧内核。
+
+### 8.3.1 附件、长期资产与 Turn 的原子链路
+
+附件不是把文件内容塞进 Agent Prompt，而是先落为 content-app 的长期资产，再以不可变引用参与一次 Turn。Composer 的标准链路固定为：
+
+```text
+输入框选择/粘贴/拖拽文件
+  → 浏览器携带用户 Authorization 直传 content-app /api/upload
+  → 上传成功后调用 content-app /api/asset/create 写入长期资产库
+  → Composer 展示“参考图 1 / 商品图 2”等附件卡片
+  → 用户输入自然语言并点击发送
+  → Gateway 原子持久化：用户消息 + materials 引用 + Workspace materials
+  → Sidecar/Tool 仅读取安全材料引用和权威 Workspace
+  → 视频生成 Tool 解析已授权的 TOS URL，提交 External Operation Coordinator（M06）
+```
+
+实现约束：
+
+- `web/src/api/uploads.ts` 是唯一上传 Client。上传请求可使用 content-app 用户 `Authorization`，但 Token 只存在于该次请求内，不进入 React reducer、Snapshot、SSE、localStorage、日志或 Harness。上传进度、失败和取消属于纯 UI 状态。
+- `/api/upload` 返回的原始响应先经过前端 DTO 校验；随后 `/api/asset/create` 只提交文件指纹、类型、大小、租户/用户归属和 content-app 资产句柄，不把二进制或供应商凭据发送给 Gateway。资产创建失败时，附件卡片标记为 `upload_failed`，禁止发送引用；必要的孤儿资产清理由 content-app 生命周期任务负责。
+- 卡片中的“参考图 1”等是本地展示标签，不是资产身份。发送前将附件转换为不可变 `MaterialRef`（`material_id`、`asset_id`、`kind`、`display_name`、`content_type`、`sha256`、`owner_id`），并为每个引用生成稳定的 `material_ref_id`。不得把 TOS URL 作为用户可编辑字段或直接放入消息正文。
+- `POST /agent/conversations/{id}/turns/start` 在同一事务中校验用户/会话归属、资产归属和资产状态，写入用户消息、`materials` 引用、Workspace `materials` 投影以及 `client_input_id` 幂等记录；任一校验失败则整体回滚，不能出现“消息已发送但素材未绑定”。
+- Gateway 只向 Sidecar 下发经过安全摘要化的 `MaterialRef` 和 Workspace Snapshot。Sidecar/Agent Tool 不得读取浏览器上传 Token、content-app 数据库或宿主文件系统；需要下游文件时由 Tool Broker/Capability Handler 按 `asset_id` 服务端换取短期、带权限的 TOS URL。
+- 视频生成 Tool 只接收经过 Gateway/Broker 校验的 TOS URL 或服务端资产句柄，并将其作为 Provider Client 的输入；URL 不进入公开 SSE、普通日志、Trace 属性或模型可见的长期记忆。TOS URL 过期、归属不匹配或内容类型不允许时，返回结构化 `material_unavailable`，由 Agent 请求用户重新上传，不自动改用本地路径。
+- 同一 Turn 的多个素材引用按 `material_ref_id` 去重并保持顺序；重试沿用同一 `client_input_id` 和引用集合，不能因再次点击而创建重复资产绑定、重复消息或重复计费 Operation。
+- SSE 只发布安全的 `material.uploaded`、`material.bound`、`material.failed` 和业务进度事件；前端以事件和 Snapshot 重投影附件卡片及生成结果，不自行读取 Provider 原始状态。
+
+### 8.3.2 素材身份、创作语义与授权的分工（已实现基线）
+
+“角色、产品、道具、参考图”等不是上传文件本身的可信身份，而是该素材在当前创作上下文中的**用途语义**。上传成功后的材料入库已经前移到 Workspace：先登记“已有素材”，后续 Agent 只补充用途和创作提示，不得重新生成或复制同一资产。
+
+```text
+content-app Asset（文件与长期归属）
+  └─ Workspace Material（已有素材、稳定身份、去重）
+      └─ MaterialUsage（产品 / 角色 / 道具 / 参考等创作用途，可逐步补充）
+          └─ Provider Input（Gateway 按稳定 asset_id 私下换取的短期 TOS URL）
+```
+
+| 组件 | 可以做什么 | 不可以做什么 |
+| --- | --- | --- |
+| Skill | 根据安全摘要建议素材名称、`MaterialUsage` 分类、镜头职责和提示词；说明不确定性并请求澄清 | 直接写资产表、把建议当作已确认事实、解析或授权 URL、访问二进制 |
+| Harness Tool | 通过 Tool Broker 请求“材料入库/补充用途”；以 `owner_id + workspace_id + asset_id`（必要时含内容 hash）幂等地原子登记 Workspace Material 和 Usage | 直连数据库、信任模型传入的 URL/owner、绕过 revision/权限校验、调用 Provider |
+| Gateway/Tool Broker | 校验 Run binding、owner、Workspace revision、幂等键和材料状态；在同一 Application Service 事务中落库，并在 Provider 调用前按稳定 `asset_id` 私下换取短期 TOS URL | 将 TOS URL、浏览器 Authorization 或完整资产元数据回传给 Sidecar/Skill/前端事件 |
+
+这里的“Harness Tool 写入”是 Harness 经 Tool Broker 调用 Gateway Application Service 的原子业务命令，并非 Sidecar 直连数据库：Gateway 仍是权威状态写入方。材料入库完成后，`MaterialRef` 与 Workspace Material 使用稳定 `material_id/asset_id` 关联；若同一资产再次作为附件出现，返回已有材料记录并可新增引用，不创建第二个业务资产。语义补充使用带 `expected_revision` 的 `classify_material`/`update_material_usage` 类 Tool 或公共 Workspace Command，保留来源（用户确认或 Agent 建议）和版本；Agent 的猜测不得覆盖用户已确认的产品/角色/道具用途。
+
+视频生成时 Tool 只提交已登记材料的稳定身份与允许的用途。Gateway 在 Provider Client 边界校验 owner、状态、内容类型和使用范围后即时解析 TOS URL；Provider 完成、重试或恢复时均重新解析，绝不持久化或复用过期 URL。当前上传即登记已有素材、去重绑定和后续语义补充是已实现基线，后续 Harness 改造必须保留这些合同。
+
+### 8.3.3 Workspace 素材缩略预览（已实现基线）
+
+V2 Snapshot 中的 `artifact:material:…` 只承载稳定的材料/资产身份和安全摘要，**刻意不包含图片 URL**。因此 Workspace 素材卡片不得从 Snapshot 猜测或拼接对象存储地址；它通过以下受控 Gateway 预览入口取得可渲染的缩略图：
+
+```text
+浏览器从 Snapshot 取得 material_id
+  → GET /agent/conversations/{conversation_id}/workspaces/video/materials/{material_id}/preview
+  → Gateway 校验当前用户、会话、Workspace 类型/revision 与 Material → Asset 绑定
+  → Gateway 在服务端解析短期 TOS URL 并代理图片字节
+  → 浏览器仅收到 image/* 响应，渲染素材卡片缩略图
+```
+
+- Controller 以 `conversation_id + workspace_type + material_id` 查找权威 Workspace Material，再校验当前 owner、会话绑定、材料状态和允许的图片内容类型；无权、跨会话、材料不存在或未绑定时统一返回不泄露存在性的 `404`。
+- Gateway 可以在受控 Client 边界短暂解析 TOS URL，但 HTTP 响应必须直接流式代理图片字节，禁止 `302` 重定向、JSON 包装、响应 Header、SSE、Trace 或日志泄露该 URL。Sidecar、Skill 和 Provider 无权调用该用户预览 API。
+- 响应使用原始安全 `Content-Type`、`Content-Disposition: inline`、大小/像素上限和图片解码校验；`Cache-Control: private`，缓存键至少隔离用户与 `material_id`。需要 ETag 时只使用材料内容 hash 或预览版本，不能用签名 URL。SVG、HTML、未知 MIME 或超限文件拒绝预览，仍可按业务规则作为非预览附件显示。
+- `VideoWorkspaceSnapshotPanel`/素材卡片使用该 `/agent` API 的受控图片地址作为 `img.src`，加载中显示骨架，`404`/过期/失败显示“预览不可用”而不阻塞材料本身或重新上传流程。它不将预览二进制、Object URL 或原始 URL 写入 `AgentWorkspaceState`、localStorage、SSE 或遥测。
+- 预览是展示能力，不是授权委托：视频生成仍由 Gateway/Tool Broker 在 Provider Client 边界重新按 `asset_id` 换取 TOS URL，不能复用浏览器预览请求或其缓存。
 
 ### 8.4 单一权威状态
 
@@ -1721,9 +1789,9 @@ Sidecar 自身配置文件的每个叶子项同样必须有中文说明；JSON �
 - ✅ 新建 `services/pixelflow-agent-harness/` 最小项目和框架无关 `AgentEngine` Contract；
 - 按 DeepSeek 原生 Profile/Bundle/外部 Plugin Package 结构新建最小 composition；当前已验证安全 `cordis.yml`，Profile/Bundle/Plugin 拆分仍待后续 M0 项；
 - 当前已有 `inspect_video_workspace` 测试替身，只能保留为 schema 单元测试夹具，不计入 M0 完成状态；
-- ✅ 新建 Sidecar 的最小真实 `POST /internal/v1/runs` 和 `AgentHarnessSidecarClient`；独立 Uvicorn 进程已通过 Client 服务鉴权、SQLite 持久化、官方 Harness Runtime、真实 Ark 模型及 Capability Plugin→Tool Broker 调用验证。`/live`、`/ready`、Run 查询、取消、幂等和 SSE 完整协议归属 M2；
+- ✅ 新建 Sidecar 的最小真实 `POST /internal/v1/runs` 和 `AgentHarnessSidecarClient`；独立 Uvicorn 进程已通过 Client 服务鉴权、SQLite 持久化、官方 Harness Runtime、当前部署模型及 Capability Plugin→Tool Broker 调用验证。模型端点与模型 ID 由部署配置和真实验证决定。`/live`、`/ready`、Run 查询、取消、幂等和 SSE 完整协议归属 M2；
 - ✅ 新建 Gateway 内部 `/agent/internal/agent-tools/manifest` 与 `/calls`、服务身份、最小 Run binding 及只读 `inspect_video_workspace` Broker；`GatewayHarnessRunBridge` 先使 Sidecar 接受 Run、按返回 `run_id` 保存最小 binding、再用服务 JWT 激活模型，未绑定 Run 不会调用 Tool；真实 loopback HTTP、隔离 SQLite、真实 VideoWorkspace Repository、owner/revision/Manifest 校验和 Plugin 调用已验证。完整 Tool Call 幂等 ledger 归属 M3，完整 Run 幂等归属 M2；
-- ✅ Gateway→Sidecar 与 Sidecar→Tool Broker 均升级为短期服务 JWT 校验，固定各自 `issuer/audience` 并要求 `exp`、`iat`、`service_instance_id`；真实 Ark 模型纵向用例已验证两段鉴权，生产密钥仍待 Secret Manager 装配；
+- ✅ Gateway→Sidecar 与 Sidecar→Tool Broker 均升级为短期服务 JWT 校验，固定各自 `issuer/audience` 并要求 `exp`、`iat`、`service_instance_id`；真实模型纵向用例已验证两段鉴权，生产密钥仍待 Secret Manager 装配；
 - ✅ 新建真实 `inspect_video_workspace` Tool：Sidecar 经实际内部 HTTP、服务身份、Tool Broker、owner binding、Handler 和 Repository 读取隔离测试用户的真实 Workspace；
 - ✅ 提前实现最小真实 `POST /internal/v1/runs` 和 `AgentHarnessSidecarClient`，M0 通过 `GatewayHarnessRunBridge` 从 PixelFlow Gateway 发起 Run，不直接调用 Engine 类冒充全链路；公共 Turn API 接线仍待后续阶段；完整事件 SSE、查询、取消和幂等收敛到 M2；
 - ✅ 新建最小 `SKILL.md`、官方 filesystem Skill Provider 和 `skill` loader 装配验证；M0 只验证最小 Skill 可被模型使用。按需正文、Run 快照、管理员版本隔离和 step/tool/deadline 限制归属 M4；
@@ -1743,7 +1811,7 @@ Sidecar 自身配置文件的每个叶子项同样必须有中文说明；JSON �
 - ✅ Tool args 和 canonical output 能严格校验；
 - ✅ `on_notification` 或 Session 事件可由真实模型 Turn 产生；事件顺序、稳定状态/termination reason、Run 查询、取消、重复请求幂等、完整 SSE 和负向合同归属 M2；
 - Tool 返回 `pending_operation` 或 `awaiting_confirmation` 后停止下一次模型调用、持久化 interrupt/Operation 并创建恢复 Run，归属 M5；
-- ✅ 不装载 Bash/文件/Web/Subagent 后 Agent 仍可正常运行；已由安全 Composition 下真实 Ark 模型 Turn 验证；
+- ✅ 不装载 Bash/文件/Web/Subagent 后 Agent 仍可正常运行；已由安全 Composition 下真实模型 Turn 验证；
 - Sidecar 重启后的持久化事件恢复、`recovery_event_id`、`run_recovery` 和 Tool Ledger 安全收口归属 M2；与外部 Operation/确认的恢复语义归属 M5；
 - ✅ 已将 M00 本地门禁迁为 `scripts/agentization/m00_local_gate.py`，覆盖 `services/pixelflow-agent-harness/` 的中文 commit 语义、人工注释/docstring、Sidecar/Profile/Bundle 配置叶子项说明、ARM64/Linux 原生 Runtime 的 Ruff、官方安全 Composition 与 Capability Plugin 构建；未配置远端 CI，状态保持 `automation_local_ready`。
 
@@ -1846,15 +1914,15 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 
 ### 实施内容
 
-- [ ] 完善 Sidecar Run API、状态机和 Event Store；
-- [ ] 将 M0 最小 Run API、Event Store 和 `AgentHarnessSidecarClient` 扩展为完整稳定协议，保持运行时只使用真实 DeepSeek `AgentEngine`；
+- [x] ✅ 完善 Sidecar Run API、状态机和 Event Store；已持久化 accepted/running/completed/failed/cancelled 状态及公开事件，重启遗留 Run 安全收口。
+- [x] ✅ 将 M0 最小 Run API、Event Store 和 `AgentHarnessSidecarClient` 扩展为完整稳定协议，运行时只装配真实 DeepSeek `AgentEngine`；Gateway 仅通过 Client/RunBridge 调用 Sidecar。
 - [ ] Sidecar 内部 `AgentEngine` Test Double 只放测试目录，用于非法事件、精确超时点和摘要污染等负向合同测试，不得进入启动配置；
-- [ ] 实现 `POST /internal/v1/runs` 幂等；
-- [ ] 实现 Run 查询、取消和 SSE 断点读取；
-- [ ] 实现协议版本、请求摘要和冲突检查；
+- [x] ✅ 实现 `POST /internal/v1/runs` 幂等；相同 Run 请求返回同一 `run_id`，同键摘要漂移返回稳定冲突。
+- [x] ✅ 实现 Run 查询、取消和 SSE 断点读取；已提供查询、取消和 `after_sequence` 回放，未知 Run/cursor 均返回固定错误码。
+- [x] ✅ 实现协议版本、请求摘要和冲突检查；请求 DTO、协议版本、Idempotency-Key 与 request digest 均在 Sidecar 边界校验。
 - [ ] 为 Run 创建、查询、取消、事件 SSE 和重试补齐完整负向合同：非法 DTO、未知 Run/cursor、相同幂等键不同摘要、取消与 Tool 提交竞争、Sidecar 5xx、网络中断和事件乱序；
-- [ ] 实现 Sidecar `/live`、`/ready`；
-- [ ] 用真实 Harness/模型事件验证 PixelFlow Event Bridge，并核对 Sidecar Event Store、PixelFlow Outbox 和浏览器 SSE 的 event_id/sequence；
+- [x] ✅ 实现 Sidecar `/live`、`/ready`；云端容器健康检查已验证。
+- [x] ✅ 用真实 Harness/模型事件验证 PixelFlow Event Bridge；真实公共 Run 已完成 `Gateway → Sidecar → 模型 → Event Store → Gateway 投影 → Snapshot/SSE` 链路，Gateway SSE cursor 回放精确返回后缀且无重复。
 - [ ] 完成 `useAgentConversation`、新 `AgentWorkspace` Shell、会话切换取消和连接状态提示；
 - [ ] 使用真实 Gateway/Sidecar 验证 Snapshot 首屏、SSE 续传、输入排队和进程重启；乱序、非法 JSON、摘要污染等难以由真实组件精确制造的负向 Case 才使用 Test Double，并单独标记；
 - [ ] 验证稳定协议中不存在 Cordis、DeepSeek Session、Plugin 或 Preset 私有类型；
@@ -1878,19 +1946,19 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 
 ### 实施内容
 
-- [ ] 从迁移后的 `agent_tools.catalog/manifest` 生成 versioned manifest；
-- [ ] 新建 `/agent/internal/agent-tools/manifest`；
-- [ ] 新建 `/agent/internal/agent-tools/calls`；
-- [ ] 实现 Sidecar 服务鉴权；
-- [ ] 建立 Run binding Repository；
-- [ ] Tool Broker 回查 owner、conversation、workspace、plan；
-- [ ] 实现 Tool Call 幂等与参数摘要冲突；
-- [ ] 使用迁移后的 `agent_tools.broker`、`agent_tools.video.handlers` 和 `video/services` 执行业务工具；
-- [ ] 过滤 Provider raw、异常正文和 URL 查询参数；
-- [ ] Sidecar Tool Plugin 根据冻结 manifest 注册独立 Tool；第一阶段 Manifest 仍只从 PixelFlow `agent_tools.manifest` 生成；
-- [ ] 拆分 `pixelflow-capability-tools`、`pixelflow-run-policy`、`pixelflow-context-policy` 和 `pixelflow-event-bridge`；
-- [ ] 每个 Plugin 的注册、卸载、取消和资源释放都有独立生命周期测试；
-- [ ] 建立通用公共 Workspace Command Controller，把脚本保存、脚本确认等前端特例迁到 `video/services`，并保持 Tool Handler 与 UI Command 共用同一 Application Service；
+- [x] ✅ 从迁移后的 `agent_tools.catalog/manifest` 生成 versioned manifest；Sidecar 在每个 Run 启动前校验冻结版本与 digest。
+- [x] ✅ 新建 `/agent/internal/agent-tools/manifest`；仅接受 Sidecar 服务身份读取。
+- [x] ✅ 新建 `/agent/internal/agent-tools/calls`；请求经稳定 Tool Call DTO、Run binding 与幂等键校验后进入 Broker。
+- [x] ✅ 实现 Sidecar 服务鉴权；Gateway→Sidecar 与 Sidecar→Tool Broker 均使用短期服务 JWT、固定 issuer/audience 与实例身份。
+- [x] ✅ 建立 Run binding Repository；Gateway 是绑定与业务状态的权威写入方。
+- [x] ✅ Tool Broker 回查 owner、conversation、workspace、plan；Tool 无法绕过用户、会话、revision 与 Run binding。
+- [x] ✅ 实现 Tool Call 幂等与参数摘要冲突；并发重复 Call 只允许一个实际执行，摘要漂移失败关闭。
+- [x] ✅ 使用迁移后的 `agent_tools.broker`、`agent_tools.video.handlers` 和 `video/services` 执行业务工具；Workspace 修改复用同一 Application Service。
+- [x] ✅ 过滤 Provider raw、异常正文和 URL 查询参数；公开 Tool Observation 只保留受控摘要与模型观察字段。
+- [x] ✅ Sidecar Tool Plugin 根据冻结 manifest 注册独立 Tool；第一阶段 Manifest 只从 PixelFlow `agent_tools.manifest` 生成。
+- [x] ✅ 拆分 `pixelflow-capability-tools`、`pixelflow-run-policy`、`pixelflow-context-policy` 和 `pixelflow-event-bridge`；均已纳入安全 Cordis composition。
+- [x] ✅ 每个 Plugin 的注册、卸载、取消和资源释放都有独立生命周期测试；四个 Plugin 的构建与生命周期测试已通过。
+- [x] ✅ 建立通用公共 Workspace Command Controller，把脚本保存、脚本确认等前端特例迁到 `video/services`，并保持 Tool Handler 与 UI Command 共用同一 Application Service。
 
 ### 验收
 
@@ -1902,35 +1970,39 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - Sidecar 无法直接调用 Provider 或 Repository；
 - 前端 Workspace Command 与 Sidecar Tool Call 对同一 revision 产生一致结果，二者都不能绕过 owner、确认和乐观锁。
 
+阶段状态：上述 M3 实施项、后端/合同测试和四个 Plugin 生命周期测试已完成。Linux Sidecar 镜像构建、`/live`、`/ready` 与容器健康检查已通过；真实 HTTP/SSE 模型纵向验收仍被 Provider `INVALID_REQUEST/400` 阻断，当前归类为模型路由参数合同差异，未将 M3 整体标记为完成。
+
 ### M4：原生动态 Skill、真实 Harness Loop、事件桥接与安全回复
 
 目标：在 M0 真实最小纵向链路上装配生产级 Profile/Bundle/Plugin、完整动态 Skill、安全双流事件和视频非计费领域 Tool；M4 不是第一次连接真实 Harness，而是把已经真实验证的最小 loop 扩展为可发布候选。
 
 ### 实施内容
 
-- [ ] 接入固定 DeepSeek Harness SDK/Runtime；
-- [ ] 挂载生产最小 Cordis composition；
-- [ ] 审核 M1 生成的首批视频 Skill，并发布到 `$PIXELFLOW_AGENT_HOME/skills`；该目录直接成为唯一活动 Skill 来源；
+- [x] 接入固定 DeepSeek Harness SDK/Runtime；
+- [x] 挂载生产最小 Cordis composition；
+- [x] 审核首批视频 Skill，并发布到 `$PIXELFLOW_AGENT_HOME/skills`；该目录直接成为唯一活动 Skill 来源；
 - [x] 管理员仅通过受控运维脚本发布活动 Skill：临时文件校验 frontmatter/大小后原子 rename 为 `SKILL.md`；不提供 Skill API、版本历史或回滚。第三方内容不进入公共候选库，随 Skill 源码在引入时完成许可审查；
-- [ ] 使用官方 filesystem Skill Provider 动态发现共享 Skill 根；
-- [ ] 实现 Run 开始时的 catalog/content/version 快照、正文预算和 digest 门禁；
-- [ ] 接入并校验 V2 显式 `deepseek-v4-pro` 逻辑档案及 Sidecar 本地 Provider route；
-- [ ] 实现 PixelFlow Context Builder；
-- [ ] 实现 Harness Session/notification 到稳定事件的映射；
-- [ ] 在 Sidecar 类型层丢弃内部 reasoning notification，实现独立 `public_summary.*` 与 `response.*` 稳定流；
-- [ ] 实现安全思考摘要的 schema、短文本预算、敏感内容过滤和确定性模板降级；摘要失败不得阻断最终回答；
-- [ ] 分别实现 thinking delta 和 response delta 的序号、持久化、节流、断点恢复与 completed 收口；
-- [ ] 屏蔽 reasoning、系统 Prompt 和伪 Tool markup；
-- [ ] 实现 `run_limit_profiles` 选择与 request/limits digest 冻结；`user_turn` 选用 `video_interactive_v1`，`run_recovery` 选用 `run_recovery_v1`，M5 新增的 `operation_resume/confirmation_resume` 分别选用 `operation_resume_v1/confirmation_resume_v1`；
-- [ ] 删除 `agent_harness/sidecar.py`、`agent_harness/recovery.py`、`pixelflow_conversations.py` 中写死的 `90 秒 / 8 step / 3 Tool`；所有 Run Request 必须由同一 Limit Profile Resolver 创建，测试夹具只可显式声明目标 profile；
-- [ ] 将 Gateway/Sidecar `RunLimits` DTO 扩展为 `profile + max_model_steps + max_business_tools + max_billable_batch_starts + deadline_seconds`，拒绝未知 profile、缺项、越界值或 Gateway/Sidecar limits digest 不一致；
-- [ ] 新建 `backend/pixelflow/agent_harness/limit_profiles.py` 的 `LimitProfileResolver`：只从 PixelFlow `platform/config` 读取 `agent_harness.run_limit_profiles`，按可信 `trigger_type` 选择 profile，规范序列化后计算 `run_limits_digest`；Router、Recovery、Operation Resume 和 Sidecar Client 均不得手写限制数值；
-- [ ] Gateway 把完整 `RunLimits` 冻结进 `HarnessRunRequest` 和 Sidecar HTTP `limits` 字段；Sidecar 只校验 profile/数值/digest 与允许上限并执行 Run Policy，禁止从 Sidecar 环境变量、Skill、Tool 参数或模型输出覆盖业务预算；
+- [x] 使用官方 filesystem Skill Provider 动态发现共享 Skill 根；
+- [x] 实现 Run 开始时的 catalog/content 快照、正文预算和 digest 门禁；
+- [x] 接入并校验 V2 显式 `deepseek-v4-pro` 逻辑档案及 Sidecar 本地 Provider route；
+- [x] 实现 PixelFlow Context Builder；
+- [x] 实现 Harness Session/notification 到稳定事件的映射；
+- [x] 在 Sidecar 类型层丢弃内部 reasoning notification，实现独立 `public_summary.*` 与 `response.*` 稳定流；
+- [x] 实现安全思考摘要的 schema、短文本预算、敏感内容过滤和确定性模板降级；摘要失败不得阻断最终回答；
+- [x] 分别实现 thinking delta 和 response delta 的序号、持久化、节流、断点恢复与 completed 收口；
+- [x] 屏蔽 reasoning、系统 Prompt 和伪 Tool markup；
+- [x] 实现 `run_limit_profiles` 选择与 request/limits digest 冻结；`user_turn` 选用 `video_interactive_v1`，`run_recovery` 选用 `run_recovery_v1`，M5 新增的 `operation_resume/confirmation_resume` 分别选用 `operation_resume_v1/confirmation_resume_v1`；
+- [x] 删除 `agent_harness/sidecar.py`、`agent_harness/recovery.py`、`pixelflow_conversations.py` 中写死的 `90 秒 / 8 step / 3 Tool`；所有 Run Request 必须由同一 Limit Profile Resolver 创建，测试夹具只可显式声明目标 profile；
+- [x] 将 Gateway/Sidecar `RunLimits` DTO 扩展为 `profile + max_model_steps + max_business_tools + max_billable_batch_starts + deadline_seconds`，拒绝未知 profile、缺项、越界值或 Gateway/Sidecar limits digest 不一致；
+- [x] 新建 `backend/pixelflow/agent_harness/limits.py` 的 `LimitProfileResolver`：从 PixelFlow profile 的 `harness.run_limit_profiles` 读取，按可信 `trigger_type` 选择 profile，规范序列化后计算 `run_limits_digest`；Router、Recovery 和 Sidecar Client 均不得手写限制数值；
+- [x] Gateway 把完整 `RunLimits` 冻结进 `HarnessRunRequest` 和 Sidecar HTTP `limits` 字段；Sidecar 校验 profile/数值/digest 与允许上限一致，禁止模型、Skill 或 Tool 参数提高预算；
 - [ ] 在 Sidecar Run Policy 实现模型 step、业务 Tool 和 Run deadline；deadline 只作用于模型循环和未提交 Tool HTTP，不计入外部 Provider 异步等待；
-- [ ] 验证只有一个逻辑 `pixelflow-agent`，每个 trigger 创建独立原生 Session/Run，且 PixelFlow 没有 WorkflowCoordinator 或领域 Agent 路由决定 Tool 顺序；
-- [ ] 完成只读 `inspect_workspace/inspect_scene` 与脚本非计费 Tool 旅程；
-- [ ] 将视频脚本、计划、分镜和证据面板迁入新 `features/video/` projector，以同一 Snapshot/revision 渲染聊天 Artifact、看板和右侧 Workspace；
-- [ ] 将公开 thinking/response delta、Plan/Step、Tool 摘要和压缩 Notice 接入新 reducer，`AgentThinkingStream` 只显示安全摘要且不写入正式消息；
+- [x] 验证只有一个逻辑 `pixelflow-agent`，每个 trigger 创建独立原生 Session/Run，且 PixelFlow 没有 WorkflowCoordinator 或领域 Agent 路由决定 Tool 顺序；
+- [x] 完成只读 `inspect_workspace/inspect_scene` 与脚本、计划非计费 Tool 旅程；
+- [x] 将视频脚本、计划、分镜和证据面板迁入新 `features/video/` projector，以同一 Snapshot/revision 渲染聊天 Artifact、看板和右侧 Workspace；
+- [x] 将公开 thinking/response delta、Plan/Step、Tool 摘要和压缩 Notice 接入新 reducer，`AgentThinkingStream` 只显示安全摘要且不写入正式消息；
+
+阶段状态：M4 实现与隔离 Linux x86_64 真实验收已完成。验收使用真实 DeepSeek 模型、官方 Harness Runtime、独立 Gateway/Sidecar 进程、动态 Skill、Tool Broker、SQLite Workspace/Plan、公开双流事件、SSE 断线续传与 Gateway 重启；真实多 Tool 旅程在提高最终回复预算后通过。现网容器配置收口与 M5 可并行进行。
 
 ### 验收
 
@@ -1948,9 +2020,9 @@ M0 真实测试使用专用测试租户、测试数据库和最小权限服务�
 - PixelFlow 上下文预算验证失败时不创建 Sidecar Run；
 - 刷新、SSE 重连、事件重复/乱序和 409 revision 冲突后，聊天、任务看板与视频 Workspace 仍投影到同一 revision。
 
-### M5：确认、Operation、额度和恢复
+### M5：确认、External Operation Coordinator（M06）、额度和恢复
 
-目标：接回 V2 真正的付费链路，同时保持 M06 为唯一外部任务协调器。
+目标：接回 V2 真正的付费链路，同时保持 External Operation Coordinator（M06）为唯一外部异步任务协调器。
 
 ### 实施内容
 
@@ -2286,6 +2358,9 @@ runtime_admission_state = closed
 - reducer 单元测试：Snapshot hydrate、重复事件幂等、sequence gap、旧 cursor、未知 schema、context version 和 Workspace revision 跳跃；
 - transport 合同测试：401/403、409、422、429、503、SSE 断线、空响应、非法 JSON 和固定错误码中文映射；
 - 会话生命周期测试：快速切换 A/B 对话、旧请求延迟返回、SSE 重连、页面卸载、重复提交同一 `client_input_id`；
+- 附件链路测试：`/api/upload` → `/api/asset/create` 成功后才能发送；上传失败、资产归属错误、TOS URL 过期和取消上传均不得写入 `materials`；同一 `client_input_id` 重试不重复绑定资产或创建 Turn；真实生成 Tool 只能收到服务端换取的授权 TOS URL；
+- 素材语义合同测试：同一 `asset_id` 重传返回既有 Workspace Material 而不生成重复资产；Skill 的产品/角色/道具建议只能经带 revision 的 Tool/Command 落库；用户已确认用途不能被 Agent 猜测覆盖；Sidecar 直连 Repository、向模型暴露 TOS URL 或以 URL 作为资产身份必须失败；
+- 素材预览合同测试：Snapshot 的 `artifact:material:…` 不含 URL；同一用户只能预览当前会话/Workspace 已绑定图片，跨用户、跨会话、未绑定和非图片统一返回 `404`；预览响应代理图片字节且不含重定向、TOS/签名 URL；缓存隔离用户与材料，预览失败不影响后续 Provider 重新授权和生成；
 - Interrupt 组件测试：刷新恢复、重复点击、提交中禁用、409 保留 draft、表单 `X -> form_cancelled`、额度和授权恢复；
 - Workspace 组件测试：脚本/分镜/PPT 大纲编辑携带正确 revision，Artifact、看板和右侧面板使用同一 selector；
 - 双流 reducer 测试：thinking 与 response 使用独立锚点/ordinal，交错、重复、乱序、任一流先完成或 Run 挂起时都不会串流或错误收口；
@@ -2361,7 +2436,50 @@ git diff --check
 
 ## 19. 可观测性
 
-### 指标
+### 19.1 追踪：业务账本与分布式 Trace 分层
+
+追踪不是新的权威状态来源。`Run/Event/Workspace/External Operation Coordinator（外部异步任务协调器，历史代号 M06）` 的持久化账本负责**可恢复、幂等、审计和面向用户的状态投影**；OpenTelemetry Trace 负责**诊断一次调用跨进程、跨网络和跨异步任务的耗时、错误与因果关系**。任何 Trace 丢失、采样或过期，都不得影响业务恢复。
+
+采用 OpenTelemetry SDK 和 OTLP Collector，统一使用 W3C Trace Context 的 `traceparent`/`tracestate` 传播。Gateway 的 `/agent` Controller 从入站请求提取上下文；若没有可信上游上下文则创建新 Trace。它通过 HTTP Header 传递到 Sidecar、Tool Broker 和受控 Provider Client，禁止将这些 Header 交给模型、写入 Skill 正文或拼入 Tool 参数。
+
+业务身份和追踪身份必须同时存在，但语义严格分离：
+
+| 类别 | 字段 | 用途 |
+| --- | --- | --- |
+| 业务账本 | `conversation_id`、`turn_id`、`run_id`、`event_id`、`tool_call_id`、`workspace_revision` | 权威查询、幂等、回放和用户状态投影 |
+| 异步操作 | `operation_batch_id`、`operation_id`、`provider_job_id` | 批次/子操作恢复；Provider 标识只留在受控业务库，不作为前端或普通遥测标签 |
+| 诊断关联 | `trace_id`、`span_id`、`causation_traceparent` | 仅关联 Trace；不能替代任一业务主键，也不能据此授权 |
+
+推荐 Span 链路如下（括号内为主要归属）：
+
+```text
+HTTP /agent (Gateway Controller)
+  └─ conversation.turn / run.create (控制面 Service)
+      └─ POST /internal/v1/runs (Sidecar Client)
+          └─ agent.run / model.step / skill.load / tool.call (Sidecar Harness)
+              └─ POST /agent/internal/capability-tool-calls (Tool Broker)
+                  └─ policy.check / handler.execute / workspace.commit
+                      └─ operation_batch.start / provider.submit (External Operation Coordinator)
+                          └─ provider.poll（独立短 Span，直到终态）
+                              └─ batch.complete → operation_resume（新 Run）
+```
+
+模型执行循环应创建 `agent.run`、`model.step`、`skill.load`、`tool.call` 等手工 Span；HTTP 自动埋点只作为补充。Span 属性只记录白名单中的枚举、计数和稳定业务 ID，例如 `run_id`、`tool_name`、`engine_id`、`trigger_type`、`workspace_revision`、`operation_batch_id`、`idempotency_outcome`、`deadline_budget_ms`，不得记录 prompt、对话正文、模型 reasoning、Skill 正文、完整 Tool args、媒体 URL、密钥或 Provider 原始响应。
+
+外部视频任务可能持续数分钟，不能维持一个超长 Span：
+
+- `provider.submit` 在创建外部任务后结束；轮询、回调、恢复各自创建短 Span。
+- Outbox、`pixelflow_operation_batches` 和恢复任务保存受控的 `causation_traceparent`（或等价的 trace context），与事件 ID 一同作为诊断元数据；不得用它做幂等键或权限判断。
+- `operation_resume`、回调和故障恢复开启新的 Trace，并对最初的 `operation_batch.start` 创建 `SpanLink`。这样能看见因果关系，又不会让分钟级任务占用一条未关闭 Trace。
+- 重试或幂等回放创建新的诊断 Span，并标记 `idempotency_outcome=replay`/`retry`；业务侧仍只依据 `event_id`、幂等键和操作状态决定是否再次提交 Provider。
+
+前端只消费 Snapshot/SSE 业务事件，不消费原始 Span、prompt 或推理轨迹。管理员诊断页可通过 `run_id` 查询脱敏的 Trace 摘要（阶段、耗时、错误码、关联 Trace ID）；用户报错只展示业务错误码和 `run_id`，不展示内部 `trace_id`。安全思考摘要仍沿用独立的受控业务事件通道，而不是从 Trace 自动生成。
+
+采样采用受控尾采样：付费操作、批次、恢复、超时、错误和策略拒绝必须保留；成功的非计费短 Run 可按环境采样。Collector 与 Trace 后端必须执行同样的字段白名单和脱敏策略，Trace 保存期短于业务账本，访问按管理员角色隔离。
+
+最低合同测试包括：Gateway 到 Sidecar/Broker 的上下文透传；同一 Run 的跨进程 Span 关联；异步回调与 `operation_resume` 的 `SpanLink`；幂等回放不产生第二次 Provider 提交；以及对 Span 属性、日志、SSE 的正文/密钥/Provider 原始异常泄漏扫描。
+
+### 19.2 指标
 
 - `harness_run_total{engine_id,status,trigger}`；
 - `harness_engine_run_total{engine_id,engine_version,status}`；
@@ -2406,7 +2524,7 @@ git diff --check
 
 前端指标通过受控遥测批量上报，不得包含消息正文、附件 URL、编辑器 draft、Authorization、完整 conversation ID 或 Tool 参数；用户/会话维度如确有诊断需要，只允许使用短期、不可逆、按环境隔离的采样标识。
 
-### 日志字段
+### 19.3 日志字段
 
 只允许：
 
