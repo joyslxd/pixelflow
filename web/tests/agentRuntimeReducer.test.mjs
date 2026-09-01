@@ -46,6 +46,31 @@ test("Sidecar 短名在公开边界规范化为 AgentEventType", () => {
   assert.equal(normalizeEventType("agent.tool.completed"), "agent.tool.completed");
 });
 
+test("公开执行摘要按阶段换行，不拼接为不可读文本", () => {
+  let state = hydrateSnapshot({
+    ...fixture.snapshot,
+    status: "accepted",
+    last_sequence: 0,
+    last_cursor: "",
+    events: [],
+    messages: [],
+  });
+  const first = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "agent.thinking.delta",
+    payload: { delta: "正在分析请求。" },
+  };
+  const second = {
+    ...first,
+    sequence: 2,
+    payload: { delta: "正在调用工具：inspect_video_workspace" },
+  };
+  [state] = applyPublicEvent(state, first);
+  [state] = applyPublicEvent(state, second);
+  assert.equal(projectVisible(state).thinkingPreview, "正在分析请求。\n正在调用工具：inspect_video_workspace");
+});
+
 test("乱序事件判定为 gap，并要求回读 Snapshot", () => {
   const state = hydrateSnapshot({
     ...fixture.snapshot,

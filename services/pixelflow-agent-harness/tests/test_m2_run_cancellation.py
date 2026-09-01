@@ -154,7 +154,9 @@ async def test_cancel_running_run_persists_one_terminal_event(tmp_path: Path) ->
         assert cancelled is not None
         assert state == cancelled
         assert state.status is RunStatus.CANCELLED
-        assert [event.type for event in events] == ["run.accepted", "run.started", "run.cancelled"]
+        assert [event.type for event in events] == [
+            "run.accepted", "run.started", "public_summary.delta", "run.cancelled",
+        ]
         assert all(event.type != "response.completed" for event in events)
     finally:
         await service.aclose()
@@ -183,6 +185,6 @@ async def test_suspension_stops_run_without_publishing_a_final_model_response(tm
     assert state.status is RunStatus.SUSPENDED_CONFIRMATION
     assert state.termination_reason is TerminationReason.SUSPENDED_CONFIRMATION
     assert [event.type for event in events] == [
-        "run.accepted", "run.started", "run.suspended",
+        "run.accepted", "run.started", "public_summary.delta", "run.suspended",
     ]
     assert all(event.type != "response.completed" for event in events)

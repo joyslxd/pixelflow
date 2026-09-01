@@ -100,6 +100,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           messages={runtime.messages}
           responsePreview={visible.responsePreview}
           executionSummary={visible.thinkingPreview}
+          processing={runtime.inputStatus === "sending" || runtime.inputStatus === "queued" || runtime.inputStatus === "processing"}
           loading={loading}
         />
       )}

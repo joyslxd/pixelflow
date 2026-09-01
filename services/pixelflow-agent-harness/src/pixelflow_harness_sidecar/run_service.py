@@ -127,6 +127,13 @@ class RunService:
             started = await self._store.start_if_accepted(run_id)
             if started is None or started.status is not RunStatus.RUNNING:
                 return
+            # 这是一条产品进度，不是模型推理或内部提示词。它保证模型首包、
+            # Skill 加载或网络握手较慢时，浏览器仍能立即向用户说明当前阶段。
+            await self._store.append_event(
+                run_id,
+                "public_summary.delta",
+                {"delta": "正在分析你的请求并核对工作区。"},
+            )
             loop = asyncio.get_running_loop()
 
             def append_realtime_event(event_type: str, payload: dict[str, str]) -> None:

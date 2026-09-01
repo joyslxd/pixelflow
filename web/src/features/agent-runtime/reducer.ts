@@ -221,7 +221,8 @@ export function foldAppliedEvent(
         ...next,
         thinkingStreamsByRun: {
           ...state.thinkingStreamsByRun,
-          [event.run_id]: existing + delta,
+          // 执行摘要由多条完整阶段语句组成，不应像模型回复一样直接粘连。
+          [event.run_id]: existing ? `${existing}\n${delta}` : delta,
         },
       };
     }

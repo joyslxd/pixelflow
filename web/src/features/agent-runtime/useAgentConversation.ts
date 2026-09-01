@@ -13,7 +13,7 @@ import {
   updateVideoPlanPublicGoal as requestVideoPlanPublicGoal,
 } from "@/api/agentRuntime";
 import { createClientUuid } from "@/lib/uuid";
-import type { PublicMessageV1, TurnMaterialV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
+import type { AgentSnapshotV1, PublicMessageV1, TurnMaterialV1, TurnStartV1, WorkspaceCommandV1 } from "@/api/contracts";
 import {
   HARNESS_ORCHESTRATION_MODE,
   createConversation,
@@ -64,6 +64,26 @@ function titleFromFirstTurn(content: string): string {
 
   const normalized = content.replace(/\s+/gu, " ").trim();
   return [...normalized].slice(0, 24).join("") || "新的 Harness 对话";
+}
+
+function acceptedRunSnapshot(
+  conversationId: string,
+  runId: string,
+  workspace: NonNullable<AgentSnapshotV1["workspace"]>,
+): AgentSnapshotV1 {
+  /** 首次 Snapshot 回读尚未返回时的传输态占位，不承载任何业务事实。 */
+
+  return {
+    run_id: runId,
+    conversation_id: conversationId,
+    status: "accepted",
+    last_sequence: 0,
+    last_cursor: "",
+    context_version: 0,
+    events: [],
+    messages: [],
+    workspace,
+  };
 }
 
 export function useAgentConversation(initialConversationId?: string) {
@@ -278,8 +298,28 @@ export function useAgentConversation(initialConversationId?: string) {
         ...workspace,
         revision: started.workspace_revision,
       });
-      runtimeRef.current = acceptedRuntime;
-      setRuntime(acceptedRuntime);
+      const acceptedWorkspace = {
+        ...workspace,
+        revision: started.workspace_revision,
+      };
+      // 不等待 Snapshot 首次回读才建立可见状态。即便网络暂时阻塞，用户也能看到
+      // 任务已受理；后续 SSE/Snapshot 会以 Gateway 权威数据覆盖这份传输态占位。
+      const acceptedWithRun: AgentWorkspaceState = {
+        ...acceptedRuntime,
+        snapshot: acceptedRunSnapshot(
+          detail.conversation.conversation_id,
+          started.run_id,
+          acceptedWorkspace,
+        ),
+        currentRun: { runId: started.run_id, status: "accepted" },
+        inputStatus: "processing",
+        thinkingStreamsByRun: {
+          ...acceptedRuntime.thinkingStreamsByRun,
+          [started.run_id]: "任务已受理，正在分析你的请求并核对工作区。",
+        },
+      };
+      runtimeRef.current = acceptedWithRun;
+      setRuntime(acceptedWithRun);
       void getConversation(detail.conversation.conversation_id).then((latestDetail) => {
         setDetail(latestDetail);
         const persistedMessages = latestDetail.messages.map((message) => ({
@@ -301,8 +341,15 @@ export function useAgentConversation(initialConversationId?: string) {
         setRuntime(next);
       }).catch(() => undefined);
       void (async () => {
-        if (await hydrateRun(detail.conversation.conversation_id, started.run_id)) {
-          void startEventStream(detail.conversation.conversation_id, started.run_id);
+        // SSE 从零开始可在 Snapshot 慢或暂时不可用时持续展示真实公开事件；
+        // Snapshot 仅用于权威收敛，失败不能让用户界面停在无反馈状态。
+        void startEventStream(detail.conversation.conversation_id, started.run_id);
+        try {
+          await hydrateRun(detail.conversation.conversation_id, started.run_id);
+        } catch {
+          const reconnecting = setConnection(runtimeRef.current, "reconnecting");
+          runtimeRef.current = reconnecting;
+          setRuntime(reconnecting);
         }
       })();
     } catch (caught) {
