@@ -133,6 +133,16 @@ export function useAgentConversation(initialConversationId?: string) {
     return !isTerminalSnapshot(snapshot);
   }, []);
 
+  const findNewerRun = useCallback(async (conversationId: string, runId: string): Promise<string | null> => {
+    /** 仅在当前 SSE 结束后回读一次会话索引，自动恢复 Run 不再触发定时完整会话轮询。 */
+
+    const latest = await getConversation(conversationId);
+    const nextRunId = latestRunId(latest);
+    if (nextRunId === null || nextRunId === runId) return null;
+    setDetail((current) => current?.conversation.conversation_id === conversationId ? latest : current);
+    return nextRunId;
+  }, []);
+
   const startEventStream = useCallback(async (conversationId: string, runId: string) => {
     /** 从已 hydrate 的 sequence 订阅；实时更新只消费 SSE，Snapshot 仅用于恢复与权威收敛。 */
 
@@ -163,50 +173,20 @@ export function useAgentConversation(initialConversationId?: string) {
       const active = runtimeRef.current.snapshot;
       if (!controller.signal.aborted && active?.run_id === runId) {
         try {
-          await hydrateRun(conversationId, runId);
+          const keepStreaming = await hydrateRun(conversationId, runId);
+          if (keepStreaming) return;
+          const newerRunId = await findNewerRun(conversationId, runId);
+          if (newerRunId === null) return;
+          if (await hydrateRun(conversationId, newerRunId)) {
+            void startEventStream(conversationId, newerRunId);
+          }
         } catch {
           // 流已经结束时不让补偿读取变成未处理 Promise；用户仍可使用“刷新”回读。
           setRuntime((current) => setConnection(current, "disconnected"));
         }
       }
     }
-  }, [hydrateRun, stopStream]);
-
-  const syncLatestRun = useCallback(async (conversationId: string): Promise<void> => {
-    /** 自动恢复 Run 没有用户消息；页面轮询公开会话索引以切换到 Gateway 最新 Run。 */
-
-    const latest = await getConversation(conversationId);
-    const nextRunId = latestRunId(latest);
-    const activeRunId = runtimeRef.current.snapshot?.run_id ?? null;
-    if (nextRunId === null || nextRunId === activeRunId) return;
-
-    setDetail((current) => current?.conversation.conversation_id === conversationId ? latest : current);
-    stopStream();
-    const keepStreaming = await hydrateRun(conversationId, nextRunId);
-    if (keepStreaming) void startEventStream(conversationId, nextRunId);
-  }, [hydrateRun, startEventStream, stopStream]);
-
-  useEffect(() => {
-    /** 运行中的旧 Run 也要发现 Operation/确认恢复创建的新 Run，不能永久停在旧 Snapshot。 */
-
-    const conversationId = detail?.conversation.conversation_id;
-    if (!conversationId || runtime.snapshot === null || isTerminalSnapshot(runtime.snapshot)) return;
-    let disposed = false;
-    const checkLatestRun = () => {
-      if (!disposed) void syncLatestRun(conversationId).catch(() => undefined);
-    };
-    const timer = window.setInterval(checkLatestRun, 2_000);
-    checkLatestRun();
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [
-    detail?.conversation.conversation_id,
-    runtime.snapshot?.run_id,
-    runtime.snapshot?.status,
-    syncLatestRun,
-  ]);
+  }, [findNewerRun, hydrateRun, stopStream]);
 
   const openConversation = useCallback(async (conversationId: string) => {
     /** 使用 generation 防止 A/B 快速切换时旧请求覆盖当前会话。 */
