@@ -223,7 +223,9 @@ class MemoryOperationBatchRepository:
                 existing.status == "failed" and existing.job_id == child_key
             ):
                 raise AgentRuntimeRecordConflictError("终态子 Operation 不能重新轮询")
-            if existing.job_id is not None and existing.job_id != job_id:
+            if existing.job_id is not None and existing.job_id != job_id and not (
+                existing.status == "failed" and existing.job_id == child_key
+            ):
                 raise AgentRuntimeRecordConflictError("子 Operation 绑定了不同 Job")
             children = tuple(
                 OperationBatchChildRecord(
@@ -454,7 +456,9 @@ class SQLOperationBatchRepository:
                     child.status == "failed" and child.job_id == child_key
                 ):
                     raise AgentRuntimeRecordConflictError("终态子 Operation 不能重新轮询")
-                if child.job_id is not None and child.job_id != job_id:
+                if child.job_id is not None and child.job_id != job_id and not (
+                    child.status == "failed" and child.job_id == child_key
+                ):
                     raise AgentRuntimeRecordConflictError("子 Operation 绑定了不同 Job")
                 child.status = "polling"
                 child.job_id = job_id
