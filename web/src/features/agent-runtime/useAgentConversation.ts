@@ -172,6 +172,42 @@ export function useAgentConversation(initialConversationId?: string) {
     }
   }, [hydrateRun, stopStream]);
 
+  const syncLatestRun = useCallback(async (conversationId: string): Promise<void> => {
+    /** 自动恢复 Run 没有用户消息；页面轮询公开会话索引以切换到 Gateway 最新 Run。 */
+
+    const latest = await getConversation(conversationId);
+    const nextRunId = latestRunId(latest);
+    const activeRunId = runtimeRef.current.snapshot?.run_id ?? null;
+    if (nextRunId === null || nextRunId === activeRunId) return;
+
+    setDetail((current) => current?.conversation.conversation_id === conversationId ? latest : current);
+    stopStream();
+    const keepStreaming = await hydrateRun(conversationId, nextRunId);
+    if (keepStreaming) void startEventStream(conversationId, nextRunId);
+  }, [hydrateRun, startEventStream, stopStream]);
+
+  useEffect(() => {
+    /** 运行中的旧 Run 也要发现 Operation/确认恢复创建的新 Run，不能永久停在旧 Snapshot。 */
+
+    const conversationId = detail?.conversation.conversation_id;
+    if (!conversationId || runtime.snapshot === null || isTerminalSnapshot(runtime.snapshot)) return;
+    let disposed = false;
+    const checkLatestRun = () => {
+      if (!disposed) void syncLatestRun(conversationId).catch(() => undefined);
+    };
+    const timer = window.setInterval(checkLatestRun, 2_000);
+    checkLatestRun();
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    detail?.conversation.conversation_id,
+    runtime.snapshot?.run_id,
+    runtime.snapshot?.status,
+    syncLatestRun,
+  ]);
+
   const openConversation = useCallback(async (conversationId: string) => {
     /** 使用 generation 防止 A/B 快速切换时旧请求覆盖当前会话。 */
 
