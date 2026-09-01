@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 
-from pixelflow.operations.quota import build_start_quota_interrupt_id
+from pixelflow.generation_jobs.service import GenerationJobService
 from pixelflow.video.contracts import VideoAgentContract, VideoToolResult
 
 from .contracts import (
@@ -166,7 +165,7 @@ class ReplaceSceneAssetInput(BaseModel):
 class GenerateScenesInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # Agent 可以选择任意已规划镜头；M06 Port 在 Gateway 内部拆为最多 6 个子 Operation 的批次。
+    # Agent 可以选择任意已规划镜头；Gateway Worker 统一限制并发任务数。
     scene_ids: tuple[str, ...] = Field(default=(), max_length=120)
     variant_count: int = Field(default=1, ge=1, le=3)
     attempt: int = Field(default=1, ge=1, le=10)
@@ -179,7 +178,7 @@ class GenerateScenesInput(BaseModel):
 
 
 def _require_complete_creation_contract(payload: Mapping[str, object]) -> None:
-    """在创建 M06 批次前拒绝不完整的 Provider 路由，避免子 Operation 空转失败。"""
+    """在创建 GenerationJob 前拒绝不完整的 Provider 路由。"""
 
     contract = payload.get("creation_contract")
     source = contract if isinstance(contract, Mapping) else {}
@@ -199,94 +198,6 @@ def _require_complete_creation_contract(payload: Mapping[str, object]) -> None:
 class ReviewGeneratedSceneInput(SceneIdInput):
     variant_id: str = Field(min_length=1, max_length=128)
     decision: Literal["approve", "reject"]
-
-
-class SceneGenerationJob(VideoAgentContract):
-    """定向生成 Operation Port 返回的安全任务引用。"""
-
-    job_id: str = Field(min_length=1, max_length=128)
-    scene_id: str = Field(min_length=1, max_length=128)
-    variant_index: int = Field(ge=1, le=3)
-    status: Literal["queued", "polling", "start_paused_quota", "succeeded", "failed"]
-    variant_id: str | None = Field(default=None, max_length=128)
-    artifact_ref: str | None = Field(default=None, pattern=_ARTIFACT_PATTERN, max_length=256)
-    video_url: str | None = Field(default=None, max_length=4_096)
-    completed_at: datetime | None = None
-
-    @model_validator(mode="after")
-    def validate_terminal_result(self) -> SceneGenerationJob:
-        if self.status == "succeeded" and (
-            self.variant_id is None
-            or self.artifact_ref is None
-            or self.video_url is None
-            or self.completed_at is None
-        ):
-            raise ValueError("已完成生成任务必须包含版本、产物、视频和完成时间")
-        if self.status in {"queued", "start_paused_quota", "failed"} and any(
-            value is not None
-            for value in (
-                self.variant_id,
-                self.artifact_ref,
-                self.video_url,
-                self.completed_at,
-            )
-        ):
-            raise ValueError("start额度暂停任务不能包含终态产物")
-        if self.video_url is not None:
-            parsed = urlparse(self.video_url)
-            if (
-                parsed.scheme != "https"
-                or not parsed.netloc
-                or parsed.username is not None
-                or parsed.password is not None
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise ValueError("镜头视频必须是无签名参数的安全HTTPS URL")
-        return self
-
-
-@dataclass(frozen=True, slots=True)
-class SceneGenerationBatchResult:
-    """一次 generate_scenes 调用内部一个 M06 批次的稳定结果。"""
-
-    batch_id: str
-    jobs: tuple[SceneGenerationJob, ...]
-
-
-class SceneGenerationOperationPort(Protocol):
-    """隔离工具与M06 Operation、一次性凭据及供应商Client。"""
-
-    async def start_scene_variant(
-        self,
-        context: VideoToolContext,
-        *,
-        scene: Mapping[str, JsonValue],
-        variant_index: int,
-        attempt: int,
-    ) -> SceneGenerationJob: ...
-
-
-class SceneGenerationBatchOperationPort(Protocol):
-    """把一个冻结 Tool Call 原子映射为 OperationBatch，再交给 M06 Dispatcher。"""
-
-    async def create_or_read_batch(
-        self,
-        context: VideoToolContext,
-        *,
-        scenes: Sequence[Mapping[str, JsonValue]],
-        variant_count: int,
-        attempt: int,
-    ) -> tuple[str, tuple[SceneGenerationJob, ...]]: ...
-
-    async def create_or_read_batches(
-        self,
-        context: VideoToolContext,
-        *,
-        scenes: Sequence[Mapping[str, JsonValue]],
-        variant_count: int,
-        attempt: int,
-    ) -> tuple[SceneGenerationBatchResult, ...]: ...
 
 
 class InspectSceneTool:
@@ -652,21 +563,18 @@ class GenerateScenesTool:
         input_model=GenerateScenesInput,
         cost_level=VideoToolCostLevel.BILLABLE,
         confirmation_required=True,
-        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
-        recovery_mode=VideoToolRecoveryMode.OPERATION,
-        # 用途：成功/轮询路径会写 quota_interrupt（含显式清空）；缺声明会撞 Registry 白名单。
-        # scene_video_progress：启动时写入 0/N，供前端立刻切到分镜视频进度板。
+        idempotency_mode=VideoToolIdempotencyMode.GENERATION_JOB,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        # scene_video_progress：提交时写入 0/N，供前端立刻切到分镜视频进度板。
         workspace_mutations=(
             "scenes",
             "scene_packages",
             "dirty_scene_ids",
-            "assets",
-            "quota_interrupt",
             "scene_video_progress",
         ),
         model_observation_keys=(
             "status",
-            "batch_ids",
+            "generation_job_ids",
             "scene_ids",
             "workspace_revision_required",
         ),
@@ -675,10 +583,10 @@ class GenerateScenesTool:
     def __init__(
         self,
         *,
-        batch_operation_port: SceneGenerationBatchOperationPort | None = None,
+        generation_job_service: GenerationJobService | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._batch_operation_port = batch_operation_port
+        self._generation_job_service = generation_job_service
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def execute(
@@ -687,12 +595,21 @@ class GenerateScenesTool:
         arguments: Mapping[str, object],
     ) -> VideoToolResult:
         request = _validate(GenerateScenesInput, arguments, "镜头生成参数无效")
-        if self._batch_operation_port is None:
-            return VideoToolResult(
-                tool_name=self.spec.name,
-                public_summary="分镜视频生成能力当前未装配，请等待 Gateway 配置视频 Provider。",
-                model_observation={"status": "unavailable", "scene_ids": list(request.scene_ids)},
-            )
+        if self._generation_job_service is not None and self._generation_job_service.video_available:
+            return await self._execute_generation_jobs(context, request)
+        return VideoToolResult(
+            tool_name=self.spec.name,
+            public_summary="视频生成能力当前未装配，请等待 Gateway 配置视频 Provider。",
+            model_observation={"status": "unavailable", "scene_ids": list(request.scene_ids)},
+        )
+
+    async def _execute_generation_jobs(
+        self,
+        context: VideoToolContext,
+        request: GenerateScenesInput,
+    ) -> VideoToolResult:
+        """创建独立 GenerationJob，并把 queued 任务写入 Workspace。"""
+
         payload = context.workspace.payload if isinstance(context.workspace.payload, Mapping) else {}
         from pixelflow.video.workspace.digest import summarize_scene_asset_status
 
@@ -710,241 +627,77 @@ class GenerateScenesTool:
             raise VideoToolValidationError("没有可生成的脏镜头，请先 patch_scene 或传入 scene_ids")
         selected = [_find_scene(scenes, scene_id) for scene_id in scene_ids]
         _require_complete_creation_contract(payload)
-        jobs_by_scene: dict[str, list[SceneGenerationJob]] = {
+        submissions = await self._generation_job_service.submit_videos(
+            context,
+            scenes=tuple(selected),
+            variant_count=request.variant_count,
+            attempt=request.attempt,
+        )
+        jobs_by_scene: dict[str, list[dict[str, JsonValue]]] = {
             scene_id: [] for scene_id in scene_ids
         }
-        batch_creator = getattr(self._batch_operation_port, "create_or_read_batches", None)
-        if callable(batch_creator):
-            batch_results = await batch_creator(
-                context,
-                scenes=tuple(selected),
-                variant_count=request.variant_count,
-                attempt=request.attempt,
+        for submission in submissions:
+            if submission.item_id not in jobs_by_scene:
+                raise VideoToolExecutionError("视频生成任务身份不一致")
+            jobs_by_scene[submission.item_id].append(
+                {
+                    "job_id": submission.job_id,
+                    "scene_id": submission.item_id,
+                    "variant_index": submission.variant_index,
+                    "status": submission.status.value,
+                    "plan_step_id": context.step_id,
+                }
             )
-        else:
-            # 兼容尚未升级的测试/插件 Port；正式 Gateway Port 始终走内部拆批实现。
-            batch_id, jobs = await self._batch_operation_port.create_or_read_batch(
-                context,
-                scenes=tuple(selected),
-                variant_count=request.variant_count,
-                attempt=request.attempt,
-            )
-            batch_results = (SceneGenerationBatchResult(batch_id=batch_id, jobs=jobs),)
-        if not batch_results or any(
-            not result.batch_id.startswith("operation-batch-") for result in batch_results
-        ):
-            raise VideoToolExecutionError("镜头生成批次身份无效")
-        jobs = tuple(job for result in batch_results for job in result.jobs)
-        if len(jobs) != len(selected) * request.variant_count:
-            raise VideoToolExecutionError("镜头生成批次子任务数量不一致")
-        for job in jobs:
-            scene_jobs = jobs_by_scene.get(job.scene_id)
-            if scene_jobs is None or not 1 <= job.variant_index <= request.variant_count:
-                raise VideoToolExecutionError("镜头生成批次子任务身份不一致")
-            scene_jobs.append(job)
         next_scenes: list[dict[str, JsonValue]] = []
-        completed_dirty: list[str] = []
         for scene in scenes:
             scene_id = str(scene.get("scene_id") or "")
-            jobs = jobs_by_scene.get(scene_id)
-            if jobs is None:
+            scene_jobs = jobs_by_scene.get(scene_id)
+            if scene_jobs is None:
                 next_scenes.append(scene)
                 continue
-            existing_variants = _record_list(scene.get("variants"))
-            generated_variants = [
+            next_scenes.append(
                 {
-                    "variant_id": job.variant_id,
-                    "artifact_ref": job.artifact_ref,
-                    "video_url": job.video_url,
-                    "review_status": "pending",
-                    "completed_at": (
-                        job.completed_at.isoformat() if job.completed_at else None
-                    ),
-                    "source_job_id": job.job_id,
+                    **scene,
+                    "generation_jobs": [
+                        *_record_list(scene.get("generation_jobs")),
+                        *scene_jobs,
+                    ],
+                    "variants": _record_list(scene.get("variants")),
+                    "edit_status": "重新生成中",
                 }
-                for job in jobs
-                if job.status == "succeeded"
-            ]
-            # 单版本成功路径：直接标记重新生成完成并清脏，未修改镜头保持原样。
-            auto_complete = (
-                request.variant_count == 1
-                and len(generated_variants) == 1
-                and all(job.status == "succeeded" for job in jobs)
             )
-            if auto_complete:
-                chosen = {
-                    **generated_variants[0],
-                    "selected": True,
-                    "review_status": "approved",
-                }
-                completed_dirty.append(scene_id)
-                next_scenes.append(
-                    {
-                        **scene,
-                        "generation_jobs": [
-                            {
-                                **job.model_dump(mode="json"),
-                                "plan_step_id": context.step_id,
-                            }
-                            for job in jobs
-                        ],
-                        "variants": [*existing_variants, chosen],
-                        "approved_variant_id": chosen["variant_id"],
-                        "edit_status": "重新生成完成",
-                        "regenerated_at": self._clock().isoformat(),
-                    }
-                )
-            else:
-                next_scenes.append(
-                    {
-                        **scene,
-                        "generation_jobs": [
-                            {
-                                **job.model_dump(mode="json"),
-                                "plan_step_id": context.step_id,
-                            }
-                            for job in jobs
-                        ],
-                        "variants": [*existing_variants, *generated_variants],
-                        "edit_status": (
-                            "等待版本审核" if generated_variants else "重新生成中"
-                        ),
-                    }
-                )
-        assets = _record_list(payload.get("assets"))
-        generated_assets = [
-            {
-                "artifact_ref": job.artifact_ref,
-                "media_type": "video",
-                "url": job.video_url,
-                "source_job_id": job.job_id,
-                "plan_step_id": context.step_id,
-                "scene_id": job.scene_id,
-                "variant_id": job.variant_id,
-            }
-            for jobs in jobs_by_scene.values()
-            for job in jobs
-            if job.status == "succeeded"
-        ]
-        generated_refs = {
-            str(item["artifact_ref"])
-            for item in generated_assets
-            if item.get("artifact_ref")
-        }
-        remaining_dirty = [
-            scene_id
-            for scene_id in _ordered_unique(
-                [*_text_list(payload.get("dirty_scene_ids")), *scene_ids]
-            )
-            if scene_id not in completed_dirty
-        ]
         workspace_patch = _scenes_workspace_patch(
             next_scenes,
-            dirty_scene_ids=remaining_dirty,
+            dirty_scene_ids=_ordered_unique(
+                [*_text_list(payload.get("dirty_scene_ids")), *scene_ids]
+            ),
             only_scene_ids=scene_ids,
         )
-        start_paused_jobs = [
-            job
-            for jobs in jobs_by_scene.values()
-            for job in jobs
-            if job.status == "start_paused_quota"
-        ]
-        if start_paused_jobs:
-            if len(start_paused_jobs) != 1:
-                raise VideoToolExecutionError("同一步骤只能等待一个start额度恢复")
-            paused = start_paused_jobs[0]
-            workspace_patch["quota_interrupt"] = {
-                "quota_interrupt_id": build_start_quota_interrupt_id(paused.job_id),
-                "plan_id": context.plan_id,
-                "step_id": context.step_id,
-                "job_id": paused.job_id,
-                "quota_pause_revision": 0,
-                "phase": "start",
-                "state": "paused",
-                "reason_code": "provider_quota_insufficient",
-            }
-        else:
-            workspace_patch["quota_interrupt"] = None
-        if generated_assets:
-            workspace_patch["assets"] = [
-                *[
-                    item
-                    for item in assets
-                    if item.get("artifact_ref") not in generated_refs
-                ],
-                *generated_assets,
-            ]
-        total_jobs = sum(len(jobs) for jobs in jobs_by_scene.values())
-        succeeded_jobs = sum(
-            1
-            for jobs in jobs_by_scene.values()
-            for job in jobs
-            if job.status == "succeeded"
-        )
-        # 并发生成：进度按 workspace 全部 generation_jobs 汇总，避免后启的单镜把 total 覆盖成 1。
-        progress_completed = 0
-        progress_total = 0
-        for scene in next_scenes:
-            scene_jobs = _record_list(scene.get("generation_jobs"))
-            if not scene_jobs:
-                variants = _record_list(scene.get("variants"))
-                if any(
-                    isinstance(item, Mapping) and str(item.get("video_url") or "").strip()
-                    for item in variants
-                ):
-                    progress_total += 1
-                    progress_completed += 1
-                continue
-            for job in scene_jobs:
-                progress_total += 1
-                status = str(job.get("status") or "").strip().casefold()
-                if status and status not in {"queued", "polling", "start_paused_quota", "created"}:
-                    progress_completed += 1
-        if progress_total <= 0:
-            progress_total = total_jobs
-            progress_completed = succeeded_jobs
-        # 单镜重生时写入 scene_id，前端可立刻给该镜盖「生成中」蒙版（旧成片仍在）。
-        progress_scene_id = (
-            str(scene_ids[0]).strip() if len(scene_ids) == 1 else None
-        ) or None
-        progress_scene_index = None
-        if progress_scene_id:
-            for scene in selected:
-                if str(scene.get("scene_id") or "").strip() == progress_scene_id:
-                    raw_index = scene.get("scene_index")
-                    if isinstance(raw_index, int) and not isinstance(raw_index, bool):
-                        progress_scene_index = raw_index
-                    break
+        progress_scene_id = scene_ids[0] if len(scene_ids) == 1 else None
         workspace_patch["scene_video_progress"] = {
-            "completed": progress_completed,
-            "total": progress_total,
+            "completed": 0,
+            "total": len(submissions),
             "scene_id": progress_scene_id,
-            "scene_index": progress_scene_index,
+            "scene_index": next(
+                (
+                    scene.get("scene_index")
+                    for scene in selected
+                    if str(scene.get("scene_id") or "") == progress_scene_id
+                    and isinstance(scene.get("scene_index"), int)
+                ),
+                None,
+            ),
             "ok": True,
         }
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=(
-                f"已创建 {len(batch_results)} 个生成批次，"
-                f"包含 {len(jobs)} 个镜头生成子任务"
-            ),
+            public_summary=f"已创建 {len(submissions)} 个视频生成任务，等待 Gateway Worker 启动。",
             workspace_patch=workspace_patch,
-            artifact_refs=tuple(
-                job.artifact_ref
-                for jobs in jobs_by_scene.values()
-                for job in jobs
-                if job.artifact_ref is not None
-            ),
-            pending_operation_job_ids=tuple(
-                job.job_id
-                for jobs in jobs_by_scene.values()
-                for job in jobs
-                if job.status in {"queued", "polling", "start_paused_quota"}
-            ),
+            pending_operation_job_ids=tuple(item.job_id for item in submissions),
             requires_confirmation=True,
             model_observation={
                 "status": "submitted",
-                "batch_ids": [result.batch_id for result in batch_results],
+                "generation_job_ids": [item.job_id for item in submissions],
                 "scene_ids": scene_ids,
                 "workspace_revision_required": True,
             },
@@ -952,7 +705,7 @@ class GenerateScenesTool:
 
 
 class CreateVideoTool(GenerateScenesTool):
-    """创建当前 Workspace 已确认分镜的视频；复用 M06 场景生成批次。"""
+    """创建当前 Workspace 已确认分镜的视频；复用 GenerationJob 提交 Service。"""
 
     spec = VideoToolSpec(
         name="create_video",
@@ -963,19 +716,17 @@ class CreateVideoTool(GenerateScenesTool):
         input_model=GenerateScenesInput,
         cost_level=VideoToolCostLevel.BILLABLE,
         confirmation_required=True,
-        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
-        recovery_mode=VideoToolRecoveryMode.OPERATION,
+        idempotency_mode=VideoToolIdempotencyMode.GENERATION_JOB,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
         workspace_mutations=(
             "scenes",
             "scene_packages",
             "dirty_scene_ids",
-            "assets",
-            "quota_interrupt",
             "scene_video_progress",
         ),
         model_observation_keys=(
             "status",
-            "batch_ids",
+            "generation_job_ids",
             "scene_ids",
             "workspace_revision_required",
         ),

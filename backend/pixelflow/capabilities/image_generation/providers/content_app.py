@@ -11,7 +11,6 @@ import httpx
 from pydantic import JsonValue
 
 from pixelflow.operations.jobs.providers import (
-    ProviderJobAdapter,
     ProviderJobMappingError,
     ProviderJobOutcome,
     ProviderJobSnapshot,
@@ -143,23 +142,6 @@ class ContentAppImageGenerationAdapter:
         if self._owns_client:
             await self._client.aclose()
 
-    def as_operation_adapter(self) -> ProviderJobAdapter:
-        return ProviderJobAdapter(_ExistingImageJobService(self))
-
-
-class _ExistingImageJobService:
-    def __init__(self, provider: ContentAppImageGenerationAdapter) -> None:
-        self._provider = provider
-
-    async def start(self, request: Mapping[str, JsonValue], *, authorization: str, idempotency_key: str) -> object:
-        snapshot = await self._provider.start(request, authorization=authorization, idempotency_key=idempotency_key)
-        return _snapshot_response(snapshot)
-
-    async def status(self, provider_job_id: str) -> object:
-        snapshot = await self._provider.status(provider_job_id, user_id="", conversation_id="")
-        return _snapshot_response(snapshot)
-
-
 def _start_payload(request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     """映射 content-app 文生图 DTO，比例以 width/height 传递而非 ratio。"""
 
@@ -222,10 +204,6 @@ def _image_result(source: Mapping[str, object]) -> dict[str, JsonValue] | None:
                 if url and url.startswith("https://"):
                     return {"image_url": url, "artifact_ref": "artifact:image:" + url.rsplit("/", 1)[-1][:180]}
     return None
-
-
-def _snapshot_response(snapshot: ProviderJobSnapshot) -> dict[str, JsonValue]:
-    return {"job_id": snapshot.provider_job_id, "status": "quota_insufficient" if snapshot.outcome is ProviderJobOutcome.PAUSED_QUOTA else snapshot.outcome.value, "result": snapshot.result}
 
 
 def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:

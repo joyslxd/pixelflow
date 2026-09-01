@@ -28,6 +28,7 @@ class VideoToolIdempotencyMode(StrEnum):
     READ_ONLY = "read_only"
     REQUEST = "request"
     OPERATION = "operation"
+    GENERATION_JOB = "generation_job"
 
 
 class VideoToolRecoveryMode(StrEnum):

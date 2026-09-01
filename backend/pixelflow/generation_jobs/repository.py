@@ -50,6 +50,15 @@ class GenerationJobRepository(Protocol):
         limit: int,
     ) -> tuple[GenerationJobRecord, ...]: ...
 
+    async def reschedule_poll(
+        self,
+        *,
+        generation_job_id: str,
+        worker_id: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> GenerationJobRecord: ...
+
     async def complete(
         self,
         *,
@@ -72,6 +81,39 @@ class MemoryGenerationJobRepository:
     def __init__(self) -> None:
         self._records: dict[str, GenerationJobRecord] = {}
         self._lock = asyncio.Lock()
+
+    async def get(self, generation_job_id: str) -> GenerationJobRecord | None:
+        async with self._lock:
+            item = self._records.get(generation_job_id)
+            return None if item is None else deepcopy(item)
+
+    async def list_all(self) -> tuple[GenerationJobRecord, ...]:
+        async with self._lock:
+            return tuple(deepcopy(item) for item in self._records.values())
+
+    async def reschedule_poll(
+        self,
+        *,
+        generation_job_id: str,
+        worker_id: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> GenerationJobRecord:
+        observed_at = _utc(now)
+        async with self._lock:
+            item = self._get(generation_job_id)
+            if not _lease_owned(item, worker_id, observed_at) or item.status is not GenerationJobStatus.POLLING:
+                raise AgentRuntimeRecordConflictError("GenerationJob poll lease 无效")
+            updated = item.model_copy(
+                update={
+                    "next_poll_at": _utc(next_poll_at),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "updated_at": observed_at,
+                }
+            )
+            self._records[generation_job_id] = updated
+            return deepcopy(updated)
 
     async def create_or_read(self, candidate: GenerationJobRecord) -> GenerationJobRecord:
         async with self._lock:
@@ -321,6 +363,32 @@ class SQLGenerationJobRepository:
                     raise AgentRuntimeRecordConflictError("GenerationJob start lease 无效")
                 row.status = GenerationJobStatus.POLLING.value
                 row.provider_job_id = provider_job_id
+                row.next_poll_at = _utc(next_poll_at)
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = observed_at
+                await session.flush()
+                return _record_from_row(row)
+
+    async def reschedule_poll(
+        self,
+        *,
+        generation_job_id: str,
+        worker_id: str,
+        now: datetime,
+        next_poll_at: datetime,
+    ) -> GenerationJobRecord:
+        observed_at = _utc(now)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(PixelFlowGenerationJobRow)
+                    .where(PixelFlowGenerationJobRow.generation_job_id == generation_job_id)
+                    .with_for_update()
+                )
+                current = _record_from_row(row)
+                if not _lease_owned(current, worker_id, observed_at) or current.status is not GenerationJobStatus.POLLING:
+                    raise AgentRuntimeRecordConflictError("GenerationJob poll lease 无效")
                 row.next_poll_at = _utc(next_poll_at)
                 row.lease_owner = None
                 row.lease_expires_at = None

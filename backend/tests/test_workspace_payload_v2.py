@@ -148,18 +148,19 @@ async def test_set_generation_contract_writes_complete_non_billable_provider_rou
 
 
 @pytest.mark.asyncio
-async def test_generate_scenes_rejects_missing_creation_contract_before_creating_batch() -> None:
-    """缺路由参数时不得创建注定会在 Dispatcher 中失败的 M06 子 Operation。"""
+async def test_generate_scenes_rejects_missing_creation_contract_before_creating_job() -> None:
+    """缺路由参数时不得创建注定会失败的 GenerationJob。"""
 
-    class BatchPort:
+    class GenerationJobService:
+        video_available = True
         called = False
 
-        async def create_or_read_batch(self, *args, **kwargs):
+        async def submit_videos(self, *args, **kwargs):
             self.called = True
-            raise AssertionError("不应创建批次")
+            raise AssertionError("不应创建 GenerationJob")
 
-    port = BatchPort()
-    result = await VideoToolRegistry((GenerateScenesTool(batch_operation_port=port),)).execute(
+    service = GenerationJobService()
+    result = await VideoToolRegistry((GenerateScenesTool(generation_job_service=service),)).execute(
         VideoToolContext(
             user_id="user",
             workspace=VideoWorkspace(
@@ -180,7 +181,7 @@ async def test_generate_scenes_rejects_missing_creation_contract_before_creating
     )
 
     assert "尚未冻结视频生产合同" in result.public_summary
-    assert port.called is False
+    assert service.called is False
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,6 @@ import httpx
 from pydantic import JsonValue
 
 from pixelflow.operations.jobs.providers import (
-    ProviderJobAdapter,
     ProviderJobMappingError,
     ProviderJobSnapshot,
 )
@@ -234,55 +233,8 @@ class ContentAppVideoGenerationProvider:
         if self._owns_client:
             await self._client.aclose()
 
-    def as_operation_adapter(self) -> ProviderJobAdapter:
-        """返回 M06 既有六态 Adapter，保持 Operation Coordinator 不感知 HTTP。"""
-
-        return ProviderJobAdapter(_ContentAppExistingJobService(self))
-
     def _url(self, path: str) -> str:
         return f"{self._settings.base_url}{path}"
-
-
-class _ContentAppExistingJobService:
-    """把稳定 Provider Port 适配为 M06 通用 ExistingJobService，避免双重状态映射。"""
-
-    def __init__(self, provider: ContentAppVideoGenerationProvider) -> None:
-        self._provider = provider
-
-    async def start(self, request: Mapping[str, JsonValue], *, authorization: str, idempotency_key: str) -> object:
-        snapshot = await self._provider.start(
-            request,
-            authorization=authorization,
-            idempotency_key=idempotency_key,
-        )
-        return _snapshot_response(snapshot)
-
-    async def status_scoped(self, provider_job_id: str, *, user_id: str, conversation_id: str) -> object:
-        snapshot = await self._provider.status(
-            provider_job_id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        return _snapshot_response(snapshot)
-
-
-def _snapshot_response(snapshot: ProviderJobSnapshot) -> dict[str, JsonValue]:
-    """把稳定六态快照转回通用 M06 Adapter 的输入形状，避免重复 HTTP 映射。"""
-
-    if snapshot.outcome.value == "expired":
-        raise _ContentAppHTTPError(404)
-    status = (
-        "quota_insufficient"
-        if snapshot.outcome.value == "paused_quota"
-        else snapshot.outcome.value
-    )
-    return {
-        "job_id": snapshot.provider_job_id,
-        "status": status,
-        "result": snapshot.result,
-    }
-
-
 def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:
     from pixelflow.operations.jobs.providers import ProviderJobOutcome
 

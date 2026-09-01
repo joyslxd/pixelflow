@@ -198,10 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
             from pixelflow.agent_tools.catalog import runtime_video_tool_registry
             from pixelflow.agent_tools.manifest import manifest
-            from pixelflow.agent_tools.video.credential_store import (
-                TransientBatchCredentialStore,
-                TransientRunCredentialStore,
-            )
+            from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
             from pixelflow.capabilities.image_generation import (
                 ContentAppImageGenerationAdapter,
                 ContentAppImageProviderSettings,
@@ -210,51 +207,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ContentAppVideoGenerationProvider,
                 ContentAppVideoProviderSettings,
             )
-            from pixelflow.operations.jobs.batch_callback import (
-                OperationBatchTerminalCallback,
-                OperationBatchTerminalWorker,
+            from pixelflow.generation_jobs.credentials import (
+                TransientGenerationJobCredentialStore,
             )
-            from pixelflow.operations.jobs.batch_repository import (
-                SQLOperationBatchRepository,
-            )
+            from pixelflow.generation_jobs.repository import SQLGenerationJobRepository
+            from pixelflow.generation_jobs.service import GenerationJobService
+            from pixelflow.generation_jobs.worker import GenerationJobWorker
             from pixelflow.platform.content_app_authorization import (
                 TransientContentAppAuthorizationStore,
             )
 
             agent_tool_repository = SQLAgentToolRepository(task_store.session_factory)
-            batch_repository = SQLOperationBatchRepository(task_store.session_factory)
             app.state.pixelflow_agent_tool_repository = agent_tool_repository
-            # 用途：M06 子 Operation 完成后聚合唯一批次 Outbox；影响：子项不会直接恢复 Harness Run。
-            app.state.pixelflow_operation_batch_repository = batch_repository
-            async def _wake_batch_dispatcher() -> None:
-                dispatcher_worker = getattr(
-                    app.state,
-                    "pixelflow_operation_batch_dispatcher_worker",
-                    None,
-                )
-                if dispatcher_worker is not None:
-                    dispatcher_worker.wake()
-
-            batch_terminal_callback = OperationBatchTerminalCallback(
-                batch_repository=batch_repository,
-                video_repository=video_agent_repository,
-                operation_repository=agent_runtime_repository,
-                on_child_terminal=_wake_batch_dispatcher,
-            )
-            app.state.pixelflow_operation_batch_terminal_callback = batch_terminal_callback
-            batch_terminal_worker = OperationBatchTerminalWorker(
-                operation_repository=agent_runtime_repository,
-                callback=batch_terminal_callback,
-                worker_id=f"gateway-operation-batch-terminal:{os.getpid()}",
-            )
-            await batch_terminal_worker.start()
-            app.state.pixelflow_operation_batch_terminal_worker = batch_terminal_worker
             credential_store = TransientRunCredentialStore()
             app.state.pixelflow_transient_run_credential_store = credential_store
-            batch_credential_store = TransientBatchCredentialStore()
-            app.state.pixelflow_transient_batch_credential_store = (
-                batch_credential_store
-            )
+            generation_job_credential_store = TransientGenerationJobCredentialStore()
+            app.state.pixelflow_generation_job_credential_store = generation_job_credential_store
+            generation_job_repository = SQLGenerationJobRepository(task_store.session_factory)
+            app.state.pixelflow_generation_job_repository = generation_job_repository
             content_app_authorization_store = TransientContentAppAuthorizationStore()
             app.state.pixelflow_transient_content_app_authorization_store = (
                 content_app_authorization_store
@@ -271,15 +241,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_video_generation_provider = video_provider
             image_provider_settings = ContentAppImageProviderSettings.from_env()
             image_provider = (
-                ContentAppImageGenerationAdapter(
-                    image_provider_settings,
-                    authorization_store=content_app_authorization_store,
-                )
+                ContentAppImageGenerationAdapter(image_provider_settings)
                 if image_provider_settings is not None
                 else None
             )
             app.state.pixelflow_image_generation_provider = image_provider
-            app.state.pixelflow_image_batch_dispatcher_worker = None
+            app.state.pixelflow_generation_job_worker = None
             from pixelflow.capabilities.video_understanding import ContentAppVideoUnderstandingAdapter
             video_understanding_adapter = (
                 ContentAppVideoUnderstandingAdapter(base_url=provider_settings.base_url)
@@ -288,91 +255,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 not in {"0", "false", "no", "off"}
                 else None
             )
-            if video_provider is not None:
-                from pixelflow.video.adapters.operations import (
-                    M06SceneGenerationBatchDispatcher,
-                    M06SceneGenerationBatchDispatcherWorker,
-                    M06SceneGenerationBatchOperationPort,
-                    M06SceneGenerationOperationPort,
+            generation_job_service = GenerationJobService(
+                repository=generation_job_repository,
+                credential_store=generation_job_credential_store,
+                image_provider=image_provider,
+                video_provider=video_provider,
+            )
+            if video_provider is not None or image_provider is not None:
+                generation_job_worker = GenerationJobWorker(
+                    repository=generation_job_repository,
+                    workspace_repository=video_agent_repository,
+                    credential_store=generation_job_credential_store,
+                    image_provider=image_provider,
+                    video_provider=video_provider,
+                    worker_id=f"gateway-generation-job:{os.getpid()}",
                 )
-
-                scene_operation_port = M06SceneGenerationOperationPort(
-                    repository=agent_runtime_repository,
-                    adapter=video_provider.as_operation_adapter(),
-                    lease_owner=f"gateway-m06-video:{os.getpid()}",
-                    provider_request_transformer=video_provider.prepare_operation_request,
-                )
-                scene_batch_dispatcher = M06SceneGenerationBatchDispatcher(
-                    batch_repository=batch_repository,
-                    operation_port=scene_operation_port,
-                )
-                scene_batch_port = M06SceneGenerationBatchOperationPort(
-                    batch_repository=batch_repository,
-                    dispatcher=scene_batch_dispatcher,
-                    credential_store=batch_credential_store,
-                )
-                batch_dispatcher_worker = M06SceneGenerationBatchDispatcherWorker(
-                    batch_repository=batch_repository,
-                    video_repository=video_agent_repository,
-                    dispatcher=scene_batch_dispatcher,
-                    credential_store=batch_credential_store,
-                    worker_id=f"gateway-operation-batch-dispatch:{os.getpid()}",
-                )
-                await batch_dispatcher_worker.start()
-                app.state.pixelflow_operation_batch_dispatcher_worker = (
-                    batch_dispatcher_worker
-                )
-                video_tools = runtime_video_tool_registry(
-                    plan_repository=video_agent_repository,
-                    scene_generation_batch_operation_port=scene_batch_port,
-                    video_understanding_port=video_understanding_adapter,
-                    operation_batch_repository=batch_repository,
-                )
-            else:
-                app.state.pixelflow_operation_batch_dispatcher_worker = None
-                video_tools = runtime_video_tool_registry(
-                    plan_repository=video_agent_repository,
-                    video_understanding_port=video_understanding_adapter,
-                    operation_batch_repository=batch_repository,
-                )
-            if image_provider is not None:
-                from pixelflow.video.adapters.operations import (
-                    M06ImageGenerationBatchDispatcher,
-                    M06ImageGenerationBatchDispatcherWorker,
-                    M06ImageGenerationBatchOperationPort,
-                    M06ImageGenerationOperationPort,
-                )
-                image_operation_port = M06ImageGenerationOperationPort(
-                    repository=agent_runtime_repository,
-                    adapter=image_provider.as_operation_adapter(),
-                    lease_owner=f"gateway-m06-image:{os.getpid()}",
-                )
-                image_batch_dispatcher = M06ImageGenerationBatchDispatcher(
-                    batch_repository=batch_repository,
-                    operation_port=image_operation_port,
-                )
-                image_batch_port = M06ImageGenerationBatchOperationPort(
-                    batch_repository=batch_repository,
-                    credential_store=batch_credential_store,
-                )
-                image_dispatcher_worker = M06ImageGenerationBatchDispatcherWorker(
-                    batch_repository=batch_repository,
-                    video_repository=video_agent_repository,
-                    dispatcher=image_batch_dispatcher,
-                    credential_store=batch_credential_store,
-                    worker_id=f"gateway-m06-image-dispatch:{os.getpid()}",
-                )
-                await image_dispatcher_worker.start()
-                app.state.pixelflow_image_batch_dispatcher_worker = image_dispatcher_worker
-                video_tools = runtime_video_tool_registry(
-                    plan_repository=video_agent_repository,
-                    scene_generation_batch_operation_port=scene_batch_port if video_provider is not None else None,
-                    video_understanding_port=video_understanding_adapter,
-                    image_generation_batch_operation_port=image_batch_port,
-                    operation_batch_repository=batch_repository,
-                )
-            else:
-                app.state.pixelflow_image_batch_dispatcher_worker = None
+                await generation_job_worker.start()
+                app.state.pixelflow_generation_job_worker = generation_job_worker
+            video_tools = runtime_video_tool_registry(
+                plan_repository=video_agent_repository,
+                generation_job_service=generation_job_service,
+                video_understanding_port=video_understanding_adapter,
+            )
             tool_manifest = manifest(video_tools)
             app.state.pixelflow_agent_tool_broker = AgentToolBroker(
                 agent_tool_repository,
@@ -381,55 +285,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 credential_store=credential_store,
                 manifest_snapshot=tool_manifest,
             )
-            if video_provider is not None or image_provider is not None:
-                from pixelflow.operations.jobs import (
-                    MappingProviderJobAdapterResolver,
-                    OperationRecoveryRuntime,
-                )
-
-                async def _is_video_batch_operation(user_id: str, operation: object) -> bool:
-                    job_id = getattr(operation, "job_id", None)
-                    conversation_id = getattr(operation, "conversation_id", None)
-                    if not isinstance(job_id, str) or not isinstance(conversation_id, str):
-                        return False
-                    batch = await batch_repository.get_batch_for_child_job(
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                        job_id=job_id,
-                    )
-                    if batch is not None:
-                        return True
-                    # 兼容旧批次：历史并发冲突可能把子项暂存为 Operation 幂等键，
-                    # 仍允许恢复 Worker 找回对应批次并完成真实 Job 绑定。
-                    operation = await agent_runtime_repository.get_operation(user_id, job_id)
-                    if operation is None:
-                        return False
-                    return (
-                        await batch_repository.get_batch_for_child_job(
-                            user_id=user_id,
-                            conversation_id=conversation_id,
-                            job_id=operation.idempotency_key,
-                        )
-                    ) is not None
-
-                operation_recovery_runtime = OperationRecoveryRuntime(
-                    agent_runtime_repository,
-                    resolver=MappingProviderJobAdapterResolver(
-                        {
-                            **({"generate_scene:*": video_provider.as_operation_adapter()} if video_provider is not None else {}),
-                            **({"generate_image_asset:*": image_provider.as_operation_adapter()} if image_provider is not None else {}),
-                        }
-                    ),
-                    resumer=batch_terminal_callback,
-                    worker_id=f"gateway-m06-video:{os.getpid()}",
-                    candidate_filter=_is_video_batch_operation,
-                )
-                await operation_recovery_runtime.start()
-                app.state.pixelflow_m06_operation_recovery_runtime = (
-                    operation_recovery_runtime
-                )
-            else:
-                app.state.pixelflow_m06_operation_recovery_runtime = None
+            app.state.pixelflow_m06_operation_recovery_runtime = None
             from pixelflow.platform import HarnessSidecarSettings
 
             harness_settings = HarnessSidecarSettings.from_env()
@@ -498,29 +354,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     video_repository=video_agent_repository,
                     model_profile=harness_settings.model_profile,
                 )
-                from pixelflow.agent_harness.operation_batch_resume import (
-                    GatewayOperationBatchResumePort,
-                    OperationBatchResumeWorker,
-                )
-                batch_resume_worker = OperationBatchResumeWorker(
-                    repository=batch_repository,
-                    resume_port=GatewayOperationBatchResumePort(
-                        task_store=task_store,
-                        video_repository=video_agent_repository,
-                        bridge=app.state.pixelflow_agent_run_bridge,
-                        model_profile=harness_settings.model_profile,
-                    ),
-                    worker_id=f"gateway-operation-batch:{harness_settings.instance_id}",
-                )
-                await batch_resume_worker.start()
-                app.state.pixelflow_operation_batch_resume_worker = batch_resume_worker
             else:
                 app.state.pixelflow_harness_run_bridge = None
                 app.state.pixelflow_harness_run_projector = None
                 app.state.pixelflow_harness_recovery_service = None
                 app.state.pixelflow_harness_admission_repository = None
                 app.state.pixelflow_agent_run_bridge = None
-                app.state.pixelflow_operation_batch_resume_worker = None
         elif isinstance(task_store, MemoryPixelFlowTaskStore):
             agent_runtime_repository = MemoryCompactionQueueRepository()
             app.state.pixelflow_agent_runtime_repository = agent_runtime_repository
@@ -533,17 +372,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_harness_run_projector = None
             app.state.pixelflow_harness_recovery_service = None
             app.state.pixelflow_harness_admission_repository = None
-            app.state.pixelflow_operation_batch_resume_worker = None
-            app.state.pixelflow_operation_batch_repository = None
-            app.state.pixelflow_operation_batch_terminal_callback = None
-            app.state.pixelflow_operation_batch_terminal_worker = None
+            app.state.pixelflow_generation_job_credential_store = None
+            app.state.pixelflow_generation_job_repository = None
+            app.state.pixelflow_generation_job_worker = None
             app.state.pixelflow_transient_run_credential_store = None
-            app.state.pixelflow_transient_batch_credential_store = None
             app.state.pixelflow_transient_content_app_authorization_store = None
-            app.state.pixelflow_operation_batch_dispatcher_worker = None
             app.state.pixelflow_video_generation_provider = None
             app.state.pixelflow_image_generation_provider = None
-            app.state.pixelflow_image_batch_dispatcher_worker = None
             app.state.pixelflow_m06_operation_recovery_runtime = None
         else:
             # MySQL 对话 Store 尚无同事务 Runtime Repository，保持 R1 压缩并固定关闭V2执行。
@@ -556,17 +391,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_harness_run_projector = None
             app.state.pixelflow_harness_recovery_service = None
             app.state.pixelflow_harness_admission_repository = None
-            app.state.pixelflow_operation_batch_resume_worker = None
-            app.state.pixelflow_operation_batch_repository = None
-            app.state.pixelflow_operation_batch_terminal_callback = None
-            app.state.pixelflow_operation_batch_terminal_worker = None
+            app.state.pixelflow_generation_job_credential_store = None
+            app.state.pixelflow_generation_job_repository = None
+            app.state.pixelflow_generation_job_worker = None
             app.state.pixelflow_transient_run_credential_store = None
-            app.state.pixelflow_transient_batch_credential_store = None
             app.state.pixelflow_transient_content_app_authorization_store = None
-            app.state.pixelflow_operation_batch_dispatcher_worker = None
             app.state.pixelflow_video_generation_provider = None
             app.state.pixelflow_image_generation_provider = None
-            app.state.pixelflow_image_batch_dispatcher_worker = None
             app.state.pixelflow_m06_operation_recovery_runtime = None
         # M1：旧 VideoAgent、Native Invoker 与其恢复 Worker 已删除；Run 仅经 Harness Sidecar。
 
@@ -582,30 +413,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
-            operation_recovery_runtime = getattr(
-                app.state,
-                "pixelflow_m06_operation_recovery_runtime",
-                None,
-            )
-            if operation_recovery_runtime is not None:
-                await operation_recovery_runtime.aclose()
-                logger.info("PixelFlow M06 Video Operation Recovery Runtime closed")
-            operation_batch_terminal_worker = getattr(
-                app.state,
-                "pixelflow_operation_batch_terminal_worker",
-                None,
-            )
-            if operation_batch_terminal_worker is not None:
-                await operation_batch_terminal_worker.aclose()
-                logger.info("PixelFlow OperationBatch Terminal Worker closed")
-            operation_batch_dispatcher_worker = getattr(
-                app.state,
-                "pixelflow_operation_batch_dispatcher_worker",
-                None,
-            )
-            if operation_batch_dispatcher_worker is not None:
-                await operation_batch_dispatcher_worker.aclose()
-                logger.info("PixelFlow OperationBatch Dispatcher Worker closed")
             pixelflow_harness_run_projector = getattr(
                 app.state,
                 "pixelflow_harness_run_projector",
@@ -614,14 +421,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if pixelflow_harness_run_projector is not None:
                 await pixelflow_harness_run_projector.aclose()
                 logger.info("PixelFlow Harness Event Projector closed")
-            operation_batch_resume_worker = getattr(
-                app.state,
-                "pixelflow_operation_batch_resume_worker",
-                None,
-            )
-            if operation_batch_resume_worker is not None:
-                await operation_batch_resume_worker.aclose()
-                logger.info("PixelFlow OperationBatch Resume Worker closed")
             transient_run_credential_store = getattr(
                 app.state,
                 "pixelflow_transient_run_credential_store",
@@ -629,13 +428,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             if transient_run_credential_store is not None:
                 await transient_run_credential_store.aclose()
-            transient_batch_credential_store = getattr(
+            generation_job_worker = getattr(
                 app.state,
-                "pixelflow_transient_batch_credential_store",
+                "pixelflow_generation_job_worker",
                 None,
             )
-            if transient_batch_credential_store is not None:
-                await transient_batch_credential_store.aclose()
+            if generation_job_worker is not None:
+                await generation_job_worker.aclose()
+                logger.info("PixelFlow GenerationJob Worker closed")
+            generation_job_credential_store = getattr(
+                app.state,
+                "pixelflow_generation_job_credential_store",
+                None,
+            )
+            if generation_job_credential_store is not None:
+                await generation_job_credential_store.aclose()
             transient_content_app_authorization_store = getattr(
                 app.state,
                 "pixelflow_transient_content_app_authorization_store",
@@ -650,14 +457,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             if video_generation_provider is not None:
                 await video_generation_provider.aclose()
-            image_batch_dispatcher_worker = getattr(
-                app.state,
-                "pixelflow_image_batch_dispatcher_worker",
-                None,
-            )
-            if image_batch_dispatcher_worker is not None:
-                await image_batch_dispatcher_worker.aclose()
-                logger.info("PixelFlow Image OperationBatch Dispatcher Worker closed")
             image_generation_provider = getattr(
                 app.state,
                 "pixelflow_image_generation_provider",

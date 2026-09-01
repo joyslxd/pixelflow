@@ -357,78 +357,6 @@ class PixelFlowGenerationJobRow(Base):
     )
 
 
-class PixelFlowOperationBatchRow(Base):
-    """M5 计费批次权威记录；仅批次终态可以触发 operation_resume。"""
-
-    __tablename__ = "pixelflow_operation_batches"
-
-    batch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 批次终态回调只按该权威工作区投影，不从 Provider 或 Sidecar 读取业务状态。
-    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 用途：重启后重建 queued 子项的 Tool 执行身份；影响：不保存 Authorization 或 Provider 原始请求。
-    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_workspace_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
-    completion_event_id: Mapped[str | None] = mapped_column(String(96), nullable=True, unique=True)
-    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
-    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
-
-    __table_args__ = (
-        CheckConstraint("status IN ('queued', 'running', 'completed', 'failed')", name="ck_pf_operation_batch_status"),
-        Index("ix_pf_operation_batch_owner_conversation", "user_id", "conversation_id", "created_at"),
-    )
-
-
-class PixelFlowOperationBatchChildRow(Base):
-    """批次的子 Operation 身份与队列状态，不保存 Provider 原始响应。"""
-
-    __tablename__ = "pixelflow_operation_batch_children"
-
-    batch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    operation_idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    scene_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    variant_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
-    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
-    # 用途：starting 状态在 Gateway 崩溃后可重新领取；影响：实际 Provider 去重仍由 M06 Operation lease 负责。
-    started_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("variant_index >= 1", name="ck_pf_operation_batch_child_variant"),
-        CheckConstraint("status IN ('queued', 'starting', 'polling', 'succeeded', 'failed', 'timeout', 'expired')", name="ck_pf_operation_batch_child_status"),
-        UniqueConstraint("batch_id", "scene_id", "variant_index", name="uq_pf_operation_batch_child_scene_variant"),
-    )
-
-
-class PixelFlowOperationBatchOutboxRow(Base):
-    """批次终态的唯一恢复事件，子项完成不得直接创建 Harness Run。"""
-
-    __tablename__ = "pixelflow_operation_batch_outbox"
-
-    completion_event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
-    batch_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 恢复 Run 必须读取创建批次时绑定的权威工作区，不能由会话推导或猜测。
-    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
-    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-    resume_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
-    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
-    delivered_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("status IN ('pending', 'delivering', 'delivered')", name="ck_pf_operation_batch_outbox_status"),
-        Index("ix_pf_operation_batch_outbox_pending", "status", "created_at"),
-    )
-
-
 class PixelFlowAgentVideoStateRow(Base):
     """保存视频 Workflow 可校验、可恢复的权威状态快照。"""
 
@@ -764,8 +692,4 @@ AGENT_RUNTIME_SUPPORT_TABLES = (
     PixelFlowVideoAgentPlanRow.__table__,
     PixelFlowVideoAgentPlanStepRow.__table__,
     PixelFlowGenerationJobRow.__table__,
-    # 用途：持久化 M5 计费批次及子 Operation；影响：只有批次终态可创建 operation_resume。
-    PixelFlowOperationBatchRow.__table__,
-    PixelFlowOperationBatchChildRow.__table__,
-    PixelFlowOperationBatchOutboxRow.__table__,
 )

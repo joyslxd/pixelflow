@@ -8,7 +8,7 @@ from pixelflow.agent_tools.video.storyboard import (
     CreateStoryboardTool,
     PrepareScenePackagesInput,
 )
-from pixelflow.video.adapters.operations.scenes import _resolve_duration_sec
+from pixelflow.generation_jobs.requests import _duration
 
 
 def test_scene_patch_allows_seedance_maximum_thirty_seconds() -> None:
@@ -21,9 +21,9 @@ def test_scene_patch_rejects_duration_above_thirty_seconds() -> None:
         SceneMutablePatch(duration_sec=30.1)
 
 
-def test_operation_adapter_accepts_thirty_second_scene() -> None:
-    assert _resolve_duration_sec({"duration_ms": 30_000}) == 30
-    assert _resolve_duration_sec({"duration_sec": 31}) is None
+def test_generation_job_request_accepts_thirty_second_scene() -> None:
+    assert _duration({"duration_ms": 30_000}) == 30
+    assert _duration({"duration_sec": 31}) is None
 
 
 def test_storyboard_contract_allows_six_thirty_second_scenes() -> None:

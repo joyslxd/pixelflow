@@ -11,7 +11,6 @@ from .video import (
     GenerateScenesTool,
     InspectCreativeBriefTool,
     InspectImageAssetsTool,
-    InspectOperationBatchTool,
     InspectSceneTool,
     InspectScriptTool,
     InspectVideoPlanTool,
@@ -34,11 +33,9 @@ from .video import (
 def runtime_video_tool_registry(
     *,
     plan_repository: object | None = None,
-    scene_generation_batch_operation_port: object | None = None,
+    generation_job_service: object | None = None,
     video_understanding_port: object | None = None,
-    image_generation_batch_operation_port: object | None = None,
     delivery_operation_port: object | None = None,
-    operation_batch_repository: object | None = None,
 ) -> VideoToolRegistry:
     """构造当前可安全发布给 Sidecar 的视频 Capability Tool 集合。"""
 
@@ -46,7 +43,6 @@ def runtime_video_tool_registry(
             InspectVideoWorkspaceTool(),
             InspectVideoResultsTool(),
             InspectImageAssetsTool(),
-            InspectOperationBatchTool(batch_repository=operation_batch_repository),
             InspectCreativeBriefTool(),
             InspectScriptTool(),
             UpdateScriptTool(),
@@ -66,8 +62,8 @@ def runtime_video_tool_registry(
     ]
     # 三类外部能力始终发布到 Manifest，由 Agent 自主判断是否调用；未装配 Provider 时，
     # Handler 返回明确的不可执行观察，不伪造成功，也不影响基础只读 Tool 启动。
-    tools.append(GenerateScenesTool(batch_operation_port=scene_generation_batch_operation_port))
-    tools.append(CreateVideoTool(batch_operation_port=scene_generation_batch_operation_port))
-    tools.append(GenerateImageAssetsTool(batch_operation_port=image_generation_batch_operation_port))
+    tools.append(GenerateScenesTool(generation_job_service=generation_job_service))
+    tools.append(CreateVideoTool(generation_job_service=generation_job_service))
+    tools.append(GenerateImageAssetsTool(generation_job_service=generation_job_service))
     tools.append(AnalyzeVideoTool(video_understanding_port))
     return VideoToolRegistry(tuple(tools))

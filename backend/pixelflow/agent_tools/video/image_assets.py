@@ -1,4 +1,4 @@
-"""生成已规划图片资产的 Harness Tool；只创建 M06 Operation，不同步等待 Provider。"""
+"""生成已规划图片资产的 Harness Tool；只创建 GenerationJob，不同步等待 Provider。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pixelflow.generation_jobs.service import GenerationJobService
 from pixelflow.video.contracts import VideoToolResult
 from pixelflow.video.workspace.payload import migrate_workspace_payload
 
@@ -32,18 +33,18 @@ class GenerateImageAssetsTool:
         input_model=GenerateImageAssetsInput,
         cost_level=VideoToolCostLevel.BILLABLE,
         confirmation_required=True,
-        idempotency_mode=VideoToolIdempotencyMode.OPERATION,
-        recovery_mode=VideoToolRecoveryMode.OPERATION,
-        workspace_mutations=(),
-        model_observation_keys=("status", "batch_ids", "asset_ids", "workspace_revision_required"),
+        idempotency_mode=VideoToolIdempotencyMode.GENERATION_JOB,
+        recovery_mode=VideoToolRecoveryMode.REPLAY,
+        workspace_mutations=("asset_registry",),
+        model_observation_keys=("status", "generation_job_ids", "asset_ids", "workspace_revision_required"),
     )
 
-    def __init__(self, *, batch_operation_port: object | None = None) -> None:
-        self._port = batch_operation_port
+    def __init__(self, *, generation_job_service: GenerationJobService | None = None) -> None:
+        self._service = generation_job_service
 
     async def execute(self, context: VideoToolContext, arguments: Mapping[str, object]) -> VideoToolResult:
         request = GenerateImageAssetsInput.model_validate(dict(arguments))
-        if self._port is None:
+        if self._service is None or not self._service.image_available:
             return VideoToolResult(
                 tool_name=self.spec.name,
                 public_summary="图片生成能力当前未装配，请改用规划或检查 Tool，或等待 Gateway 配置 Provider。",
@@ -65,15 +66,34 @@ class GenerateImageAssetsTool:
             if not str(asset.get("generation_prompt") or "").strip():
                 raise VideoToolValidationError(f"图片资产 {asset_id} 缺少 generation_prompt")
             selected.append(asset)
-        create = getattr(self._port, "create_or_read_batches", None)
-        if not callable(create):
-            raise VideoToolValidationError("图片生成 M06 Port 尚未装配")
-        batches = await create(context, assets=selected, attempt=request.attempt)
-        batch_ids = [str(batch[0]) for batch in batches]
+        submissions = await self._service.submit_images(
+            context,
+            assets=tuple(selected),
+            attempt=request.attempt,
+        )
+        next_registry = []
+        selected_ids = set(request.asset_ids)
+        for item in payload.get("asset_registry", []):
+            if not isinstance(item, Mapping) or str(item.get("asset_id") or "") not in selected_ids:
+                next_registry.append(item)
+                continue
+            submission = next(
+                job for job in submissions if job.item_id == item.get("asset_id")
+            )
+            next_registry.append(
+                {
+                    **dict(item),
+                    "generation_job_id": submission.job_id,
+                    "generation_job_status": submission.status.value,
+                }
+            )
         return VideoToolResult(
             tool_name=self.spec.name,
-            public_summary=f"已创建 {len(batch_ids)} 个图片资产生成批次，包含 {len(selected)} 个资产；等待 M06 Dispatcher 启动。",
-            model_observation={"batch_ids": batch_ids, "asset_ids": list(request.asset_ids), "workspace_revision_required": True},
+            public_summary=f"已创建 {len(submissions)} 个图片生成任务，包含 {len(selected)} 个资产；等待 Gateway Worker 启动。",
+            workspace_patch={"asset_registry": next_registry},
+            pending_operation_job_ids=tuple(item.job_id for item in submissions),
+            requires_confirmation=True,
+            model_observation={"status": "submitted", "generation_job_ids": [item.job_id for item in submissions], "asset_ids": list(request.asset_ids), "workspace_revision_required": True},
         )
 
 
