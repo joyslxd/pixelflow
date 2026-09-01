@@ -1,4 +1,8 @@
-# M06 持久化 External Job Coordinator
+# M06 持久化 External Job Coordinator（历史状态记录）
+
+> 当前实现说明（2026-09-01）：M06 Operation Coordinator 已从图片/视频生成生产链路移除。
+> 图片/视频当前统一由 Gateway GenerationJob 直接启动、轮询并回写 Workspace；本文件保留为
+> 历史迁移记录，不是当前实现依据。
 
 - phase：`merged`
 - owner：A

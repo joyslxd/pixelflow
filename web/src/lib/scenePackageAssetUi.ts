@@ -238,7 +238,7 @@ export function isSceneAssetGenerationMaterialized(
 
 /**
  * 刷新后若没有活跃 pending，清掉过期的 sceneAssetsGenerating，避免“参考图生成中”假忙碌。
- * 无图时回到 awaiting model，并解锁模型卡，便于用户重新确认（热重载/僵尸 Operation 后常见）。
+ * 无图时回到 awaiting model，并解锁模型卡，便于用户重新确认（热重载或异常任务后常见）。
  */
 export function reconcileStaleSceneAssetUiFlags<T extends ScenePackageMessage>(
   messages: T[],

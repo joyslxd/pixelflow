@@ -29,7 +29,7 @@
 | `tools[].cost_level` | 费用等级；当前为 `none`，不允许通过此字段绕过未来计费确认。 |
 | `tools[].confirmation_required` | 是否要求人工确认；当前只读 Tool 为 `false`。 |
 | `tools[].idempotency_mode` | 幂等策略；当前为 `read_only`，仍须携带稳定 `Idempotency-Key`。 |
-| `tools[].recovery_mode` | 恢复策略；当前为 `inline`，不创建 M06 Provider Operation。 |
+| `tools[].recovery_mode` | 恢复策略；当前为 `inline`，图片/视频生成由 Gateway GenerationJob Worker 处理。 |
 | `tools[].workspace_mutation_roots` | 可修改的 Workspace 根字段白名单；当前为空，任何写入都不在此 Tool 的权限内。 |
 
 `POST /calls` 的 `Idempotency-Key` 必须等于

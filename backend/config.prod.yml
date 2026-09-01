@@ -24,11 +24,6 @@ harness:
       max_model_steps: 24 # 用途：允许复杂视频规划在自主纠错后完成；影响：仍受 64 步平台硬上限约束。
       max_business_tools: 12 # 用途：允许读取、规划和编辑串行组合；影响：仍受 32 次平台硬上限约束。
       max_billable_batch_starts: 1 # 用途：限制生产互动 Run 的计费批次；影响：M5 每轮最多启动一批。
-    operation_resume_v1:
-      deadline_seconds: 150 # 用途：限制 Operation 恢复 Run 秒数；影响：外部轮询仍由 M06 处理。
-      max_model_steps: 10 # 用途：限制 Operation 恢复模型轮次；影响：防止恢复路径空转。
-      max_business_tools: 5 # 用途：限制 Operation 恢复 Tool 数；影响：保留审片和下一步决策空间。
-      max_billable_batch_starts: 1 # 用途：限制 Operation 恢复计费批次；影响：阻止连续扣费。
     confirmation_resume_v1:
       deadline_seconds: 150 # 用途：限制确认恢复 Run 秒数；影响：确认后模型循环不扩张。
       max_model_steps: 10 # 用途：限制确认恢复模型轮次；影响：达到上限安全收口。

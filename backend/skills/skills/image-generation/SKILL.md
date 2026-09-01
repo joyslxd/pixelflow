@@ -28,13 +28,14 @@ Prompt 至少包含主体、材质或外观、背景、光线、视角、不可�
 
 1. 资产计划写入后，先通过 `inspect_image_assets` 核查 ready、planned、running 与 failed 状态。
 2. 只选择 `state=planned` 且包含 `generation_prompt` 的资产调用 `generate_image_assets`。计费确认、
-   瞬时授权、幂等和 M06 批次由 Tool Broker 强制处理。
-3. Tool 返回批次后，调用 `inspect_operation_batch` 或 `inspect_image_assets` 读取安全进度。异步任务
-   未完成时结束当前 Run，不能自行轮询 Provider 或重新创建批次。
+   瞬时授权和幂等由 Tool Broker 强制处理；每个资产对应一个 Gateway GenerationJob。
+3. Tool 返回 GenerationJob 后，调用 `inspect_image_assets` 读取安全进度。异步任务未完成时结束当前
+   Run，不能自行轮询 Provider 或重新创建 GenerationJob。
 4. 全部视频依赖资产 ready 后，才建议调用 `generate_scenes`；任何 failed 资产先说明失败数量和
    可恢复的重新规划条件，不回显 Provider 原始异常。
 
 ## 边界
 
 本 Skill 不生成图片、不访问 URL、文件系统、数据库或 Provider。它只提供资产设计和 Tool 选择
-规则；真实图片、Artifact 绑定与 Workspace revision 由 PixelFlow Gateway、M06 和受控 Tool 完成。
+规则；真实图片、Artifact 绑定与 Workspace revision 由 PixelFlow Gateway、GenerationJob Worker
+和受控 Tool 完成。

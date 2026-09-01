@@ -23,7 +23,6 @@ class HarnessRunRequest(_StrictModel):
     trigger_id: str = Field(min_length=1, max_length=200)
     trigger_type: Literal[
         "user_turn",
-        "operation_resume",
         "confirmation_resume",
         "authorization_resume",
         "form_resume",

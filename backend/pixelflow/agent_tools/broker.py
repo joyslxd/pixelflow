@@ -196,16 +196,16 @@ class AgentToolBroker:
                 result.model_observation,
                 allowed_keys=tool.spec.model_observation_keys,
             )
-            pending_operation_job_ids = result.pending_operation_job_ids
+            pending_generation_job_ids = result.pending_generation_job_ids
             _trace_generate_scenes(request.run_id, "executor_completed", tool.spec.name)
             response = ToolCallResponse(
                 protocol_version="v1",
-                status=("pending_operation" if pending_operation_job_ids else "completed"),
+                status=("pending_operation" if pending_generation_job_ids else "completed"),
                 public_summary=result.public_summary,
                 model_observation={
                     "code": (
-                        "video_tool_pending_operation"
-                        if pending_operation_job_ids
+                        "video_tool_pending_generation_job"
+                        if pending_generation_job_ids
                         else "video_tool_completed"
                     ),
                     "tool_name": result.tool_name,
@@ -216,9 +216,9 @@ class AgentToolBroker:
                 suspension=(
                     {
                         "kind": "pending_operation",
-                        "operation_job_ids": list(pending_operation_job_ids),
+                        "generation_job_ids": list(pending_generation_job_ids),
                     }
-                    if pending_operation_job_ids
+                    if pending_generation_job_ids
                     else None
                 ),
             )

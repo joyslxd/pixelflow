@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import socket
 import subprocess
@@ -173,9 +175,24 @@ def test_gateway_restart_reprojects_cancelled_run_snapshot_and_sse(tmp_path: Pat
         "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
         "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
         "PIXELFLOW_SIDECAR_INSTANCE_ID": "m2-gateway-sidecar",
-        "DEEPSEEK_API_KEY": "test-only-not-used",
-        "DEEPSEEK_BASE_URL": "https://example.invalid",
-        "PYTHONPATH": str(sidecar_root / "src"),
+            "DEEPSEEK_API_KEY": "test-only-not-used",
+            "DEEPSEEK_BASE_URL": "https://example.invalid",
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "m2-test",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-test",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m2",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m2",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": manifest().digest,
+            "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
+                {
+                    "video_interactive_v1": {
+                        "deadline_seconds": 90,
+                        "max_model_steps": 6,
+                        "max_business_tools": 2,
+                        "max_billable_batch_starts": 0,
+                    },
+                }
+            ),
+            "PYTHONPATH": str(sidecar_root / "src"),
     }
     sidecar_process = subprocess.Popen(
         _sidecar_command(sidecar_root, port=sidecar_port),
@@ -189,6 +206,31 @@ def test_gateway_restart_reprojects_cancelled_run_snapshot_and_sse(tmp_path: Pat
     gateway_thread: threading.Thread | None = None
     bridge: AgentHarnessSidecarClient | None = None
     try:
+        model_profile_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "logical_name": "m2-test",
+                    "model_id": "deepseek-test",
+                    "capability_version": "m2",
+                    "budget_version": "m2",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        run_limits_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "profile": "video_interactive_v1",
+                    "max_model_steps": 6,
+                    "max_business_tools": 2,
+                    "max_billable_batch_starts": 0,
+                    "deadline_seconds": 90,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         request = HarnessRunRequest(
             user_id=str(owner.id),
             conversation_id="m2-gateway-conversation",
@@ -198,9 +240,15 @@ def test_gateway_restart_reprojects_cancelled_run_snapshot_and_sse(tmp_path: Pat
             user_input="不激活模型。",
             system_instruction="执行 M2 Gateway 测试。",
             context_digest="sha256:" + "1" * 64,
-            model_profile_digest="sha256:" + "2" * 64,
-            context_budget_digest="sha256:" + "3" * 64,
-            run_limits_digest="sha256:" + "4" * 64,
+            model_profile_digest=model_profile_digest,
+                context_budget_digest="sha256:" + "3" * 64,
+                run_limits_digest=run_limits_digest,
+                limit_profile="video_interactive_v1",
+                max_model_steps=6,
+                max_business_tools=2,
+            max_billable_batch_starts=0,
+            deadline_seconds=90,
+            model_profile_name="m2-test",
         )
         sidecar_request = AgentHarnessSidecarClient._sidecar_request(request, manifest().digest)  # noqa: SLF001 - 构造真实稳定 HTTP DTO。
         with httpx.Client(timeout=5) as client:

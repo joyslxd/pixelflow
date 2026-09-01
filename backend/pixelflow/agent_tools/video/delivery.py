@@ -7,7 +7,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
-from pixelflow.operations.quota import build_start_quota_interrupt_id
+from pixelflow.generation_jobs.quota import build_start_quota_interrupt_id
 from pixelflow.video.contracts import VideoAgentContract, VideoToolResult
 
 from .contracts import (
@@ -160,7 +160,7 @@ class ComposeOrExportVideoTool:
                         else {"quota_interrupt": None}
                     ),
                 },
-                pending_operation_job_ids=(job.job_id,),
+                pending_generation_job_ids=(job.job_id,),
                 requires_confirmation=True,
             )
         outputs = _records(context.workspace.payload.get("outputs"))

@@ -87,14 +87,3 @@ class WorkspaceCommandRequest(ContractModel):
     _validate_patch = field_validator("patch", mode="before")(
         validate_strict_json_object
     )
-
-
-class OperationRequest(ContractModel):
-    """按工作流阶段和请求摘要幂等领取外部 Operation。"""
-
-    workflow_id: str = Field(min_length=1)
-    stage: str = Field(min_length=1)
-    stage_version: int = Field(ge=1)
-    attempt: int = Field(ge=1)
-    request_hash: str = Field(min_length=1)
-    idempotency_key: str = Field(min_length=1)

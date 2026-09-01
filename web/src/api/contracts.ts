@@ -14,8 +14,6 @@ export type PublicAgentEventTypeV1 =
   | "interrupt.opened"
   | "interrupt.responded"
   | "interrupt.closed"
-  | "external_job.state_changed"
-  | "external_job.quota_state_changed"
   | "agent.plan.created"
   | "agent.plan.updated"
   | "agent.step.started"
@@ -31,7 +29,6 @@ export type PublicAgentEventTypeV1 =
   | "agent.tool.progress"
   | "agent.tool.completed"
   | "agent.tool.failed"
-  | "agent.operation.updated"
   | "agent.artifact.updated"
   | "agent.response.delta"
   | "agent.response.completed"
@@ -65,14 +62,6 @@ export type PublicInterruptV1 = {
   title: string;
   description: string;
   status: "open" | "submitting";
-};
-
-/** 外部 Operation 的公开进度；不包含 Provider job、供应商标识或错误正文。 */
-export type PublicOperationV1 = {
-  operation_id: string;
-  status: "queued" | "running" | "paused" | "completed" | "failed";
-  completed: number | null;
-  total: number | null;
 };
 
 export type WorkspaceCommandV1 = {

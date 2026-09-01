@@ -23,7 +23,7 @@ from pydantic import (
 )
 
 from pixelflow.agent_control_plane.contracts.base import ContractModel
-from pixelflow.operations.quota import is_quota_insufficient
+from pixelflow.generation_jobs.quota import is_quota_insufficient
 
 _POLLING_STATUSES = frozenset(
     {
@@ -158,7 +158,7 @@ class ProviderJobCallError(RuntimeError):
 
 
 class ProviderJobSnapshot(ContractModel):
-    """供 Operation Coordinator 消费的稳定任务快照。"""
+    """供 Gateway GenerationJob Worker 消费的稳定任务快照。"""
 
     model_config = ConfigDict(
         frozen=True,

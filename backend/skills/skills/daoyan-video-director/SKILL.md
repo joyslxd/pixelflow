@@ -28,7 +28,7 @@ metadata:
 本 Skill 基于导入的导演 Skill v4，负责把品牌/产品、创意、小说、故事大纲或既有脚本
 变成创意方向、剧本结构、分镜设计和可提交的视频 Prompt。它不读取文件、不调用 Provider、
 不创建图片或视频，也不修改 PixelFlow Workspace；所有生成、确认、计费和素材写回必须由
-受控 Tool 与 M06 Operation 完成。
+受控 Tool 与 Gateway GenerationJob 完成。
 
 ## 不可改变的创作合同
 

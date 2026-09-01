@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import httpx
 from pydantic import JsonValue
 
-from pixelflow.operations.jobs.providers import (
+from pixelflow.generation_jobs.providers import (
     ProviderJobMappingError,
     ProviderJobOutcome,
     ProviderJobSnapshot,

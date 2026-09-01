@@ -34,7 +34,7 @@ class GenerationJobSubmission:
 
 
 class GenerationJobService:
-    """把 Workspace 生成意图落为 GenerationJob，不再创建 Batch 或 Operation。"""
+    """把 Workspace 生成意图落为单一 GenerationJob，不再创建批次或子任务编排。"""
 
     def __init__(
         self,

@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> 执行状态（2026-09-01）：Task 1–7 已完成。旧图片/视频 Batch、Batch Child、M06 Operation
+> 及其恢复/完成回调生产代码已删除；当前实现以 GenerationJob 直接链路为准。下方步骤保留为
+> 实施记录，复核时应以代码和验证结果为准。
+
 **Goal:** 删除图片/视频强制 Batch + Operation 编排，改为 Gateway GenerationJob 直接启动、轮询并回写 Workspace。
 
 **Architecture:** Gateway 新增 GenerationJob Repository、Service 和 Worker。图片与视频 Tool 只提交 GenerationJob；Worker 直接复用稳定 Provider Adapter 启动和 Poll，终态直接由 Gateway 投影 Workspace，不创建 Operation Resume Run。新链路验收后删除旧图片/视频 Batch、Child、M06 Operation、Completion Callback 和 Resume 代码。

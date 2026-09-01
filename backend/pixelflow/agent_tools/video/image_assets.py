@@ -91,7 +91,7 @@ class GenerateImageAssetsTool:
             tool_name=self.spec.name,
             public_summary=f"已创建 {len(submissions)} 个图片生成任务，包含 {len(selected)} 个资产；等待 Gateway Worker 启动。",
             workspace_patch={"asset_registry": next_registry},
-            pending_operation_job_ids=tuple(item.job_id for item in submissions),
+            pending_generation_job_ids=tuple(item.job_id for item in submissions),
             requires_confirmation=True,
             model_observation={"status": "submitted", "generation_job_ids": [item.job_id for item in submissions], "asset_ids": list(request.asset_ids), "workspace_revision_required": True},
         )

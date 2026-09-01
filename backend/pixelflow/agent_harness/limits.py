@@ -12,7 +12,6 @@ from typing import Any
 _ENV_KEY = "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES"
 _PROFILE_BY_TRIGGER = {
     "user_turn": "video_interactive_v1",
-    "operation_resume": "operation_resume_v1",
     "confirmation_resume": "confirmation_resume_v1",
     # 授权/表单恢复沿用确认恢复的严格预算，避免因交互类型改变放宽执行上限。
     "authorization_resume": "confirmation_resume_v1",

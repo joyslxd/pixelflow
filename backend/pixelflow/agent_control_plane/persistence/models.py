@@ -59,7 +59,6 @@ class PixelFlowAgentWorkflowRow(Base):
     current_stage: Mapped[str] = mapped_column(String(64), nullable=False)
     stage_version: Mapped[int] = mapped_column(Integer, nullable=False)
     creation_contract_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    pending_external_job_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     latest_artifact_refs_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     context_version: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
@@ -277,44 +276,6 @@ class PixelFlowLongTermMemoryWriteRow(Base):
             "lease_expires_at",
             "created_at",
         ),
-    )
-
-
-class PixelFlowAgentOperationRow(Base):
-    """保存外部任务 claim、轮询引用和数据库 lease。"""
-
-    __tablename__ = "pixelflow_agent_operations"
-
-    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    provider_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    workflow_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    stage: Mapped[str] = mapped_column(String(64), nullable=False)
-    stage_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(24), nullable=False)
-    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
-    request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    # 用途：记录同一 Provider job 已确认的 402 暂停代次；影响：恢复请求必须匹配最新代次，默认 0。
-    quota_pause_revision: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        server_default="0",
-    )
-    next_poll_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
-    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
-
-    __table_args__ = (
-        CheckConstraint("quota_pause_revision >= 0", name="ck_pf_agent_operations_quota_pause_revision"),
-        UniqueConstraint("idempotency_key", name="uq_pf_agent_operations_idempotency_key"),
-        UniqueConstraint("workflow_id", "stage", "stage_version", "attempt", name="uq_pf_agent_operations_workflow_stage_attempt"),
-        Index("ix_pf_agent_operations_owner_workflow", "user_id", "conversation_id", "workflow_id"),
-        Index("ix_pf_agent_operations_poll", "status", "next_poll_at", "lease_expires_at"),
     )
 
 
@@ -679,7 +640,6 @@ AGENT_RUNTIME_TABLES = (
     PixelFlowAgentCompactionLockRow.__table__,
     PixelFlowAgentContextSummaryRow.__table__,
     PixelFlowAgentEventRow.__table__,
-    PixelFlowAgentOperationRow.__table__,
 )
 
 # 支撑表不改变 M01 冻结的业务投影合同，但必须随 Runtime 一起建库。

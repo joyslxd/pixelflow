@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import JsonValue
 
-from pixelflow.operations.jobs.providers import (
+from pixelflow.generation_jobs.providers import (
     ProviderJobMappingError,
     ProviderJobSnapshot,
 )
@@ -236,7 +236,7 @@ class ContentAppVideoGenerationProvider:
     def _url(self, path: str) -> str:
         return f"{self._settings.base_url}{path}"
 def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:
-    from pixelflow.operations.jobs.providers import ProviderJobOutcome
+    from pixelflow.generation_jobs.providers import ProviderJobOutcome
 
     return ProviderJobSnapshot(
         provider_job_id=provider_job_id,
@@ -247,7 +247,7 @@ def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:
 
 
 def _expired_snapshot(provider_job_id: str) -> ProviderJobSnapshot:
-    from pixelflow.operations.jobs.providers import ProviderJobOutcome
+    from pixelflow.generation_jobs.providers import ProviderJobOutcome
 
     return ProviderJobSnapshot(
         provider_job_id=provider_job_id,
@@ -412,7 +412,7 @@ def _first_video_url(value: object) -> str | None:
 
 
 def _outcome(status: str):
-    from pixelflow.operations.jobs.providers import ProviderJobOutcome
+    from pixelflow.generation_jobs.providers import ProviderJobOutcome
 
     mapping = {
         "polling": ProviderJobOutcome.POLLING,

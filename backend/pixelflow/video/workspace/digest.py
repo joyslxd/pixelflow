@@ -1,12 +1,10 @@
-"""为原生 Agent 上下文构造可公开的 Workspace / Operation 摘要（不含密钥与原文长文）。"""
+"""为原生 Agent 上下文构造可公开的 Workspace 摘要（不含密钥与原文长文）。"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
-from pixelflow.agent_control_plane.contracts.enums import ExternalJobStatus
-from pixelflow.agent_control_plane.persistence.repositories import OperationRecord
 from pixelflow.video.contracts import AgentPlan, PlanStepStatus, VideoWorkspace
 from pixelflow.video.services.production_fields import (
     workspace_has_ending_cta,
@@ -53,13 +51,6 @@ REGISTERED_SCENE_ASSET_IMAGE_MODELS: tuple[dict[str, str], ...] = (
     {"id": "gpt-image-2", "label": "image-2"},
     {"id": "seeddream-5.0", "label": "Seedream 5.0"},
 )
-
-_TERMINAL_OPERATION_STATUSES = {
-    ExternalJobStatus.SUCCEEDED,
-    ExternalJobStatus.FAILED,
-    ExternalJobStatus.TIMEOUT,
-    ExternalJobStatus.EXPIRED,
-}
 
 _SECRET_KEY_FRAGMENTS = (
     "credential",
@@ -616,27 +607,6 @@ def build_plan_digest(plan: AgentPlan | None) -> dict[str, Any] | None:
             for step in plan.steps[:20]
         ],
     }
-
-
-def summarize_operations(operations: Sequence[OperationRecord]) -> list[dict[str, Any]]:
-    """只暴露未完成 Operation 的安全字段。"""
-
-    summaries: list[dict[str, Any]] = []
-    for operation in operations:
-        if operation.status in _TERMINAL_OPERATION_STATUSES:
-            continue
-        summaries.append(
-            {
-                "job_id": operation.job_id,
-                "stage": operation.stage,
-                "status": operation.status.value,
-                "attempt": operation.attempt,
-                "provider_job_id": operation.provider_job_id,
-            }
-        )
-        if len(summaries) >= 20:
-            break
-    return summaries
 
 
 def blocking_confirmation_from_plan(plan: AgentPlan | None) -> dict[str, Any] | None:

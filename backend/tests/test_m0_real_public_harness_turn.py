@@ -80,7 +80,6 @@ def test_real_authenticated_public_harness_turn_and_sse(
         pytest.skip("真实 Borgrise Authorization 未携带可用用户主体")
     limit_profiles = {
         "video_interactive_v1": {"deadline_seconds": 180, "max_model_steps": 12, "max_business_tools": 6, "max_billable_batch_starts": 1},
-        "operation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
         "confirmation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
         "run_recovery_v1": {"deadline_seconds": 90, "max_model_steps": 6, "max_business_tools": 3, "max_billable_batch_starts": 0},
     }

@@ -6,7 +6,6 @@ import type {
   PublicAgentEventV1,
   PublicMessageV1,
   PublicInterruptV1,
-  PublicOperationV1,
   RunStatusV1,
   VideoWorkspaceProjectionV1,
 } from "../../api/contracts";
@@ -29,7 +28,6 @@ export type AgentWorkspaceState = {
   connection: ConnectionState;
   progressLines: string[];
   interrupts: PublicInterruptV1[];
-  operations: PublicOperationV1[];
 };
 
 export const initialAgentWorkspaceState: AgentWorkspaceState = {
@@ -44,7 +42,6 @@ export const initialAgentWorkspaceState: AgentWorkspaceState = {
   connection: "idle",
   progressLines: [],
   interrupts: [],
-  operations: [],
 };
 
 const EVENT_TYPE_ALIASES: Record<string, PublicAgentEventTypeV1> = {
@@ -208,11 +205,6 @@ export function foldAppliedEvent(
       if (summary === null || state.progressLines.at(-1) === summary) return next;
       return { ...next, progressLines: [...state.progressLines, summary] };
     }
-    case "external_job.state_changed":
-    case "agent.operation.updated": {
-      const operation = payloadOperation(event.payload);
-      return operation === null ? next : { ...next, operations: upsertOperation(state.operations, operation) };
-    }
     case "agent.thinking.delta":
     case "agent.reasoning_summary.delta": {
       const delta = payloadText(event.payload, "delta") || payloadText(event.payload, "text") || "";
@@ -333,12 +325,6 @@ function upsertInterrupt(interrupts: PublicInterruptV1[], interrupt: PublicInter
   return interrupts.map((item, itemIndex) => (itemIndex === index ? { ...item, ...interrupt } : item));
 }
 
-function upsertOperation(operations: PublicOperationV1[], operation: PublicOperationV1): PublicOperationV1[] {
-  const index = operations.findIndex((item) => item.operation_id === operation.operation_id);
-  if (index < 0) return [...operations, operation];
-  return operations.map((item, itemIndex) => (itemIndex === index ? operation : item));
-}
-
 function payloadInterrupt(
   event: PublicAgentEventV1,
   defaultKind: PublicInterruptV1["kind"] = "awaiting_confirmation",
@@ -372,34 +358,6 @@ function payloadInterrupt(
     || payloadText(payload, "reason_code")
     || "请根据当前工作区状态完成处理。";
   return { interrupt_id: interruptId, kind, title, description, status: "open" };
-}
-
-function payloadOperation(payload: Record<string, unknown>): PublicOperationV1 | null {
-  /** 仅投影稳定进度，无法识别的外部事件必须忽略而非猜测供应商状态。 */
-
-  const operationId = payloadText(payload, "operation_id") || payloadText(payload, "job_id");
-  if (operationId === null) return null;
-  const rawStatus = payloadText(payload, "status");
-  const status = rawStatus === "queued" || rawStatus === "pending"
-    ? "queued"
-    : rawStatus === "running" || rawStatus === "polling"
-      ? "running"
-      : rawStatus === "paused" || rawStatus === "quota_paused"
-        ? "paused"
-        : rawStatus === "completed" || rawStatus === "succeeded"
-          ? "completed"
-          : rawStatus === "failed" || rawStatus === "timeout" || rawStatus === "expired"
-            ? "failed"
-            : null;
-  if (status === null) return null;
-  const completed = payloadCount(payload, "completed");
-  const total = payloadCount(payload, "total");
-  return { operation_id: operationId, status, completed, total };
-}
-
-function payloadCount(payload: Record<string, unknown>, key: string): number | null {
-  const value = payload[key];
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function payloadStatus(payload: Record<string, unknown>): RunStatusV1 | null {

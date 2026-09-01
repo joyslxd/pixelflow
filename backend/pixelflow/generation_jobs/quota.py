@@ -1,4 +1,4 @@
-"""外部 Operation 额度中断的稳定公开身份。"""
+"""生成任务额度中断的稳定公开身份。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def is_quota_insufficient(value: Any) -> bool:
 
 
 def build_start_quota_interrupt_id(job_id: str) -> str:
-    """只由内部 Operation ID 派生 start 402 中断身份，不泄露请求内容。"""
+    """只由内部 GenerationJob ID 派生 start 402 中断身份，不泄露请求内容。"""
 
     normalized = job_id.strip() if isinstance(job_id, str) else ""
     if not normalized or normalized != job_id or len(normalized) > 64:

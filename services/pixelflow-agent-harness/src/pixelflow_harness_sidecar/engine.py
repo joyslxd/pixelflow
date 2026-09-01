@@ -90,7 +90,7 @@ class FakeAgentEngine:
                 yield event
 
     async def cancel_run(self, run_id: str) -> None:
-        """记录取消事件，但不模拟或取消外部 Operation。"""
+        """记录取消事件，但不模拟或取消外部 GenerationJob。"""
 
         fake_run = self._runs_by_id.get(run_id)
         if fake_run is None:

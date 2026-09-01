@@ -24,13 +24,13 @@ user-invocable: false
 3. 脚本与场景包按需使用 `update_script`、`update_video_plan`、`prepare_scene_packages`、
    `create_storyboard` 或 `revise_storyboard`。每个分镜引用已登记的 `asset_id`，不能虚构素材。
 4. 图片资产处于 planned 时，先用 `generate_image_assets` 请求生成；该 Tool 可能要求用户确认。
-   返回批次后使用 `inspect_image_assets` 或 `inspect_operation_batch` 查询状态；M06 轮询期间停止
-   当前 Run，不能自行循环调用或承诺已经完成。
+   返回 GenerationJob 后使用 `inspect_image_assets` 查询状态；Gateway 轮询期间停止当前 Run，
+   不能自行循环调用或承诺已经完成。
 5. 所有视频参考资产 ready 且生产合同已冻结后，才能使用 `create_video` 创建视频；它会按分镜
-   素材自动选择文生、图生、首尾帧、多参考、编辑或延展模式，并创建受控 M06 批次。生成后先用
-   `inspect_video_results` 查询每镜结果；需要已知批次的细粒度状态时再用
-   `inspect_operation_batch`，需要选版时使用 `review_generated_scenes`。`generate_scenes` 是同一
-   M06 能力的兼容入口，新的创作请求优先使用 `create_video`。
+   素材自动选择文生、图生、首尾帧、多参考、编辑或延展模式，并为每个分镜创建一个受控
+   GenerationJob。生成后先用 `inspect_video_results` 查询每镜结果，需要选版时使用
+   `review_generated_scenes`。`generate_scenes` 是同一 GenerationJob 能力的兼容入口，新的创作
+   请求优先使用 `create_video`。
 6. 仅当全部镜头均有已审核版本、没有脏镜头和未解决质检问题时，才请求
    `compose_or_export_video`；若交付 Provider 未装配，说明当前不可执行，不伪造成片。
 
@@ -39,7 +39,7 @@ user-invocable: false
 - `pending_operation`、`awaiting_confirmation` 或 `authorization_required` 是本 Run 的终点。
   告知用户下一步或等待 M06 恢复，不继续模型规划或重复发起计费调用。
 - Tool 返回 failed/rejected 时，先重新检查 Workspace，再解释可恢复条件；不得把 Provider 原文、
-  Operation ID、授权或内部错误回显给用户。
+  GenerationJob ID、授权或内部错误回显给用户。
 - 所有修改依赖 Gateway 的 revision、Run binding 与幂等校验。不要把“重试”表达为重新创建资产或
   批次；应由相同 Tool 身份回读权威结果。
 

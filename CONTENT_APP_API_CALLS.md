@@ -1,5 +1,11 @@
 # PixelFlow 调用 content-app 接口清单
 
+> 当前实现覆盖（2026-09-01）：图片资产和视频分镜的异步生成统一使用
+> `Harness Run → Tool Call → Gateway GenerationJob → Provider Job → Gateway Poll → Workspace 回写`。
+> 本文早期涉及 `OperationBatch`、Batch Child、M06 Operation、Completion Callback 或
+> Operation Resume 的图片/视频段落均为历史记录，不是当前接线依据。Gateway 不再装配这些旧
+> 生成编排；旧数据库记录也不会被代码伪造成 `ready`。
+
 本文档记录 `pixelflow` 代码中所有通过 Borgrise/content-app 基地址调用的接口。
 
 维护规则：
@@ -118,3 +124,9 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 - 不要在 `pixelflow` 配置文件、IDEA Run Configuration、环境变量或代码中写死用户 token、用户名、密码。
 - `run_generation.py` 会覆盖调用方误传的 `Authorization`，始终使用当前请求上下文中的 content-app token。
 - `content-app` dev 配置端口是 `8082`，本地联动时 `BORGRISE_BASE_URL` 应指向 `http://localhost:8082/api`。
+# 当前生成链路说明（2026-09-01）
+
+> 本文保留早期接口清单与历史迁移记录。图片和视频生成的当前实现只使用 Gateway
+> `GenerationJob`：Tool 提交任务，Gateway Worker 直接调用 Provider start/status，终态回写
+> Workspace；不再通过 Batch、Child、M06 Operation、Completion Callback 或 Resume Run 编排。
+> 以下历史段落中出现的旧入口和旧任务名不代表当前生产装配。

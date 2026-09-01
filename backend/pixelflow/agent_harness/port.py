@@ -43,7 +43,7 @@ class AgentHarnessPort(Protocol):
         conversation_id: str,
         run_id: str,
     ) -> HarnessRunResult:
-        """取消当前 Harness 模型 Run；不取消独立的外部 Provider Operation。"""
+        """取消当前 Harness 模型 Run；不取消独立的 Provider GenerationJob。"""
 
     async def aclose(self) -> None:
         """关闭 Port 自己持有的网络资源。"""

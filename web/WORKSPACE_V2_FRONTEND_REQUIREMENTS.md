@@ -1,6 +1,6 @@
 # Workspace V2 前端改造要求
 
-版本：V2；适用范围：Agent Workspace、Workspace Snapshot、脚本/分镜面板、资产面板和 Operation 进度板。
+版本：V2；适用范围：Agent Workspace、Workspace Snapshot、脚本/分镜面板、资产面板和 GenerationJob 进度板。
 
 ## 1. 改造目标
 
@@ -19,10 +19,10 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 | `narrative_plan` | `script`、`script_pipeline` |
 | `asset_registry` | `global_assets`、`reference_images`、`materials` |
 | `prompt_packages` | `scenes`、`scene_packages` |
-| `operations` | `generation_jobs`、`scene_video_progress` |
+| `generation_jobs` | `scene_video_progress`、资产/分镜内任务记录 |
 | `outputs` | `assets`、`outputs`、`merged_video` |
 
-前端不得假设 Snapshot 包含完整 Prompt、Provider URL、授权信息或全部 Operation 事件。详情应通过受控接口按需读取。
+前端不得假设 Snapshot 包含完整 Prompt、Provider URL、授权信息或全部 GenerationJob 事件。详情应通过受控接口按需读取。
 
 ## 3. 四层工作区 UI
 
@@ -59,7 +59,7 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 - `planned / generating / ready / failed`；
 - 参考资产绑定；
 - 是否允许进入视频生成；
-- 安全 Artifact 引用和生成 Operation 状态。
+- 安全 Artifact 引用和 GenerationJob 状态。
 
 前端不得展示或持久化 Authorization、Provider 原始响应或带签名下载 URL。
 
@@ -74,9 +74,9 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 - `reference_asset_ids`；
 - `continuity_from`、`transition_out`；
 - 年代、机位、声音、硬约束；
-- 当前视频资产、Batch 和子 Operation 状态。
+- 当前视频资产和 GenerationJob 状态。
 
-长片不得按 6 个分镜截断。6 只表示 M06 单批最多 6 个 `scene × variant` 子 Operation。
+长片不得按 6 个分镜截断。Gateway 以每个资产/分镜一个 GenerationJob 的方式调度，前端不按并发槽位截断列表。
 
 ## 4. Tool 交互要求
 
@@ -86,41 +86,32 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 
 1. 展示 Agent 返回的规划结果；
 2. 展示确认中断并提交用户确认；
-3. 监听 Workspace revision 和 Operation 进度；
+3. 监听 Workspace revision 和 GenerationJob 进度；
 4. 在用户明确编辑时调用公开 Workspace Command；
 5. 在 409 时保留草稿并刷新后重试。
 
 确认操作必须使用稳定 `client_response_id`，重复点击回读同一结果。
 
-## 5. M06 多批次进度
+## 5. GenerationJob 进度
 
-前端状态模型不得假设一个 `generate_scenes` 只有一个 Batch。应按以下层级归并：
+前端只按 GenerationJob 汇总安全状态，不建立 Batch、Child 或 Operation 层级：
 
 ```text
 一次 Agent Tool Call
-  ├─ Batch 1
-  │   ├─ child Operation
-  │   └─ child Operation
-  ├─ Batch 2
-  └─ Batch 3
+  ├─ GenerationJob（图片资产）
+  └─ GenerationJob（视频分镜）
 ```
 
-进度板至少显示：
-
-- 已选镜头总数；
-- 总子 Operation 数；
-- queued、polling、succeeded、failed 数量；
-- Batch 数量及各 Batch 状态；
-- 是否等待授权、额度恢复或重试。
-
-子 Operation 进入终态时，只更新对应镜头和批次统计。前端不得把任意一个子 Operation 终态直接显示为整条视频完成或失败。
+进度板至少显示 queued、polling、succeeded、failed 数量，以及对应的资产/分镜标识。
+GenerationJob 进入终态时，只更新它对应的 Workspace 资产或分镜版本；前端不得把任意一个任务
+终态直接显示为整条视频完成或失败。
 
 ## 6. 长视频要求
 
 - 单段时长支持 4–30 秒；
 - 总成片时长不得用 180 秒做前端硬限制；
 - 17 段、约 368 秒的规划应能完整展示和保存；
-- 生成时由 M06/Gateway 拆批，前端只消费批次进度；
+- 生成时由 Gateway Worker 调度，前端只消费 GenerationJob 进度；
 - 不得以“最多 6 个分镜”限制分镜列表、排序或 Prompt Package 数量。
 
 ## 7. 状态管理与刷新
@@ -129,7 +120,7 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 - 每次成功写入后以服务端返回 revision 替换本地 revision；
 - SSE 事件只做增量更新，遇到序号 gap 必须重新拉取 Snapshot；
 - Snapshot 只返回尾部事件时，前端不得认为历史对话被删除；
-- 切换会话或 Run 时清空旧 Run 的临时 Operation 状态，不能串项目。
+- 切换会话或 Run 时清空旧 Run 的临时 GenerationJob 状态，不能串项目。
 
 ## 8. 验收测试
 
@@ -138,8 +129,8 @@ Snapshot 中新增字段均为可选，前端必须兼容旧字段。优先读�
 1. 旧 Snapshot 无 V2 字段时仍能显示脚本、资产和分镜；
 2. V2 Snapshot 正确显示四层数据；
 3. 17 段、368 秒规划不被截断为 6 段；
-4. 6+6+5 三个 Batch 的进度正确汇总；
-5. 子 Operation 失败不会覆盖其他镜头状态；
+4. 多个 GenerationJob 的进度正确汇总；
+5. 单个 GenerationJob 失败不会覆盖其他镜头状态；
 6. revision 冲突保留用户草稿；
 7. 重复确认不会创建第二个恢复 Run；
 8. SSE 断线后 Snapshot 刷新能恢复进度；

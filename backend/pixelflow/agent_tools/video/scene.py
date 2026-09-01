@@ -693,7 +693,7 @@ class GenerateScenesTool:
             tool_name=self.spec.name,
             public_summary=f"已创建 {len(submissions)} 个视频生成任务，等待 Gateway Worker 启动。",
             workspace_patch=workspace_patch,
-            pending_operation_job_ids=tuple(item.job_id for item in submissions),
+            pending_generation_job_ids=tuple(item.job_id for item in submissions),
             requires_confirmation=True,
             model_observation={
                 "status": "submitted",

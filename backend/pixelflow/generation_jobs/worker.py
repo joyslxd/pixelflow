@@ -11,7 +11,7 @@ from pydantic import JsonValue
 
 from pixelflow.capabilities.image_generation.port import ImageGenerationProvider
 from pixelflow.capabilities.video_generation.port import VideoGenerationProvider
-from pixelflow.operations.jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
+from pixelflow.generation_jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
 from .contracts import GenerationJobKind, GenerationJobRecord, GenerationJobStatus

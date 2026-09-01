@@ -13,10 +13,10 @@ from pixelflow.generation_jobs.contracts import (
     GenerationJobStatus,
 )
 from pixelflow.generation_jobs.credentials import TransientGenerationJobCredentialStore
+from pixelflow.generation_jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
 from pixelflow.generation_jobs.repository import MemoryGenerationJobRepository, SQLGenerationJobRepository
 from pixelflow.generation_jobs.service import GenerationJobService
 from pixelflow.generation_jobs.worker import GenerationJobWorker
-from pixelflow.operations.jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
 from pixelflow.platform.persistence import ensure_schema
 from pixelflow.video.contracts import VideoWorkspace
 from pixelflow.video.workspace import MemoryVideoAgentRepository

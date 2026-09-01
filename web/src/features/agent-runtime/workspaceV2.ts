@@ -11,7 +11,7 @@ export type WorkspaceV2Asset = {
   referenceAssetIds: string[];
   usableForVideo: boolean;
   artifactRef: string;
-  operationStatus: string;
+  generationStatus: string;
 };
 
 export type WorkspaceV2Package = {
@@ -32,10 +32,11 @@ export type WorkspaceV2Package = {
   state: string;
 };
 
-export type WorkspaceV2Batch = {
-  batchId: string;
+export type WorkspaceV2GenerationJob = {
+  jobId: string;
   status: string;
-  children: Array<{ operationId: string; status: string; segmentId: string }>;
+  itemId: string;
+  kind: string;
 };
 
 export type WorkspaceV2Projection = {
@@ -44,7 +45,7 @@ export type WorkspaceV2Projection = {
   narrativePlan: Record<string, string>;
   assets: WorkspaceV2Asset[];
   packages: WorkspaceV2Package[];
-  batches: WorkspaceV2Batch[];
+  generationJobs: WorkspaceV2GenerationJob[];
   outputs: Array<{ outputId: string; kind: string; status: string; title: string }>;
   awaitingProductionConstraints: boolean;
 };
@@ -149,7 +150,7 @@ function assets(summary: RecordValue): WorkspaceV2Asset[] {
     referenceAssetIds: strings(item.reference_asset_ids),
     usableForVideo: item.usable_for_video === true,
     artifactRef: string(item.artifact_ref ?? item.provider_artifact_ref, 256),
-    operationStatus: string(item.operation_status ?? item.generation_status, 64),
+    generationStatus: string(item.generation_status, 64),
   }));
 }
 
@@ -175,16 +176,28 @@ function packages(summary: RecordValue): WorkspaceV2Package[] {
   })).sort((left, right) => left.sequence - right.sequence);
 }
 
-function batches(summary: RecordValue): WorkspaceV2Batch[] {
-  const source = records(summary.operation_batches ?? summary.batches);
-  return source.map((batch, index) => ({
-    batchId: string(batch.batch_id ?? batch.id, 128) || `batch-${index + 1}`,
-    status: string(batch.status, 64) || "queued",
-    children: records(batch.children ?? batch.child_operations ?? batch.operations).map((child, childIndex) => ({
-      operationId: string(child.operation_id ?? child.job_id ?? child.id, 128) || `operation-${childIndex + 1}`,
-      status: string(child.status, 64) || "queued",
-      segmentId: string(child.segment_id ?? child.scene_id, 128),
-    })),
+function generationJobs(summary: RecordValue): WorkspaceV2GenerationJob[] {
+  const explicit = records(summary.generation_jobs ?? summary.jobs);
+  const assetJobs = records(summary.asset_registry)
+    .filter((asset) => string(asset.generation_job_id, 128))
+    .map((asset) => ({
+      generation_job_id: asset.generation_job_id,
+      kind: "image",
+      item_id: asset.asset_id,
+      status: asset.generation_job_status ?? asset.generation_status,
+    }));
+  const sceneJobs = records(summary.scene_summaries)
+    .flatMap((scene) => records(scene.generation_jobs).map((job) => ({
+      ...job,
+      kind: job.kind ?? "video",
+      item_id: job.item_id ?? scene.scene_id,
+    })));
+  const allJobs: RecordValue[] = [...explicit, ...assetJobs, ...sceneJobs];
+  return allJobs.map((job, index) => ({
+    jobId: string(job.generation_job_id ?? job.job_id ?? job.id, 128) || `generation-job-${index + 1}`,
+    status: string(job.status, 64) || "queued",
+    itemId: string(job.item_id ?? job.scene_id ?? job.asset_id, 128),
+    kind: string(job.kind, 32) || "generation",
   }));
 }
 
@@ -207,21 +220,21 @@ export function projectWorkspaceV2(rawSummary: Record<string, unknown>): Workspa
     narrativePlan: narrativePlan(summary),
     assets: assets(summary),
     packages: packages(summary),
-    batches: batches(summary),
+    generationJobs: generationJobs(summary),
     outputs: outputs(summary),
     awaitingProductionConstraints: summary.awaiting_production_constraints === true,
   };
 }
 
-export function operationCounts(batches: WorkspaceV2Batch[]): Record<string, number> {
-  /** 同一子 Operation 只统计一次；一个失败子项不会覆盖其它镜头或批次的状态。 */
+export function generationJobCounts(jobs: WorkspaceV2GenerationJob[]): Record<string, number> {
+  /** 同一 GenerationJob 只统计一次；一个失败任务不会覆盖其它镜头或资产的状态。 */
 
   const seen = new Set<string>();
   const counts: Record<string, number> = { queued: 0, polling: 0, succeeded: 0, failed: 0, paused: 0 };
-  for (const child of batches.flatMap((batch) => batch.children)) {
-    if (seen.has(child.operationId)) continue;
-    seen.add(child.operationId);
-    const normalized = child.status.toLowerCase();
+  for (const job of jobs) {
+    if (seen.has(job.jobId)) continue;
+    seen.add(job.jobId);
+    const normalized = job.status.toLowerCase();
     if (normalized.includes("fail") || normalized.includes("error") || normalized.includes("timeout")) counts.failed += 1;
     else if (normalized.includes("success") || normalized.includes("succeed") || normalized.includes("complete")) counts.succeeded += 1;
     else if (normalized.includes("pause") || normalized.includes("authorization") || normalized.includes("quota")) counts.paused += 1;

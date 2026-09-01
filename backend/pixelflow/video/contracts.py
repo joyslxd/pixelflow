@@ -115,18 +115,18 @@ class VideoToolResult(VideoAgentContract):
     public_summary: str = Field(min_length=1, max_length=2_000)
     workspace_patch: dict[str, JsonValue] = Field(default_factory=dict)
     artifact_refs: tuple[str, ...] = ()
-    pending_operation_job_ids: tuple[str, ...] = ()
+    pending_generation_job_ids: tuple[str, ...] = ()
     requires_confirmation: bool = False
     model_observation: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_pending_operations(self) -> VideoToolResult:
-        if any(not job_id.strip() for job_id in self.pending_operation_job_ids):
-            raise ValueError("pending_operation_job_ids 不能包含空任务标识")
-        if len(set(self.pending_operation_job_ids)) != len(
-            self.pending_operation_job_ids
+    def validate_pending_generation_jobs(self) -> VideoToolResult:
+        if any(not job_id.strip() for job_id in self.pending_generation_job_ids):
+            raise ValueError("pending_generation_job_ids 不能包含空任务标识")
+        if len(set(self.pending_generation_job_ids)) != len(
+            self.pending_generation_job_ids
         ):
-            raise ValueError("pending_operation_job_ids 不能重复")
+            raise ValueError("pending_generation_job_ids 不能重复")
         return self
 
 class VideoWorkspace(VideoAgentContract):

@@ -9,7 +9,7 @@ from pixelflow.capabilities.video_generation.providers.content_app import (
     ContentAppVideoGenerationProvider,
     ContentAppVideoProviderSettings,
 )
-from pixelflow.operations.jobs.providers import ProviderJobMappingError, ProviderJobOutcome
+from pixelflow.generation_jobs.providers import ProviderJobMappingError, ProviderJobOutcome
 
 
 def _provider(handler) -> ContentAppVideoGenerationProvider:

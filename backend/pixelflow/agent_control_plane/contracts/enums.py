@@ -42,17 +42,6 @@ class TurnStatus(StrEnum):
     FAILED = "failed"
 
 
-class ExternalJobStatus(StrEnum):
-    """Agent 所拥有的外部任务引用状态。"""
-
-    CREATED = "created"
-    POLLING = "polling"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    TIMEOUT = "timeout"
-    EXPIRED = "expired"
-
-
 class AgentEventType(StrEnum):
     """首批前端可感知事件类型。"""
 
@@ -67,8 +56,6 @@ class AgentEventType(StrEnum):
     INTERRUPT_OPENED = "interrupt.opened"
     INTERRUPT_RESPONDED = "interrupt.responded"
     INTERRUPT_CLOSED = "interrupt.closed"
-    EXTERNAL_JOB_STATE_CHANGED = "external_job.state_changed"
-    EXTERNAL_JOB_QUOTA_STATE_CHANGED = "external_job.quota_state_changed"
     AGENT_PLAN_CREATED = "agent.plan.created"
     AGENT_PLAN_UPDATED = "agent.plan.updated"
     AGENT_STEP_STARTED = "agent.step.started"
@@ -84,7 +71,6 @@ class AgentEventType(StrEnum):
     AGENT_TOOL_PROGRESS = "agent.tool.progress"
     AGENT_TOOL_COMPLETED = "agent.tool.completed"
     AGENT_TOOL_FAILED = "agent.tool.failed"
-    AGENT_OPERATION_UPDATED = "agent.operation.updated"
     AGENT_ARTIFACT_UPDATED = "agent.artifact.updated"
     AGENT_RESPONSE_DELTA = "agent.response.delta"
     AGENT_RESPONSE_COMPLETED = "agent.response.completed"

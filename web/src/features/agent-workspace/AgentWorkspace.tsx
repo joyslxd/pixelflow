@@ -13,7 +13,6 @@ import { AgentTaskBoard } from "./AgentTaskBoard";
 import { Composer } from "./Composer";
 import { ConnectionNotice } from "./ConnectionNotice";
 import { InterruptHost } from "./InterruptHost";
-import { OperationProgress } from "./OperationProgress";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 type AgentWorkspaceProps = {
@@ -124,7 +123,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
             onResumeAuthorization={resumeAuthorizationInterrupt}
             onSubmitForm={submitFormInterrupt}
           />
-          <OperationProgress operations={runtime.operations} />
           <Composer
             canSend={canSend && detail !== null}
             sending={agentBusy}
@@ -142,7 +140,6 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
               conversationId={detail?.conversation.conversation_id ?? ""}
               workspaceId={runtime.videoWorkspace.workspace_id}
               revision={runtime.videoWorkspace.revision}
-              operations={runtime.operations}
             />
           ) : (
             <p className="text-xs text-ink-soft">

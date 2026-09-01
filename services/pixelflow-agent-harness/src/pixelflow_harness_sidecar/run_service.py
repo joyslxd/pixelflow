@@ -75,7 +75,7 @@ class RunService:
         return await self._store.get(run_id)
 
     async def cancel_run(self, run_id: str) -> HarnessRunState | None:
-        """取消当前模型循环；已创建的外部 Provider Operation 不在此边界内。"""
+        """取消当前模型循环；已创建的外部 Provider GenerationJob 不在此边界内。"""
 
         async with self._lock:
             state = await self._store.cancel(run_id)
@@ -216,7 +216,7 @@ class RunService:
             )
         except asyncio.CancelledError:
             # asyncio.to_thread 无法强杀底层 SDK 线程；取消后忽略其结果并由
-            # 持久化 Run 状态阻止后续公开事件。外部 Operation 取消归 M5。
+            # 持久化 Run 状态阻止后续公开事件。外部 GenerationJob 取消不在此边界内。
             await self._store.cancel(run_id)
             return
         except Exception as error:

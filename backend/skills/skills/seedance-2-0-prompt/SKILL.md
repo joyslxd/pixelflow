@@ -24,7 +24,7 @@ metadata:
 # Seedance 2.0 分镜提示词
 
 本 Skill 只把 PixelFlow 已确认的剧本、场景包、素材职责和创作合同整理为可提交的
-Seedance 2.0 分镜提示词。它不读取本地文件、不修改 Workspace、不创建 Operation，
+Seedance 2.0 分镜提示词。它不读取本地文件、不修改 Workspace、不创建 GenerationJob，
 也不调用图片、视频或网络接口。
 
 ## 使用边界

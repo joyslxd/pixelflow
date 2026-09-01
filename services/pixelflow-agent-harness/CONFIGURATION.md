@@ -2,7 +2,7 @@
 
 本服务所有配置仅由进程环境或 Secret Manager 注入。不得把真实 token、模型输入、用户身份或供应商原始响应写入 YAML、测试报告或仓库文件。
 
-`PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES` 必须由 Gateway 所用 profile 配置同步注入 Sidecar。它是包含 `video_interactive_v1`、`operation_resume_v1`、`confirmation_resume_v1` 与 `run_recovery_v1` 的 JSON 对象；Sidecar 会逐字段和 digest 校验 Gateway 冻结的 Run limits，缺失或不一致时 readiness/Run 均失败关闭。
+`PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES` 必须由 Gateway 所用 profile 配置同步注入 Sidecar。它是包含 `video_interactive_v1`、`confirmation_resume_v1` 与 `run_recovery_v1` 的 JSON 对象；Sidecar 会逐字段和 digest 校验 Gateway 冻结的 Run limits，缺失或不一致时 readiness/Run 均失败关闭。
 
 | 环境变量 | 用途 | 取值与影响 |
 | --- | --- | --- |

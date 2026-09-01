@@ -164,20 +164,6 @@ test("输出上限导致无公开回复时标记为可继续恢复", () => {
   assert.equal(isRecoveryRequired({ ...recoverySnapshot, status: "completed" }), false);
 });
 
-test("外部 Operation 公开事件按 job_id 幂等更新进度", () => {
-  let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0 });
-  const queued = {
-    ...fixture.snapshot.events[0],
-    sequence: 1,
-    type: "agent.operation.updated",
-    payload: { job_id: "operation-1", status: "polling", completed: 1, total: 2 },
-  };
-  [state] = applyPublicEvent(state, queued);
-  const completed = { ...queued, sequence: 2, payload: { job_id: "operation-1", status: "succeeded", completed: 2, total: 2 } };
-  [state] = applyPublicEvent(state, completed);
-  assert.deepEqual(state.operations, [{ operation_id: "operation-1", status: "completed", completed: 2, total: 2 }]);
-});
-
 test("通用中断事件保留表单和授权的稳定身份", () => {
   let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0 });
   const form = {

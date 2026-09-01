@@ -2,17 +2,14 @@
 
 import { useMemo } from "react";
 
-import type { PublicOperationV1 } from "@/api/contracts";
-
 import { WorkspaceAssetThumbnail } from "./WorkspaceAssetThumbnail";
-import { operationCounts, projectWorkspaceV2 } from "./workspaceV2";
+import { generationJobCounts, projectWorkspaceV2 } from "./workspaceV2";
 
 type Props = {
   summary: Record<string, unknown>;
   conversationId: string;
   workspaceId: string;
   revision: number;
-  operations: PublicOperationV1[];
 };
 
 const creativeLabels: Record<string, string> = {
@@ -45,10 +42,9 @@ function assetOriginLabel(origin: string): string {
   return ({ existing_material: "已有素材", planned_generation: "待生成素材", provider_output: "已生成素材" } as Record<string, string>)[origin] ?? "待生成素材";
 }
 
-export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revision, operations }: Props) {
+export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revision }: Props) {
   const projection = useMemo(() => projectWorkspaceV2(summary), [summary]);
-  const counts = operationCounts(projection.batches);
-  const childTotal = Object.values(counts).reduce((total, value) => total + value, 0);
+  const counts = generationJobCounts(projection.generationJobs);
   const creativeFieldKeys = orderedFieldKeys(projection.creativeBrief, creativeLabels).filter((key) => projection.creativeBrief[key] !== undefined);
   const narrativeFieldKeys = orderedFieldKeys(projection.narrativePlan, narrativeLabels).filter((key) => Boolean(projection.narrativePlan[key]?.trim()));
   const visiblePrimaryNarrativeKeys = narrativeFieldKeys.filter(
@@ -109,7 +105,7 @@ export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revisio
               <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
               {asset.generationPrompt ? <details><summary>资产生成提示词</summary><p className="mt-1 whitespace-pre-wrap">{asset.generationPrompt}</p></details> : null}
               {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
-              {asset.operationStatus ? <p>生成任务：{statusLabel(asset.operationStatus)}</p> : null}
+              {asset.generationStatus ? <p>生成任务：{statusLabel(asset.generationStatus)}</p> : null}
               {asset.artifactRef ? <p className="truncate">Artifact：{asset.artifactRef}</p> : null}
             </div>
           </article>
@@ -136,11 +132,10 @@ export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revisio
       </section>
 
       <section className="space-y-2 rounded bg-canvas p-3">
-        {sectionTitle("M06 多批次进度")}
-        <p>Batch {projection.batches.length} · 子 Operation {childTotal} · 等待 {counts.queued} · 处理中 {counts.polling} · 完成 {counts.succeeded} · 失败 {counts.failed} · 暂停 {counts.paused}</p>
-        {projection.batches.map((batch) => <p key={batch.batchId} className="rounded bg-surface p-2">{batch.batchId} · {statusLabel(batch.status)} · {batch.children.length} 个子 Operation</p>)}
-        {operations.map((operation) => <p key={operation.operation_id} className="rounded bg-surface p-2">实时 Operation {operation.operation_id} · {statusLabel(operation.status)}{operation.completed !== null && operation.total !== null ? ` · ${operation.completed}/${operation.total}` : ""}</p>)}
-        {projection.batches.length === 0 && operations.length === 0 ? <p>暂无 Operation。</p> : null}
+        {sectionTitle("GenerationJob 进度")}
+        <p>任务 {projection.generationJobs.length} · 等待 {counts.queued} · 处理中 {counts.polling} · 完成 {counts.succeeded} · 失败 {counts.failed} · 暂停 {counts.paused}</p>
+        {projection.generationJobs.map((job) => <p key={job.jobId} className="rounded bg-surface p-2">{job.jobId} · {job.kind} · {job.itemId || "—"} · {statusLabel(job.status)}</p>)}
+        {projection.generationJobs.length === 0 ? <p>暂无生成任务。</p> : null}
       </section>
 
       {projection.outputs.length > 0 ? <section className="space-y-2 rounded bg-canvas p-3">{sectionTitle("输出")} {projection.outputs.map((output) => <p key={output.outputId} className="rounded bg-surface p-2">{output.title} · {output.kind} · {statusLabel(output.status)}</p>)}</section> : null}

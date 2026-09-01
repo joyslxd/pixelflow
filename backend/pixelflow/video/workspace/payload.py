@@ -95,7 +95,6 @@ class WorkspacePromptPackage(BaseModel):
     sound: str | None = Field(default=None, max_length=2_000)
     hard_constraints: tuple[str, ...] = Field(default=(), max_length=64)
     video_artifact_refs: tuple[str, ...] = Field(default=(), max_length=8)
-    operation_ids: tuple[str, ...] = Field(default=(), max_length=8)
     state: Literal["planned", "generating", "ready", "failed"] = "planned"
 
 

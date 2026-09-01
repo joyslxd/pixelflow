@@ -99,7 +99,7 @@ def _workspace_patch(patch: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
 def _merge_scenes_by_id(existing: object, incoming: object) -> list[JsonValue]:
     """按 scene_id 合并镜头列表：incoming 覆盖同 id，保留现有未提及镜。
 
-    并发生成时，后到的 generate_scenes / Operation 完成补丁若整表替换，
+    并发生成时，后到的 generate_scenes / GenerationJob 完成补丁若整表替换，
     会把另一镜已写回的 video_url 盖掉；合并写入可避免丢成片。
     """
 

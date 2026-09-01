@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import JsonValue
 
-from pixelflow.operations.jobs.providers import ProviderJobSnapshot
+from pixelflow.generation_jobs.providers import ProviderJobSnapshot
 
 
 @runtime_checkable

@@ -50,7 +50,6 @@ class RunTrigger(StrictModel):
         "confirmation_resume",
         "authorization_resume",
         "form_resume",
-        "operation_resume",
         "quota_resume",
         "run_recovery",
     ]

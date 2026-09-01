@@ -1,4 +1,4 @@
-"""验证生成 Tool 只创建 GenerationJob，不再创建 Batch 或 Operation。"""
+"""验证生成 Tool 只创建 GenerationJob，不再创建旧批次或子任务编排。"""
 
 from __future__ import annotations
 

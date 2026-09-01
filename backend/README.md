@@ -6,7 +6,7 @@ Gateway 是唯一面向浏览器的 Controller 层，公开接口统一以 `/age
 
 `services/pixelflow-agent-harness` 是独立 Sidecar，只执行 DeepSeek Harness 模型循环、Skill 加载和受控 Tool 调用。Sidecar 不保存 PixelFlow 业务真相，不直接访问数据库、用户 Authorization 或 Provider。
 
-视频 Workspace、M06 Operation、Outbox、用户偏好和对话消息由 `pixelflow/` 中的 Repository / Application Service 持久化。浏览器只能消费 Gateway 的 Snapshot、公开 SSE 事件和 Workspace 安全摘要。
+视频 Workspace、GenerationJob、Outbox、用户偏好和对话消息由 `pixelflow/` 中的 Repository / Application Service 持久化。浏览器只能消费 Gateway 的 Snapshot、公开 SSE 事件和 Workspace 安全摘要。
 
 ## 本地开发
 

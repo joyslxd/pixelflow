@@ -1,5 +1,10 @@
 # PixelFlow 原生 Agent 接入 DeepSeek Harness Sidecar 实施方案
 
+> 当前实现覆盖（2026-09-01）：本文早期方案中的图片/视频 Batch、Batch Child、M06
+> Operation、Completion Callback 和 Operation Resume 生成编排已删除。当前唯一生成链路为
+> `Harness Run → Tool Call → Gateway GenerationJob → Provider Job → Gateway Poll → Workspace 回写`。
+> 以下历史章节仅用于追溯设计，不得据此恢复旧 Dispatcher、旧 Operation Repository 或旧恢复 Worker。
+
 > 文档日期：2026-08-22
 >
 > 当前状态：设计候选，尚未开始编码、发布或生产切换
@@ -2633,3 +2638,21 @@ workspace_revision
 5. 升级必须先跑 Sidecar 合同测试和 Golden Journey；
 6. 禁止在生产使用 floating version、`latest` tag 或未审计的新 Cordis composition；
 7. `mem0ai` 同样固定精确版本；升级前重跑 add/job/search/update/delete 合同、脱敏和 owner 隔离测试。
+# 当前生成链路覆盖说明（2026-09-01）
+
+> 本文早期章节保留为历史设计记录；涉及图片/视频 `OperationBatch`、Batch Child、M06
+> Operation、Completion Callback 和 Operation Resume 的生成链路，均已由当前版本覆盖，
+> 不再作为实现依据。
+
+当前图片与视频生成只使用以下链路：
+
+```text
+Harness Run → Tool Call → Gateway GenerationJob → Provider Job → Gateway Poll → Workspace 回写
+```
+
+每个图片资产或视频分镜对应一个 Gateway `GenerationJob`。Gateway 负责创建、启动、轮询、
+失败原因码和 Workspace 终态投影；Sidecar 只能通过 Tool Broker 调用 Tool。当前 Gateway 不再
+装配图片/视频 Batch Dispatcher、Batch Child Worker、M06 Operation Recovery、Completion
+Callback 或 Operation Resume Worker。旧数据库表不用于伪造 `ready`，历史记录也不会被自动重放。
+
+后续阅读本文时，以上覆盖说明优先于历史章节中的旧生成编排描述。

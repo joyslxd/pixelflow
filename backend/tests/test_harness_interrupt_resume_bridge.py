@@ -70,7 +70,6 @@ async def test_confirmation_resume_uses_gateway_run_bridge_and_current_workspace
         json.dumps(
             {
                 "video_interactive_v1": {"deadline_seconds": 90, "max_model_steps": 8, "max_business_tools": 3, "max_billable_batch_starts": 1},
-                "operation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
                 "confirmation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
                 "run_recovery_v1": {"deadline_seconds": 90, "max_model_steps": 4, "max_business_tools": 0, "max_billable_batch_starts": 0},
             }
