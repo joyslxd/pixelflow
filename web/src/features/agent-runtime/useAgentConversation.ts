@@ -97,6 +97,8 @@ export function useAgentConversation(initialConversationId?: string) {
   const streamAbortRef = useRef<AbortController | null>(null);
   const requestGenerationRef = useRef(0);
   const runtimeRef = useRef(runtime);
+  const pendingRuntimeRenderRef = useRef<AgentWorkspaceState | null>(null);
+  const runtimeRenderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingTurnRef = useRef<{ client_input_id: string; content: string } | null>(null);
   const confirmationResponseIdsRef = useRef(new Map<string, string>());
   const [confirmationSubmittingId, setConfirmationSubmittingId] = useState<string | null>(null);
@@ -106,12 +108,30 @@ export function useAgentConversation(initialConversationId?: string) {
     runtimeRef.current = runtime;
   }, [runtime]);
 
+  const flushRuntimeRender = useCallback(() => {
+    if (runtimeRenderTimerRef.current !== null) {
+      clearTimeout(runtimeRenderTimerRef.current);
+      runtimeRenderTimerRef.current = null;
+    }
+    const pending = pendingRuntimeRenderRef.current;
+    pendingRuntimeRenderRef.current = null;
+    if (pending !== null) setRuntime(pending);
+  }, []);
+
+  const queueRuntimeRender = useCallback((next: AgentWorkspaceState) => {
+    pendingRuntimeRenderRef.current = next;
+    if (runtimeRenderTimerRef.current !== null) return;
+    // 模型 delta 可能按单字/子词到达；限制视觉提交频率，仍在 runtimeRef 中完整累积事件。
+    runtimeRenderTimerRef.current = setTimeout(flushRuntimeRender, 50);
+  }, [flushRuntimeRender]);
+
   const stopStream = useCallback(() => {
     /** 退出或切换会话时终止旧流，保证旧响应无法写回新会话。 */
 
+    flushRuntimeRender();
     streamAbortRef.current?.abort();
     streamAbortRef.current = null;
-  }, []);
+  }, [flushRuntimeRender]);
 
   const refreshConversations = useCallback(async () => {
     const items = await listConversations();
@@ -129,9 +149,11 @@ export function useAgentConversation(initialConversationId?: string) {
       connection: "connected",
     });
     runtimeRef.current = next;
+    // Snapshot 是权威收敛点，先提交并清空尚未绘制的 delta，避免旧批次覆盖权威状态。
+    flushRuntimeRender();
     setRuntime(next);
     return !isTerminalSnapshot(snapshot);
-  }, []);
+  }, [flushRuntimeRender]);
 
   const findNewerRun = useCallback(async (conversationId: string, runId: string): Promise<string | null> => {
     /** 仅在当前 SSE 结束后回读一次会话索引，自动恢复 Run 不再触发定时完整会话轮询。 */
@@ -159,7 +181,7 @@ export function useAgentConversation(initialConversationId?: string) {
         onEvent: async (event) => {
           const [next, result] = applyPublicEvent(runtimeRef.current, event);
           runtimeRef.current = next;
-          setRuntime(next);
+          queueRuntimeRender(next);
           if (shouldReloadSnapshot(event, result)) {
             const keepStreaming = await hydrateRun(conversationId, runId);
             // Tool 完成只需以 Snapshot 收敛 Workspace，当前 SSE 仍可继续消费后续 delta。
@@ -188,7 +210,7 @@ export function useAgentConversation(initialConversationId?: string) {
         }
       }
     }
-  }, [findNewerRun, hydrateRun, stopStream]);
+  }, [findNewerRun, hydrateRun, queueRuntimeRender, stopStream]);
 
   const openConversation = useCallback(async (conversationId: string) => {
     /** 使用 generation 防止 A/B 快速切换时旧请求覆盖当前会话。 */
