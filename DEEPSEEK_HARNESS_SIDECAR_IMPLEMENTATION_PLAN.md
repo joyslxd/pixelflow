@@ -1,13 +1,47 @@
 # PixelFlow 原生 Agent 接入 DeepSeek Harness Sidecar 实施方案
 
-> 当前实现覆盖（2026-09-01）：本文早期方案中的图片/视频 Batch、Batch Child、M06
+> 当前实现覆盖（2026-09-01 20:25:10 +08:00）：本文早期方案中的图片/视频 Batch、Batch Child、M06
 > Operation、Completion Callback 和 Operation Resume 生成编排已删除。当前唯一生成链路为
 > `Harness Run → Tool Call → Gateway GenerationJob → Provider Job → Gateway Poll → Workspace 回写`。
 > 以下历史章节仅用于追溯设计，不得据此恢复旧 Dispatcher、旧 Operation Repository 或旧恢复 Worker。
 
+## 0. 本次落地变更记录
+
+### 变更时间
+
+- 变更日期：2026-09-01
+- 变更时间：20:25:10（Asia/Shanghai，UTC+08:00）
+- 对应提交：`4e62678`（`删除图片视频旧 Batch Operation 链路`）
+- 变更分支：`feature/0822-v0.3`
+
+### 已落地内容
+
+本次按“生图/生视频只保留 GenerationJob”原则完成了旧链路删除和运行时收敛：
+
+1. 图片资产和视频分镜统一由 Gateway 创建一个 GenerationJob；每个图片资产或视频分镜版本对应一个 Job，不再先创建 OperationBatch、Batch Child 或 M06 Operation。
+2. GenerationJob Worker 直接调用图片/视频 Provider Adapter，负责 start、Provider Job ID 绑定、poll、受控失败原因和终态回写，不再经过 Completion Callback、Operation Resume Run 或旧 Operation Recovery Worker。
+3. 删除旧图片/视频 Batch Dispatcher、Batch Repository、Batch Resume、Completion 以及 M06 Operation 的图片/视频装配入口；删除控制面旧 Operation ORM、Repository 接口和旧批次数据库迁移入口。
+4. 图片/视频 Tool 返回 `generation_job_ids`，前端 Workspace V2 直接展示 GenerationJob 状态；删除 `inspect_operation_batch`、`operation_job_ids`、旧 Operation 进度组件和旧 Operation Snapshot 投影。
+5. Provider DTO 与额度判断迁移到 `backend/pixelflow/generation_jobs/`；图片和视频能力仍只通过 Gateway Tool Broker/GenerationJob Worker 调用，Sidecar 不获得数据库、Provider 或宿主文件系统访问权。
+6. 更新 Harness、Skill、配置和前端合同，明确历史 M06 文档不再作为当前图片/视频生成接线依据。
+
+### 当前验收结果
+
+- 后端测试：`120 passed, 4 skipped`
+- Sidecar 合同与 HTTP/SSE 测试：`10 passed`
+- 前端测试：`15 passed`
+- TypeScript 检查与 Vite 测试构建：通过
+- Ruff 与 `git diff --check`：通过
+- `backend`、`services`、`web` 生产代码和测试：未发现旧图片/视频 Batch、Batch Child、M06 Dispatcher 或旧 Operation 生成链路引用
+- 本次未发起真实图片/视频 Provider 请求，未产生计费请求
+
+### 当前边界
+
+Harness 的 `pending_operation` 是通用 Run 挂起协议状态，仍用于表达等待异步 GenerationJob；它不代表旧 Operation 实体。交付、分析等非生图能力中的独立 Operation 语义不属于本次图片/视频 GenerationJob 删除范围。历史设计章节和 M06 状态记录保留用于追溯，但不得恢复已删除的生成编排。
+
 > 文档日期：2026-08-22
 >
-> 当前状态：设计候选，尚未开始编码、发布或生产切换
+> 原始方案状态（2026-08-22）：设计候选，尚未开始编码、发布或生产切换；当前落地状态以本节为准
 >
 > 适用范围：第一阶段接管已经跑通的 VideoAgent V2，目标运行时可继续增加 PPT、Excel、联网搜索等原生 Agent 能力
 >
@@ -15,7 +49,7 @@
 >
 > 发布原则：旧对话只读归档、运行中任务先排空、付费 Provider 不迁入 Sidecar；同一重构分支删除旧 VideoAgent、旧 LangGraph 任务流、DeerFlow 通用平台 API 和全部 LangChain/LangGraph/DeerFlow 运行依赖
 >
-> 术语说明：**External Operation Coordinator（外部异步任务协调器，历史代号 M06）** 是 PixelFlow 的外部任务可靠性模块，正式代码目录为 `backend/pixelflow/operations/`。后文简称“External Operation Coordinator（M06）”；`M06` 仅保留为历史实施里程碑、数据库/测试迁移记录的代称，不是第三方框架或业务概念。
+> 术语说明：**External Operation Coordinator（外部异步任务协调器，历史代号 M06）** 是 PixelFlow 的历史外部任务可靠性模块，旧代码目录曾为 `backend/pixelflow/operations/`，当前图片/视频生成代码目录为 `backend/pixelflow/generation_jobs/`。后文简称“External Operation Coordinator（M06）”；`M06` 仅保留为历史实施里程碑、数据库/测试迁移记录的代称，不是第三方框架或业务概念。
 
 ## 1. 结论
 
