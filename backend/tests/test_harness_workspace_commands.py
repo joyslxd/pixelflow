@@ -248,12 +248,9 @@ async def test_quota_interrupt_cancel_is_owner_isolated_and_idempotent() -> None
     transport = httpx.ASGITransport(app=app)
     response = {
         "client_response_id": "22222222-2222-4222-8222-222222222222",
-        "value": {
-            "content": "取消当前额度中断任务。",
-            "explicit_action": {"action": "cancel_workflow", "patch": {}},
-        },
+        "expected_workspace_revision": 3,
     }
-    path = "/agent/conversations/conversation-1/workspaces/workspace-1/interrupts/interrupt-1/responses"
+    path = "/agent/conversations/conversation-1/workspaces/workspace-1/interrupts/interrupt-1/quota-cancellations"
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         first = await client.post(path, json=response)
         assert first.status_code == 200, first.text
@@ -267,7 +264,8 @@ async def test_quota_interrupt_cancel_is_owner_isolated_and_idempotent() -> None
             json={
                 **response,
                 "client_response_id": "33333333-3333-4333-8333-333333333333",
-                "value": {"content": "继续", "explicit_action": {"action": "continue_workflow", "patch": {}}},
+                "expected_workspace_revision": 3,
             },
         )
-        assert unsupported.status_code == 422
+        assert unsupported.status_code == 200, unsupported.text
+        assert repository.cancel_calls == 1

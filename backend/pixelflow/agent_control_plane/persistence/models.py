@@ -83,7 +83,6 @@ class PixelFlowAgentTurnRow(Base):
     client_input_id: Mapped[str] = mapped_column(String(36), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     target_workflow_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     expected_context_version: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
@@ -472,78 +471,6 @@ class PixelFlowAgentTurnExecutionRow(Base):
     )
 
 
-class PixelFlowAgentProjectionMessageRow(Base):
-    """保存 Supervisor 产生的助手或系统消息权威投影。"""
-
-    __tablename__ = "pixelflow_agent_projection_messages"
-
-    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
-    updated_at: Mapped[datetime] = mapped_column(
-        _timestamp_type(), nullable=False, default=_now, onupdate=_now
-    )
-
-    __table_args__ = (
-        CheckConstraint(
-            "role IN ('assistant', 'system')",
-            name="ck_pf_agent_projection_messages_role",
-        ),
-        Index(
-            "ix_pf_agent_projection_messages_owner_conversation_created",
-            "user_id",
-            "conversation_id",
-            "created_at",
-        ),
-    )
-
-
-class PixelFlowAgentInterruptRow(Base):
-    """保存待人工响应的 Graph interrupt 及其幂等响应。"""
-
-    __tablename__ = "pixelflow_agent_interrupts"
-
-    interrupt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    # 仅 Supervisor 全局 clarification 允许为空；业务中断仍由 DTO 强制绑定 Workflow。
-    workflow_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    turn_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    checkpoint_ns: Mapped[str] = mapped_column(String(128), nullable=False)
-    kind: Mapped[str] = mapped_column(String(64), nullable=False)
-    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
-    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
-    response_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    opened_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
-    closed_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('open', 'responded', 'closed')",
-            name="ck_pf_agent_interrupts_status",
-        ),
-        CheckConstraint(
-            "(response_id IS NULL AND response_json IS NULL) "
-            "OR (response_id IS NOT NULL AND response_json IS NOT NULL)",
-            name="ck_pf_agent_interrupts_response_fields",
-        ),
-        Index(
-            "ix_pf_agent_interrupts_owner_conversation_status",
-            "user_id",
-            "conversation_id",
-            "status",
-        ),
-    )
-
-
 class PixelFlowAgentConversationStateRow(Base):
     """保存会话当前活动 Workflow 的权威投影。"""
 
@@ -793,8 +720,6 @@ AGENT_RUNTIME_SUPPORT_TABLES = (
     PixelFlowAgentContextPayloadRow.__table__,
     PixelFlowAgentVideoStateRow.__table__,
     PixelFlowAgentTurnExecutionRow.__table__,
-    PixelFlowAgentProjectionMessageRow.__table__,
-    PixelFlowAgentInterruptRow.__table__,
     PixelFlowAgentConversationStateRow.__table__,
     PixelFlowVideoAgentWorkspaceRow.__table__,
     PixelFlowVideoAgentPlanRow.__table__,

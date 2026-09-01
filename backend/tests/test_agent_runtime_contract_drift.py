@@ -6,10 +6,7 @@ import json
 from pathlib import Path
 
 from app.gateway.routers.pixelflow_conversations import HarnessTurnStartRequest
-from pixelflow.agent_control_plane.contracts import (
-    InterruptResponseRequest,
-    WorkspaceCommandRequest,
-)
+from pixelflow.agent_control_plane.contracts import WorkspaceCommandRequest
 from pixelflow.agent_control_plane.public_contracts import (
     AgentSnapshotV1,
     HarnessTurnStartRequestV1,
@@ -49,14 +46,12 @@ def test_harness_contract_fixture_matches_python_public_dtos() -> None:
     assert set(fixture) == {
         "schema_version",
         "turn_start",
-        "interrupt_response",
         "workspace_command",
         "event",
         "snapshot",
     }
     assert fixture["schema_version"] == 1
     HarnessTurnStartRequest.model_validate(fixture["turn_start"])
-    InterruptResponseRequest.model_validate(fixture["interrupt_response"])
     WorkspaceCommandRequest.model_validate(fixture["workspace_command"])
     PublicAgentEventV1.model_validate(fixture["event"])
     AgentSnapshotV1.model_validate(fixture["snapshot"])
@@ -71,7 +66,6 @@ def test_harness_contract_fields_do_not_drift_between_python_and_typescript() ->
         "TurnStartV1",
         set(HarnessTurnStartRequestV1.model_fields),
     )
-    _require_fields(source, "InterruptResponseV1", {"client_response_id", "value"})
     _require_fields(
         source,
         "WorkspaceCommandV1",
@@ -79,4 +73,3 @@ def test_harness_contract_fields_do_not_drift_between_python_and_typescript() ->
     )
     _require_fields(source, "PublicAgentEventV1", set(PublicAgentEventV1.model_fields))
     _require_fields(source, "AgentSnapshotV1", set(AgentSnapshotV1.model_fields))
-    assert {"client_response_id", "value"}.issubset(InterruptResponseRequest.model_fields)

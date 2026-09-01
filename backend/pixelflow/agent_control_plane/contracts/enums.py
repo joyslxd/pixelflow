@@ -10,30 +10,6 @@ class OrchestrationMode(StrEnum):
     VIDEO_AGENT_V2 = "video_agent_v2"
 
 
-class AgentAction(StrEnum):
-    """Supervisor 可以返回的完整动作白名单。"""
-
-    ANSWER_ONLY = "answer_only"
-    CONTINUE_WORKFLOW = "continue_workflow"
-    MODIFY_WORKFLOW = "modify_workflow"
-    REGENERATE_STAGE = "regenerate_stage"
-    RETRY_FAILED = "retry_failed"
-    START_WORKFLOW = "start_workflow"
-    SWITCH_WORKFLOW = "switch_workflow"
-    CANCEL_WORKFLOW = "cancel_workflow"
-    CLARIFY = "clarify"
-
-
-class AgentIntent(StrEnum):
-    """Supervisor 可识别的业务 intent。"""
-
-    IMAGE = "image"
-    VIDEO = "video"
-    PPT = "ppt"
-    VIDEO_ANALYSIS = "video_analysis"
-    GENERAL = "general"
-
-
 class WorkflowKind(StrEnum):
     """可以持久化为独立 Workflow 的业务类型。"""
 
@@ -113,5 +89,4 @@ class AgentEventType(StrEnum):
     AGENT_RESPONSE_DELTA = "agent.response.delta"
     AGENT_RESPONSE_COMPLETED = "agent.response.completed"
     AGENT_CONFIRMATION_REQUESTED = "agent.confirmation.requested"
-    AGENT_ROUTE_DECIDED = "agent.route.decided"
     ERROR_RAISED = "error.raised"

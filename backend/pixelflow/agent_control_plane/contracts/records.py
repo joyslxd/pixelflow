@@ -7,7 +7,6 @@ from uuid import UUID
 from pydantic import Field, JsonValue, model_validator
 
 from .base import ContractModel
-from .decision import ActionDecision
 from .enums import ExternalJobStatus, TurnStatus, WorkflowKind, WorkflowStatus
 
 
@@ -59,6 +58,5 @@ class TurnRecord(ContractModel):
     client_input_id: UUID
     status: TurnStatus
     target_workflow_id: str | None = Field(default=None, min_length=1)
-    decision: ActionDecision | None = None
     expected_context_version: int = Field(ge=0)
     created_at: datetime

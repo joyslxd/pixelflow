@@ -112,6 +112,19 @@ async def ensure_schema(engine: AsyncEngine) -> None:
         await _migrate_long_term_memory_write_schema(connection)
         await _migrate_operation_batch_workspace_schema(connection)
         await _migrate_operation_batch_dispatch_schema(connection)
+        await _drop_f4_legacy_control_plane_tables(connection)
+
+
+async def _drop_f4_legacy_control_plane_tables(connection) -> None:
+    """F4 删除已下线 Graph 表；新 Harness 不读取这些历史投影。"""
+
+    from sqlalchemy import text
+
+    for table_name in (
+        "pixelflow_agent_interrupts",
+        "pixelflow_agent_projection_messages",
+    ):
+        await connection.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
 
 async def _migrate_video_plan_revision_schema(connection) -> None:

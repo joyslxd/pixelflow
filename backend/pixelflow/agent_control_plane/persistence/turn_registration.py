@@ -27,8 +27,6 @@ from pixelflow.tasks.model import (
 from ..contracts import (
     AgentEventType,
     OrchestrationMode,
-    RouteDecision,
-    RouteIntent,
     TurnRecord,
     TurnStatus,
 )
@@ -76,39 +74,7 @@ class TurnRegistrationResult:
     message: PixelFlowConversationMessageRecord
     context_version: int
     orchestration_mode: OrchestrationMode
-    route_decision: RouteDecision | None
     created: bool
-
-
-@dataclass(frozen=True, slots=True)
-class TurnRouteAssignment:
-    """首个 Turn 原子冻结的服务端路由决定与执行归属。"""
-
-    decision: RouteDecision
-    orchestration_mode: OrchestrationMode
-    primary_execution_ready: bool
-
-
-def _stored_route_decision(context: dict | None) -> RouteDecision | None:
-    runtime = (context or {}).get(AGENT_RUNTIME_CONTEXT_KEY)
-    value = runtime.get("route_decision") if isinstance(runtime, dict) else None
-    return RouteDecision.model_validate(value) if isinstance(value, dict) else None
-
-
-def _should_persist_route_assignment(
-    existing_route: RouteDecision | None,
-    route_assignment: TurnRouteAssignment | None,
-) -> bool:
-    """首次路由，或从 unknown/待澄清升级时，落库并允许切换编排模式。"""
-
-    if route_assignment is None:
-        return False
-    if existing_route is None:
-        return True
-    return (
-        existing_route.intent is RouteIntent.UNKNOWN
-        or existing_route.requires_clarification
-    )
 
 
 def _runtime_context_version(context: dict | None) -> int:
@@ -185,7 +151,6 @@ class MemoryTurnRegistrationStore:
         turn: TurnRecord,
         expected_context_version: int,
         occurred_at: datetime,
-        route_assignment: TurnRouteAssignment | None = None,
     ) -> TurnRegistrationResult:
         """共享锁内先判幂等/CAS，再提交不会调用外部系统的内存写入。"""
 
@@ -227,9 +192,6 @@ class MemoryTurnRegistrationStore:
                     orchestration_mode=OrchestrationMode(
                         conversation.orchestration_mode,
                     ),
-                    route_decision=_stored_route_decision(
-                        conversation.context,
-                    ),
                     created=False,
                 )
 
@@ -249,34 +211,13 @@ class MemoryTurnRegistrationStore:
                 now=occurred_at,
             )
             next_version = current_version + 1
-            existing_route = _stored_route_decision(conversation.context)
-            route_was_created = _should_persist_route_assignment(
-                existing_route,
-                route_assignment,
-            )
             runtime_patch: dict[str, object] = {"context_version": next_version}
-            if route_was_created:
-                runtime_patch.update(
-                    {
-                        "route_decision": route_assignment.decision.model_dump(
-                            mode="json",
-                        ),
-                        "routing_status": "decided",
-                        "primary_execution_ready": (
-                            route_assignment.primary_execution_ready
-                        ),
-                    }
-                )
             updated = (
                 await self._task_store.update_conversation(
                     conversation_id,
                     user_id=user_id,
                     expected_revision=conversation.revision,
-                    orchestration_mode=(
-                        route_assignment.orchestration_mode.value
-                        if route_was_created
-                        else conversation.orchestration_mode
-                    ),
+                    orchestration_mode=conversation.orchestration_mode,
                     orchestration_version=1,
                     _agent_runtime_patch=runtime_patch,
                 )
@@ -311,12 +252,6 @@ class MemoryTurnRegistrationStore:
                 turn=stored_turn,
                 queue_position=queue_position,
                 occurred_at=occurred_at,
-                route_decision=(
-                    route_assignment.decision if route_was_created else None
-                ),
-                orchestration_mode=OrchestrationMode(
-                    updated.orchestration_mode,
-                ),
             )
             return TurnRegistrationResult(
                 turn=stored_turn,
@@ -325,7 +260,6 @@ class MemoryTurnRegistrationStore:
                 orchestration_mode=OrchestrationMode(
                     updated.orchestration_mode,
                 ),
-                route_decision=_stored_route_decision(updated.context),
                 created=True,
             )
 
@@ -338,8 +272,6 @@ class MemoryTurnRegistrationStore:
         turn: TurnRecord,
         queue_position: int | None,
         occurred_at: datetime,
-        route_decision: RouteDecision | None,
-        orchestration_mode: OrchestrationMode,
     ) -> None:
         """复用 Memory Repository 的连续 sequence 校验追加首批事件。"""
 
@@ -351,16 +283,6 @@ class MemoryTurnRegistrationStore:
         )
         next_sequence = 1 if not events else events[-1].sequence + 1
         payloads: list[tuple[AgentEventType, dict]] = []
-        if route_decision is not None:
-            payloads.append(
-                (
-                    AgentEventType.AGENT_ROUTE_DECIDED,
-                    {
-                        "decision": route_decision.model_dump(mode="json"),
-                        "orchestration_mode": orchestration_mode.value,
-                    },
-                )
-            )
         payloads.extend((
             (
                 AgentEventType.INPUT_STATE_CHANGED,
@@ -416,7 +338,6 @@ class SQLTurnRegistrationStore:
         turn: TurnRecord,
         expected_context_version: int,
         occurred_at: datetime,
-        route_assignment: TurnRouteAssignment | None = None,
     ) -> TurnRegistrationResult:
         """锁定 conversation 与压缩协调行，失败时整批回滚。"""
 
@@ -429,7 +350,6 @@ class SQLTurnRegistrationStore:
                     turn=turn,
                     expected_context_version=expected_context_version,
                     occurred_at=occurred_at,
-                    route_assignment=route_assignment,
                 )
             except IntegrityError:
                 if attempt + 1 == _MAX_REGISTRATION_ATTEMPTS:
@@ -445,7 +365,6 @@ class SQLTurnRegistrationStore:
         turn: TurnRecord,
         expected_context_version: int,
         occurred_at: datetime,
-        route_assignment: TurnRouteAssignment | None,
     ) -> TurnRegistrationResult:
         async with self._session_factory() as session:
             async with _repository_write_transaction(
@@ -501,9 +420,6 @@ class SQLTurnRegistrationStore:
                         ),
                         orchestration_mode=OrchestrationMode(
                             conversation.orchestration_mode or "frontend_v2",
-                        ),
-                        route_decision=_stored_route_decision(
-                            conversation.context_json,
                         ),
                         created=False,
                     )
@@ -597,11 +513,6 @@ class SQLTurnRegistrationStore:
                     client_input_id=str(turn.client_input_id),
                     status=stored_status.value,
                     target_workflow_id=turn.target_workflow_id,
-                    decision_json=(
-                        None
-                        if turn.decision is None
-                        else turn.decision.model_dump(mode="json")
-                    ),
                     expected_context_version=expected_context_version,
                     created_at=occurred_at,
                     updated_at=occurred_at,
@@ -616,27 +527,6 @@ class SQLTurnRegistrationStore:
                 )
                 next_version = current_version + 1
                 runtime["context_version"] = next_version
-                existing_route = _stored_route_decision(runtime_context)
-                route_was_created = _should_persist_route_assignment(
-                    existing_route,
-                    route_assignment,
-                )
-                if route_was_created:
-                    runtime.update(
-                        {
-                            "route_decision": route_assignment.decision.model_dump(
-                                mode="json",
-                            ),
-                            "routing_status": "decided",
-                            "primary_execution_ready": (
-                                route_assignment.primary_execution_ready
-                            ),
-                        }
-                    )
-                    conversation.orchestration_mode = (
-                        route_assignment.orchestration_mode.value
-                    )
-                    conversation.orchestration_version = 1
                 runtime_context[AGENT_RUNTIME_CONTEXT_KEY] = runtime
                 conversation.context_json = runtime_context
                 conversation.revision += 1
@@ -668,12 +558,6 @@ class SQLTurnRegistrationStore:
                     queue_position=queue_position,
                     occurred_at=occurred_at,
                     current_sequence=int(current_sequence),
-                    route_decision=(
-                        route_assignment.decision if route_was_created else None
-                    ),
-                    orchestration_mode=OrchestrationMode(
-                        conversation.orchestration_mode or "frontend_v2",
-                    ),
                 )
                 await session.flush()
                 return TurnRegistrationResult(
@@ -683,7 +567,6 @@ class SQLTurnRegistrationStore:
                     orchestration_mode=OrchestrationMode(
                         conversation.orchestration_mode or "frontend_v2",
                     ),
-                    route_decision=_stored_route_decision(runtime_context),
                     created=True,
                 )
 
@@ -698,20 +581,8 @@ class SQLTurnRegistrationStore:
         queue_position: int | None,
         occurred_at: datetime,
         current_sequence: int,
-        route_decision: RouteDecision | None,
-        orchestration_mode: OrchestrationMode,
     ) -> None:
         payloads: list[tuple[AgentEventType, dict]] = []
-        if route_decision is not None:
-            payloads.append(
-                (
-                    AgentEventType.AGENT_ROUTE_DECIDED,
-                    {
-                        "decision": route_decision.model_dump(mode="json"),
-                        "orchestration_mode": orchestration_mode.value,
-                    },
-                )
-            )
         payloads.extend((
             (
                 AgentEventType.INPUT_STATE_CHANGED,
@@ -783,7 +654,6 @@ __all__ = [
     "SQLTurnRegistrationStore",
     "TurnRegistrationContextConflictError",
     "TurnRegistrationResult",
-    "TurnRouteAssignment",
     "TurnRegistrationUnavailableError",
     "make_turn_registration_store",
     "turn_registration_context_read_scope",

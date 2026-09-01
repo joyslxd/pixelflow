@@ -101,9 +101,22 @@ async def test_revise_storyboard_updates_multiple_segments_and_marks_assets_stal
                     },
                 ],
                 "prompt_packages": [
-                    {"segment_id": "A", "sequence": 1, "duration_sec": 20, "prompt": "旧开场"},
-                    {"segment_id": "B", "sequence": 2, "duration_sec": 20, "prompt": "旧结尾"},
+                    {
+                        "segment_id": "A",
+                        "sequence": 1,
+                        "duration_sec": 20,
+                        "prompt": "旧开场",
+                        "reference_asset_ids": ["asset-product"],
+                    },
+                    {
+                        "segment_id": "B",
+                        "sequence": 2,
+                        "duration_sec": 20,
+                        "prompt": "旧结尾",
+                        "reference_asset_ids": ["asset-product"],
+                    },
                 ],
+                "asset_registry": [{"asset_id": "asset-product"}],
             }
         ),
         {

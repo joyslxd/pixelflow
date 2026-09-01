@@ -1,13 +1,56 @@
 """新会话 Runtime API 与 Port 入口使用的请求合同。"""
 
-from typing import Literal
+from math import isfinite
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field, JsonValue, field_validator
 
 from .base import ContractModel
 from .enums import OrchestrationMode
-from .live import ExplicitActionSignal, validate_strict_json_array, validate_strict_json_object
+
+
+def _validate_strict_json(value: object, ancestors: set[int]) -> None:
+    if value is None or type(value) in {str, bool, int}:
+        return
+    if type(value) is float:
+        if not isfinite(value):
+            raise ValueError("JSON 数字必须是有限值")
+        return
+    if type(value) not in {list, dict}:
+        raise ValueError("只允许 JSON 原生值")
+    identity = id(value)
+    if identity in ancestors:
+        raise ValueError("JSON 值不能包含循环引用")
+    ancestors.add(identity)
+    try:
+        for item in value if type(value) is list else value.values():
+            _validate_strict_json(item, ancestors)
+    finally:
+        ancestors.remove(identity)
+
+
+def validate_strict_json_object(value: Any) -> Any:
+    if type(value) is not dict:
+        raise ValueError("必须是普通 JSON 对象")
+    _validate_strict_json(value, set())
+    return value
+
+
+def validate_strict_json_array(value: Any) -> Any:
+    if type(value) is not list:
+        raise ValueError("必须是 JSON 数组")
+    _validate_strict_json(value, set())
+    return value
+
+
+class ExplicitActionSignal(ContractModel):
+    """浏览器显式工作区命令摘要；不参与 Agent 工具顺序决策。"""
+
+    action: str = Field(min_length=1, max_length=64)
+    patch: dict[str, JsonValue] = Field(default_factory=dict)
+
+    _validate_patch = field_validator("patch", mode="before")(validate_strict_json_object)
 
 
 class ConversationOrchestration(ContractModel):

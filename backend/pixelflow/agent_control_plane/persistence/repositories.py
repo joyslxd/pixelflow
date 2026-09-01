@@ -2253,7 +2253,6 @@ def _turn_from_row(row: PixelFlowAgentTurnRow) -> TurnRecord:
             "client_input_id": row.client_input_id,
             "status": row.status,
             "target_workflow_id": row.target_workflow_id,
-            "decision": row.decision_json,
             "expected_context_version": row.expected_context_version,
             "created_at": _database_utc(row.created_at),
         }
@@ -2574,7 +2573,6 @@ class SQLAgentRuntimeRepository:
                             client_input_id=str(normalized.client_input_id),
                             status=stored_status.value,
                             target_workflow_id=normalized.target_workflow_id,
-                            decision_json=(None if normalized.decision is None else normalized.decision.model_dump(mode="json")),
                             expected_context_version=(normalized.expected_context_version),
                             created_at=normalized.created_at,
                             updated_at=normalized.created_at,
@@ -2638,7 +2636,6 @@ class SQLAgentRuntimeRepository:
                             client_input_id=str(normalized.client_input_id),
                             status=stored_status.value,
                             target_workflow_id=normalized.target_workflow_id,
-                            decision_json=(None if normalized.decision is None else normalized.decision.model_dump(mode="json")),
                             expected_context_version=(normalized.expected_context_version),
                             created_at=normalized.created_at,
                             updated_at=normalized.created_at,
