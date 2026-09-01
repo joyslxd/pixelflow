@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -187,9 +187,11 @@ class MemoryOperationBatchRepository:
             if existing is None:
                 raise LookupError("批次子 Operation 不存在")
             if existing.status in _TERMINAL:
-                if existing.status != status or existing.job_id != job_id:
-                    raise AgentRuntimeRecordConflictError("子 Operation 终态漂移")
-                return record
+                placeholder = existing.status == "failed" and existing.job_id == child_key
+                if not placeholder:
+                    if existing.status != status or existing.job_id != job_id:
+                        raise AgentRuntimeRecordConflictError("子 Operation 终态漂移")
+                    return record
             children = tuple(OperationBatchChildRecord(child.operation_idempotency_key, child.scene_id, child.variant_index, status, job_id) if child.operation_idempotency_key == child_key else child for child in record.children)
             completed = all(child.status in _TERMINAL for child in children)
             return self._replace(record, children=children, status="completed" if completed else "running", completion_event_id=build_operation_batch_completion_event_id(record.batch_id) if completed else None)
@@ -399,7 +401,8 @@ class SQLOperationBatchRepository:
                 child = await session.get(PixelFlowOperationBatchChildRow, {"batch_id": batch_id, "operation_idempotency_key": child_key}, with_for_update=True)
                 if batch is None or child is None:
                     raise LookupError("OperationBatch 或子项不存在")
-                if child.status in _TERMINAL and (child.status != status or child.job_id != job_id):
+                placeholder = child.status == "failed" and child.job_id == child_key
+                if child.status in _TERMINAL and not placeholder and (child.status != status or child.job_id != job_id):
                     raise AgentRuntimeRecordConflictError("子 Operation 终态漂移")
                 child.status, child.job_id = status, job_id
                 child.started_at = None
@@ -486,7 +489,10 @@ class SQLOperationBatchRepository:
                     == PixelFlowOperationBatchRow.batch_id,
                 )
                 .where(
-                    PixelFlowOperationBatchChildRow.job_id == job_id,
+                    or_(
+                        PixelFlowOperationBatchChildRow.job_id == job_id,
+                        PixelFlowOperationBatchChildRow.operation_idempotency_key == job_id,
+                    ),
                     PixelFlowOperationBatchRow.user_id == user_id,
                     PixelFlowOperationBatchRow.conversation_id == conversation_id,
                 )

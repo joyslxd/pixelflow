@@ -116,7 +116,7 @@ class OperationBatchTerminalCallback:
             (
                 item
                 for item in batch.children
-                if item.job_id == job_id
+                if item.job_id == job_id or item.operation_idempotency_key == job_id
             ),
             None,
         )
