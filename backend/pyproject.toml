@@ -22,6 +22,8 @@ dependencies = [
     "asyncmy>=0.2.10",
     # 用途：为 PixelFlow 自有 SQLite Repository、Tool Ledger 和记忆 WriteOutbox 提供异步驱动；移除会使本地/CI SQLite 验证和默认 SQLite 运行时启动失败。
     "aiosqlite>=0.22.1",
+    # 用途：提供 Gateway Repository 的异步 SQLAlchemy Engine 与 greenlet 协程桥接；移除会使 SQLite/PostgreSQL Gateway 启动和异步事务失败。
+    "sqlalchemy[asyncio]>=2.0.0",
     "mem0ai>=2.0.19",
 ]
 
