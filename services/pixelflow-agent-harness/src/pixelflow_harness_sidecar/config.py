@@ -104,7 +104,16 @@ class SidecarSettings:
     def run_limits_digest(self) -> str:
         """返回完整限制发布配置的公开摘要，供 Gateway 预检比较。"""
 
-        encoded = json.dumps(self._limit_profiles(), sort_keys=True, separators=(",", ":")).encode()
+        payload = {
+            name: {
+                "deadline_seconds": profile["deadline_seconds"],
+                "max_model_steps": profile["max_model_steps"],
+                "max_business_tools": profile["max_business_tools"],
+                "max_billable_batch_starts": profile["max_billable_batch_starts"],
+            }
+            for name, profile in self._limit_profiles().items()
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     def validate_run_limits(self, limits: object) -> None:

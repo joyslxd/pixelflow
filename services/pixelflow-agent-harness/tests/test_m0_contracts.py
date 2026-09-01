@@ -15,6 +15,15 @@ from pixelflow_harness_sidecar.fake_tools import InspectVideoWorkspaceInput, ins
 from pixelflow_harness_sidecar.skill_snapshot import snapshot_skill_root
 
 
+def _set_release_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """为只验证本地合同的 Case 注入完整非敏感发布档案。"""
+
+    monkeypatch.setenv("PIXELFLOW_HARNESS_PROFILE_NAME", "test-profile")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_MODEL_ID", "test-model")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_CAPABILITY_VERSION", "test-capability-v1")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_BUDGET_VERSION", "test-budget-v1")
+
+
 def _request(*, request_digest: str = "sha256:request") -> HarnessRunRequest:
     """构造不含敏感数据的最小合法 Run 请求。"""
 
@@ -140,6 +149,7 @@ def test_sidecar_compose_gateway_endpoint_is_limited_to_fixed_service_name(monke
 
     from pixelflow_harness_sidecar.config import SidecarSettings
 
+    _set_release_profile(monkeypatch)
     monkeypatch.setenv("PIXELFLOW_TOOL_BROKER_BASE_URL", "http://gateway:8001")
     settings = SidecarSettings.from_env()
     assert settings._tool_broker_url_is_safe
@@ -153,6 +163,7 @@ def test_sidecar_rejects_limit_profile_or_digest_drift(monkeypatch) -> None:
     from pixelflow_harness_sidecar.config import SidecarSettings
     from pixelflow_harness_sidecar.contracts import RunLimits
 
+    _set_release_profile(monkeypatch)
     profiles = {
         "video_interactive_v1": {
             "deadline_seconds": 180,
@@ -167,6 +178,10 @@ def test_sidecar_rejects_limit_profile_or_digest_drift(monkeypatch) -> None:
         json.dumps(expected, sort_keys=True, separators=(",", ":")).encode(),
     ).hexdigest()
     settings = SidecarSettings.from_env()
+    release_digest = "sha256:" + hashlib.sha256(
+        json.dumps(profiles, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    assert settings.run_limits_digest == release_digest
     settings.validate_run_limits(RunLimits(digest=digest, **expected))
     with pytest.raises(ValueError, match="限制"):
         settings.validate_run_limits(RunLimits(digest=digest, **{**expected, "max_business_tools": 5}))
