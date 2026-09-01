@@ -217,7 +217,9 @@ class MemoryOperationBatchRepository:
             )
             if existing is None:
                 raise LookupError("批次子 Operation 不存在")
-            if existing.status in _TERMINAL:
+            if existing.status in _TERMINAL and not (
+                existing.status == "failed" and existing.job_id == child_key
+            ):
                 raise AgentRuntimeRecordConflictError("终态子 Operation 不能重新轮询")
             if existing.job_id is not None and existing.job_id != job_id:
                 raise AgentRuntimeRecordConflictError("子 Operation 绑定了不同 Job")
@@ -445,7 +447,9 @@ class SQLOperationBatchRepository:
                 )
                 if batch is None or child is None:
                     raise LookupError("OperationBatch 或子项不存在")
-                if child.status in _TERMINAL:
+                if child.status in _TERMINAL and not (
+                    child.status == "failed" and child.job_id == child_key
+                ):
                     raise AgentRuntimeRecordConflictError("终态子 Operation 不能重新轮询")
                 if child.job_id is not None and child.job_id != job_id:
                     raise AgentRuntimeRecordConflictError("子 Operation 绑定了不同 Job")

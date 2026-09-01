@@ -12,7 +12,10 @@ from typing import Any
 from pydantic import JsonValue
 
 from pixelflow.agent_control_plane.contracts import ExternalJobStatus
-from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRepository
+from pixelflow.agent_control_plane.persistence.repositories import (
+    AgentRuntimeRecordConflictError,
+    AgentRuntimeRepository,
+)
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
 from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
 from pixelflow.operations.jobs import (
@@ -72,7 +75,7 @@ class M06ImageGenerationOperationPort:
             )
         except OperationStartQuotaPausedError as exc:
             return ImageGenerationJob(job_id=exc.operation.job_id, asset_id=asset_id, status="paused_quota")
-        except (OperationConflictError, ValueError) as exc:
+        except (AgentRuntimeRecordConflictError, OperationConflictError, ValueError) as exc:
             # Provider 已返回任务但绑定步骤发生并发冲突时，优先按同一幂等键回读，
             # 避免把已提交的图片错误标记为 failed 并丢失后续轮询。
             existing = await self._repository.get_operation_by_idempotency_key(
