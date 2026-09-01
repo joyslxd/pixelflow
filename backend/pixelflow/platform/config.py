@@ -15,6 +15,8 @@ class HarnessSidecarSettings:
     jwt_signing_key: str
     instance_id: str
     request_timeout_seconds: float
+    model_profile: object
+    tool_manifest_digest: str
 
     @classmethod
     def from_env(cls) -> HarnessSidecarSettings | None:
@@ -25,6 +27,12 @@ class HarnessSidecarSettings:
         instance_id = os.environ.get("PIXELFLOW_GATEWAY_INSTANCE_ID", "").strip()
         if not base_url or not signing_key or not instance_id:
             return None
+        from pixelflow.agent_harness.model_profile import HarnessModelProfile
+
+        model_profile = HarnessModelProfile.from_env()
+        tool_manifest_digest = os.environ.get("PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST", "").strip()
+        if not tool_manifest_digest.startswith("sha256:") or len(tool_manifest_digest) != 71:
+            raise ValueError("Harness Tool Manifest 发布摘要无效")
         # Docker Compose 内的固定服务名只在受控私有网络解析；其余明文 HTTP 仍拒绝。
         normalized_base_url = base_url.rstrip("/")
         is_loopback = normalized_base_url.startswith("http://127.0.0.1:")
@@ -45,6 +53,8 @@ class HarnessSidecarSettings:
             jwt_signing_key=signing_key,
             instance_id=instance_id,
             request_timeout_seconds=timeout,
+            model_profile=model_profile,
+            tool_manifest_digest=tool_manifest_digest,
         )
 
 

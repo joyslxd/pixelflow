@@ -2,7 +2,8 @@
 
 Sidecar 可独立部署在 Linux 云服务器；本地 Gateway 通过私网 HTTPS 调用它。不要把它暴露到公网，也不要把任何 Secret 写进仓库。
 
-1. 在服务器准备活动 Skill 根，例如 `pixelflow/backend/skills`，并设置为 `PIXELFLOW_AGENT_HOME`。
+1. 在服务器准备 DSH Home 的 Skill 父目录，例如 `pixelflow/backend/skills`，并设置为 `PIXELFLOW_SKILL_ROOT_HOST`；容器只从 `/var/lib/pixelflow-agent/skills` 读取 `SKILL.md`。
+2. 从 `.env.harness-release.example` 创建受版本控制的非敏感 `.env.harness-release`；Gateway 与 Sidecar 必须引用同一文件，禁止手工填写模型 digest。
 2. 在 `deploy/.env.sidecar` 通过 Secret Manager 写入配置说明中列出的 JWT、模型和 Tool Broker Secret。
    其中 `PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES` 必须与 Gateway profile 的 `harness.run_limit_profiles` 完全一致；它不是 Secret，但不得由模型或 Skill 覆盖。
 3. 使用 `./build-and-start-linux.sh` 构建并启动 Gateway 与 Sidecar；网络较慢时可用 `PIXELFLOW_APT_MIRROR=mirrors.aliyun.com PIXELFLOW_UV_HTTP_TIMEOUT=300 ./build-and-start-linux.sh` 调整 Debian 镜像源和 Gateway wheel 下载等待时间。

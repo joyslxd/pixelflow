@@ -17,6 +17,7 @@ from pixelflow.agent_tools.manifest import manifest
 from pixelflow.agent_tools.repository import RunBinding, SQLAgentToolRepository
 
 from .contracts import HarnessRunEvent, HarnessRunHandle, HarnessRunRequest, HarnessRunResult
+from .model_profile import HarnessModelProfile
 
 
 class _StrictModel(BaseModel):
@@ -27,6 +28,10 @@ class _StrictModel(BaseModel):
 
 class GatewayHarnessSidecarError(RuntimeError):
     """表示 Sidecar 请求/绑定失败，不带下游响应正文。"""
+
+
+class GatewayHarnessRunConfigurationError(RuntimeError):
+    """表示 Sidecar 已在线但拒绝当前发布配置；不得关闭全局准入。"""
 
 
 class PublicAgentEvent(_StrictModel):
@@ -117,6 +122,8 @@ class AgentHarnessSidecarClient:
             )
         except httpx.HTTPError as error:
             raise GatewayHarnessSidecarError("Sidecar Run 创建请求失败") from error
+        if response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
+            raise GatewayHarnessRunConfigurationError("Sidecar 拒绝当前 Run 发布配置")
         if response.status_code != httpx.codes.ACCEPTED:
             raise GatewayHarnessSidecarError("Sidecar 拒绝 Run 创建请求")
         try:
@@ -153,6 +160,38 @@ class AgentHarnessSidecarClient:
         if activation.status_code != httpx.codes.OK:
             raise GatewayHarnessSidecarError("Sidecar 拒绝激活已绑定 Run")
         return HarnessRunHandle(run_id=run_id, status=status)
+
+    async def verify_release(
+        self,
+        *,
+        model_profile: HarnessModelProfile,
+        tool_manifest_digest: str,
+        run_limits_digest: str,
+    ) -> None:
+        """验证同一发布的模型、Manifest、限制和 Skill 快照均已在 Sidecar 就绪。"""
+
+        try:
+            response = await self._client.get(
+                f"{self._base_url}/internal/v1/release-readiness",
+                headers={"Authorization": f"Bearer {self._service_jwt()}"},
+            )
+        except httpx.HTTPError as error:
+            raise GatewayHarnessSidecarError("Sidecar 发布预检请求失败") from error
+        if response.status_code != httpx.codes.OK:
+            raise GatewayHarnessSidecarError("Sidecar 发布预检未通过")
+        try:
+            payload = response.json()
+            accepted = (
+                payload.get("profile_name") == model_profile.logical_name
+                and payload.get("profile_digest") == model_profile.digest
+                and payload.get("tool_manifest_digest") == tool_manifest_digest
+                and payload.get("run_limits_digest") == run_limits_digest
+                and isinstance(payload.get("skill_catalog_digest"), str)
+            )
+        except (AttributeError, ValueError, TypeError) as error:
+            raise GatewayHarnessSidecarError("Sidecar 发布预检协议无效") from error
+        if not accepted:
+            raise GatewayHarnessSidecarError("Gateway 与 Sidecar 发布身份不一致")
 
     async def stream_public_events(
         self,
@@ -387,6 +426,7 @@ class AgentHarnessSidecarClient:
 
 __all__ = [
     "AgentHarnessSidecarClient",
+    "GatewayHarnessRunConfigurationError",
     "GatewayHarnessSidecarError",
     "PublicAgentEvent",
 ]

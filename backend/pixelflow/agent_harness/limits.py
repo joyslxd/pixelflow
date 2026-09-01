@@ -53,6 +53,22 @@ class LimitProfileResolver:
         except KeyError as error:
             raise ValueError("Run 类型没有限制档案") from error
 
+    @property
+    def release_digest(self) -> str:
+        """返回全部限制档案的公开发布摘要，供 Sidecar 预检比较。"""
+
+        payload = {
+            name: {
+                "deadline_seconds": profile.deadline_seconds,
+                "max_model_steps": profile.max_model_steps,
+                "max_business_tools": profile.max_business_tools,
+                "max_billable_batch_starts": profile.max_billable_batch_starts,
+            }
+            for name, profile in self._profiles.items()
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
     @staticmethod
     def _profiles_from_environment() -> Mapping[str, Mapping[str, Any]]:
         raw = os.environ.get(_ENV_KEY, "").strip()

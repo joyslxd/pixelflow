@@ -25,7 +25,9 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.routers import internal_agent_tools
 from pixelflow.agent_control_plane.persistence.models import PixelFlowAgentHarnessToolCallRow
 from pixelflow.agent_harness import AgentHarnessSidecarClient, HarnessRunRequest
+from pixelflow.agent_harness.model_profile import HarnessModelProfile
 from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
+from pixelflow.agent_tools.manifest import manifest
 from pixelflow.platform.persistence import Base
 from pixelflow.video.contracts import VideoWorkspace
 from pixelflow.video.workspace import SQLVideoAgentRepository
@@ -70,7 +72,7 @@ def test_real_gateway_binding_sidecar_plugin_and_tool_broker(tmp_path: Path, mon
     if os.environ.get("PIXELFLOW_RUN_REAL_M0") != "1":
         pytest.skip("未显式开启会消耗测试 token 的真实 M0 用例")
     if not os.environ.get("DEEPSEEK_API_KEY") or not os.environ.get("DEEPSEEK_BASE_URL"):
-        pytest.skip("缺少真实 Ark 模型测试凭据或端点")
+        pytest.skip("缺少真实 DeepSeek 模型测试凭据或端点")
 
     async def prepare_gateway() -> tuple[object, async_sessionmaker, SQLAgentToolRepository, SQLVideoAgentRepository, HarnessRunRequest]:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'm0-gateway.db'}")
@@ -104,7 +106,12 @@ def test_real_gateway_binding_sidecar_plugin_and_tool_broker(tmp_path: Path, mon
             user_input="请读取当前视频工作区，告诉我脚本、素材和分镜数量。",
             system_instruction="你是 PixelFlow 视频 Agent。涉及当前工作区事实时不得猜测，必须遵循相关 Skill 的指令并使用受控 Tool 获取证据。",
             context_digest=_sha256("m0-e2e-context"),
-            model_profile_digest=_sha256("m0-e2e-model-profile"),
+            model_profile_digest=HarnessModelProfile(
+                "deepseek-v4-pro",
+                "deepseek-v4-flash-vision-exp",
+                "m0-real-v1",
+                "m0-real-budget-v1",
+            ).digest,
             context_budget_digest=_sha256("m0-e2e-budget"),
             run_limits_digest=_sha256("m0-e2e-limits"),
             max_output_tokens=192,
@@ -155,8 +162,11 @@ def test_real_gateway_binding_sidecar_plugin_and_tool_broker(tmp_path: Path, mon
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-e2e",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": manifest().digest,
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": str(sidecar_root / "src"),
         },

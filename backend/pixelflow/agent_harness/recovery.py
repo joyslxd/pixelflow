@@ -11,6 +11,7 @@ from pixelflow.tasks import PixelFlowTaskStore
 
 from .contracts import HarnessRunRequest
 from .limits import LimitProfileResolver
+from .model_profile import HarnessModelProfile
 from .port import AgentHarnessPort
 
 
@@ -32,10 +33,12 @@ class HarnessRecoveryService:
         binding_repository: SQLAgentToolRepository,
         task_store: PixelFlowTaskStore,
         video_repository: object,
+        model_profile: HarnessModelProfile,
     ) -> None:
         self._bindings = binding_repository
         self._task_store = task_store
         self._video_repository = video_repository
+        self._model_profile = model_profile
 
     async def recover(
         self,
@@ -92,7 +95,8 @@ class HarnessRecoveryService:
                     "workspace_revision": workspace.revision,
                 },
             ),
-            model_profile_digest=_digest({"profile": "deepseek-v4-pro"}),
+            model_profile_name=self._model_profile.logical_name,
+            model_profile_digest=self._model_profile.digest,
             context_budget_digest=_digest(
                 {"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32},
             ),

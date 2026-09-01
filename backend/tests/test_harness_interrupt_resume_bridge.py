@@ -14,6 +14,7 @@ from starlette.requests import Request
 from app.gateway.routers import pixelflow_conversations
 from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
 from pixelflow.agent_harness import HarnessRunHandle
+from pixelflow.agent_harness.model_profile import HarnessModelProfile
 from pixelflow.agent_tools.repository import HarnessInterruptRecord, RunBinding, SQLAgentToolRepository
 from pixelflow.tasks import MemoryPixelFlowTaskStore, PixelFlowConversationRecord
 from pixelflow.video.contracts import VideoWorkspace
@@ -90,6 +91,9 @@ async def test_confirmation_resume_uses_gateway_run_bridge_and_current_workspace
     app.state.pixelflow_agent_run_bridge = AgentRunBridge(
         harness=harness,  # type: ignore[arg-type]
         projector=projector,  # type: ignore[arg-type]
+    )
+    app.state.pixelflow_harness_model_profile = HarnessModelProfile(
+        "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "test-v1", "test-budget-v1",
     )
     request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "app": app})
     workspace = VideoWorkspace(

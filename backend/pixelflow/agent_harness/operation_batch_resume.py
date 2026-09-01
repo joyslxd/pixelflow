@@ -17,6 +17,7 @@ from pixelflow.video.workspace import build_workspace_digest
 from .context_builder import PixelFlowContextBuilder
 from .contracts import HarnessRunRequest
 from .limits import LimitProfileResolver
+from .model_profile import HarnessModelProfile
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,11 @@ logger = logging.getLogger(__name__)
 class GatewayOperationBatchResumePort(OperationBatchResumePort):
     """类似 Application Service：用批次完成事件重建受限 Run，而非续跑旧 Session。"""
 
-    def __init__(self, *, task_store: object, video_repository: object, bridge: AgentRunBridge) -> None:
+    def __init__(self, *, task_store: object, video_repository: object, bridge: AgentRunBridge, model_profile: HarnessModelProfile) -> None:
         self._task_store = task_store
         self._video_repository = video_repository
         self._bridge = bridge
+        self._model_profile = model_profile
 
     async def create_operation_resume(self, event: OperationBatchOutboxRecord) -> str:
         """冻结 operation_resume_v1；completion_event_id 是唯一 trigger 与重试身份。"""
@@ -63,7 +65,8 @@ class GatewayOperationBatchResumePort(OperationBatchResumePort):
             user_input="批次外部任务已全部结束，请基于当前工作区继续处理结果。",
             system_instruction="这是一次 M06 批次完成恢复。只能依据当前权威工作区决定后续动作；不得假设旧 Harness Session 仍可用。",
             context_digest=_digest({"completion_event_id": event.completion_event_id, "workspace_revision": workspace.revision, "context": projection}),
-            model_profile_digest=_digest({"profile": "deepseek-v4-pro"}),
+            model_profile_name=self._model_profile.logical_name,
+            model_profile_digest=self._model_profile.digest,
             context_budget_digest=_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
             run_limits_digest=limits.digest,
             limit_profile=limits.profile,

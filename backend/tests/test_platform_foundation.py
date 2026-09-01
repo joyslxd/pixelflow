@@ -23,6 +23,11 @@ def test_harness_sidecar_settings_validates_url_key_and_timeout(monkeypatch: pyt
     monkeypatch.setenv("PIXELFLOW_GATEWAY_JWT_SIGNING_KEY", "k" * 32)
     monkeypatch.setenv("PIXELFLOW_GATEWAY_INSTANCE_ID", "gateway-a")
     monkeypatch.setenv("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_PROFILE_NAME", "deepseek-v4-pro")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_CAPABILITY_VERSION", "test-v1")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_BUDGET_VERSION", "test-budget-v1")
+    monkeypatch.setenv("PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST", "sha256:" + "a" * 64)
     assert HarnessSidecarSettings.from_env().request_timeout_seconds == 12
 
     monkeypatch.setenv("PIXELFLOW_HARNESS_SIDECAR_BASE_URL", "http://harness-sidecar:8090")

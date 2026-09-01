@@ -10,6 +10,8 @@ services:
     env_file:
       # 用途：从服务器受保护文件注入 Gateway Secret；影响：修改后必须重建容器，文件不得提交。
       - .env.gateway
+      # 用途：注入 Gateway 与 Sidecar 共用的非敏感发布身份；影响：模型、预算和 Manifest 漂移会阻止准入。
+      - .env.harness-release
     ports:
       # 用途：绑定既有 Nginx 上游端口；影响：仅本机 Nginx 可访问 Gateway API。
       - "127.0.0.1:8001:8001"
@@ -27,16 +29,18 @@ services:
     env_file:
       # 用途：从服务器受保护文件注入 Secret；影响：该文件不得提交仓库，修改后需重建容器。
       - .env.sidecar
+      # 用途：与 Gateway 注入同一发布身份；影响：禁止由单侧环境手工填写模型摘要。
+      - .env.harness-release
     ports:
       # 用途：仅绑定服务器 loopback；影响：Gateway 应经同机反向代理或私网访问，不向公网暴露 Sidecar。
       - "127.0.0.1:8090:8090"
     volumes:
       # 用途：挂载唯一活动 Skill 根；影响：新 Run 从该目录快照 Skill，运行中 Run 不读取后续修改。
-      - ${PIXELFLOW_AGENT_HOME:?请注入服务器 Skill 根}:/var/lib/pixelflow-agent:ro
+      - ${PIXELFLOW_SKILL_ROOT_HOST:?请注入服务器 Skill 根父目录}:/var/lib/pixelflow-agent:ro
       # 用途：持久化 Sidecar Run/Event SQLite；影响：容器重启后可回放同一 Run 事件。
       - ${PIXELFLOW_HARNESS_DATA_DIR:?请注入服务器数据目录}:/var/lib/pixelflow-agent-data
     environment:
-      # 用途：声明容器内活动 Skill 根；影响：必须与只读卷挂载路径一致，否则 readiness 失败。
+      # 用途：声明隔离 DSH Home；影响：Sidecar 仅从 $DSH_HOME/skills 读取 Skill，不能扫描宿主其它路径。
       PIXELFLOW_AGENT_HOME: /var/lib/pixelflow-agent
       # 用途：声明 Run/Event 数据位置；影响：必须位于可写数据卷中，避免容器重建丢失事件。
       PIXELFLOW_HARNESS_RUN_STORE: /var/lib/pixelflow-agent-data/runs.sqlite3

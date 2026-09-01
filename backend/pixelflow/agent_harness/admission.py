@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from sqlalchemy import update
@@ -14,7 +15,7 @@ _GLOBAL_SCOPE = "global"
 _ALLOWED_REASON_CODES = frozenset(
     {
         "startup_default",
-        "manual_open",
+        "preflight_verified_open",
         "manual_close",
         "sidecar_unavailable",
         "health_check_failed",
@@ -148,9 +149,56 @@ class SQLHarnessAdmissionRepository:
         )
 
 
+class HarnessAdmissionService:
+    """控制面唯一的准入恢复入口：预检成功后才用 revision 打开新 Run。"""
+
+    def __init__(self, repository: SQLHarnessAdmissionRepository) -> None:
+        self._repository = repository
+
+    async def open_after_preflight(self, *, updated_by: str) -> HarnessAdmissionState:
+        """由调用方先完成 Gateway→Sidecar 预检，再以审计原因打开准入。"""
+
+        current = await self._repository.get()
+        if current is None:
+            raise HarnessAdmissionConflictError("准入状态不存在")
+        if current.is_open:
+            return current
+        return await self._repository.update_state(
+            open_for_new_runs=True,
+            reason_code="preflight_verified_open",
+            expected_revision=current.revision,
+            updated_by=updated_by,
+        )
+
+    async def open_after_verified_release(
+        self,
+        *,
+        verify_release: Callable[[], Awaitable[None]],
+        updated_by: str,
+    ) -> HarnessAdmissionState:
+        """唯一恢复操作：先完成外部预检，再用 Repository 乐观锁开放准入。"""
+
+        await verify_release()
+        return await self.open_after_preflight(updated_by=updated_by)
+
+    async def close_after_health_failure(self, *, expected_revision: int, updated_by: str) -> None:
+        """仅健康/认证/连接失败可关闭准入；配置拒绝必须保留开关状态。"""
+
+        try:
+            await self._repository.update_state(
+                open_for_new_runs=False,
+                reason_code="health_check_failed",
+                expected_revision=expected_revision,
+                updated_by=updated_by,
+            )
+        except HarnessAdmissionConflictError:
+            return
+
+
 __all__ = [
     "HarnessAdmissionClosedError",
     "HarnessAdmissionConflictError",
     "HarnessAdmissionState",
+    "HarnessAdmissionService",
     "SQLHarnessAdmissionRepository",
 ]

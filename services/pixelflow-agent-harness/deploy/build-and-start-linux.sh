@@ -15,6 +15,20 @@ APT_MIRROR_HOST="${PIXELFLOW_APT_MIRROR:-mirrors.aliyun.com}"
 
 cd "$DEPLOY_DIR"
 
+# 用途：从 Gateway 唯一 Manifest 生成发布摘要；影响：Sidecar 不再接受人工填写的 Manifest digest。
+RELEASE_FILE="$DEPLOY_DIR/.env.harness-release"
+if [[ ! -f "$RELEASE_FILE" ]]; then
+  echo "缺少 .env.harness-release；请从 .env.harness-release.example 创建非敏感发布配置。" >&2
+  exit 1
+fi
+MANIFEST_DIGEST="$(cd "$ROOT_DIR/backend" && PYTHONPATH=. uv run --no-sync python -c 'from pixelflow.agent_tools.manifest import manifest; print(manifest().digest)')"
+if ! grep -q '^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=' "$RELEASE_FILE"; then
+  echo "发布配置缺少 PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST。" >&2
+  exit 1
+fi
+sed -i.bak "s|^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=.*|PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=$MANIFEST_DIGEST|" "$RELEASE_FILE"
+rm -f "$RELEASE_FILE.bak"
+
 # 用途：按 Compose 服务名读取解析后的镜像；影响：不依赖 config --images 的非稳定输出顺序，避免镜像错标。
 COMPOSE_CONFIG_JSON="$(docker compose -f "$COMPOSE_FILE" config --format json)"
 GATEWAY_IMAGE="$(printf '%s' "$COMPOSE_CONFIG_JSON" | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["gateway"]["image"])')"

@@ -28,6 +28,15 @@ _LIMITS = {"profile": "video_interactive_v1", **_LIMIT_PROFILE}
 _LIMITS_DIGEST = "sha256:" + hashlib.sha256(
     json.dumps(_LIMITS, sort_keys=True, separators=(",", ":")).encode(),
 ).hexdigest()
+_MODEL_PROFILE = {
+    "logical_name": "deepseek-v4-pro",
+    "model_id": "deepseek-v4-flash-vision-exp",
+    "capability_version": "test-v1",
+    "budget_version": "test-budget-v1",
+}
+_MODEL_PROFILE_DIGEST = "sha256:" + hashlib.sha256(
+    json.dumps(_MODEL_PROFILE, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
+).hexdigest()
 
 
 def _free_port() -> int:
@@ -73,7 +82,7 @@ def _payload() -> dict[str, object]:
         },
         "model": {
             "profile_name": "deepseek-v4-pro",
-            "profile_digest": "sha256:m2-http-model",
+            "profile_digest": _MODEL_PROFILE_DIGEST,
             "max_output_tokens": 32,
         },
         "context_budget": {
@@ -184,7 +193,11 @@ def test_cancel_endpoint_is_authenticated_idempotent_and_replayable(tmp_path: Pa
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m2-sidecar-http",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m2-http-model",
+                "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+                "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
+                "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "test-v1",
+                "PIXELFLOW_HARNESS_BUDGET_VERSION": "test-budget-v1",
+                "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": "sha256:m2-http-manifest",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps({"video_interactive_v1": _LIMIT_PROFILE}),
             "DEEPSEEK_API_KEY": "test-only-not-used",
             "DEEPSEEK_BASE_URL": "https://example.invalid",
@@ -305,7 +318,11 @@ def test_kill_restart_closes_unactivated_run_with_auditable_event(tmp_path: Path
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m2-sidecar-restart",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m2-http-model",
+                "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+                "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
+                "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "test-v1",
+                "PIXELFLOW_HARNESS_BUDGET_VERSION": "test-budget-v1",
+                "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": "sha256:m2-http-manifest",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps({"video_interactive_v1": _LIMIT_PROFILE}),
             "DEEPSEEK_API_KEY": "test-only-not-used",
             "DEEPSEEK_BASE_URL": "https://example.invalid",

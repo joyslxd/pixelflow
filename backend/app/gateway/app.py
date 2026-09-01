@@ -427,12 +427,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 admission_repository = SQLHarnessAdmissionRepository(
                     task_store.session_factory,
                 )
-                await admission_repository.initialize(
-                    initial_open=True,
-                    updated_by=harness_settings.instance_id,
-                )
+                await admission_repository.initialize(initial_open=False, updated_by=harness_settings.instance_id)
                 app.state.pixelflow_harness_admission_repository = admission_repository
-                app.state.pixelflow_harness_run_bridge = AgentHarnessSidecarClient(
+                app.state.pixelflow_harness_model_profile = harness_settings.model_profile
+                sidecar_client = AgentHarnessSidecarClient(
                     base_url=harness_settings.base_url,
                     gateway_jwt_signing_key=harness_settings.jwt_signing_key,
                     gateway_instance_id=harness_settings.instance_id,
@@ -445,6 +443,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         grant_id=request.transient_credential_grant_id,
                     ),
                 )
+                app.state.pixelflow_harness_run_bridge = sidecar_client
+                from pixelflow.agent_harness.admission import HarnessAdmissionService
+                from pixelflow.agent_harness.limits import LimitProfileResolver
+
+                if tool_manifest.digest != harness_settings.tool_manifest_digest:
+                    logger.error("Harness 发布 Manifest 摘要与 Gateway live Manifest 不一致")
+                else:
+                    try:
+                        await HarnessAdmissionService(admission_repository).open_after_verified_release(
+                            verify_release=lambda: sidecar_client.verify_release(
+                                model_profile=harness_settings.model_profile,
+                                tool_manifest_digest=tool_manifest.digest,
+                                run_limits_digest=LimitProfileResolver().release_digest,
+                            ),
+                            updated_by=f"gateway-preflight:{harness_settings.instance_id}",
+                        )
+                    except Exception:
+                        # 预检错误不携带用户或 Provider 内容；只保留固定事件供运维判断准入状态。
+                        logger.warning("harness_release_preflight_failed")
                 app.state.pixelflow_harness_run_projector = HarnessRunProjector(
                     binding_repository=binding_repository,
                     event_repository=agent_runtime_repository,
@@ -463,6 +480,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     binding_repository=binding_repository,
                     task_store=task_store,
                     video_repository=video_agent_repository,
+                    model_profile=harness_settings.model_profile,
                 )
                 from pixelflow.agent_harness.operation_batch_resume import (
                     GatewayOperationBatchResumePort,
@@ -474,6 +492,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         task_store=task_store,
                         video_repository=video_agent_repository,
                         bridge=app.state.pixelflow_agent_run_bridge,
+                        model_profile=harness_settings.model_profile,
                     ),
                     worker_id=f"gateway-operation-batch:{harness_settings.instance_id}",
                 )

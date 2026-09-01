@@ -74,6 +74,23 @@ def create_app(settings: SidecarSettings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"code": error})
         return {"status": "ready"}
 
+    @app.get("/internal/v1/release-readiness")
+    async def release_readiness(authorization: str | None = Header(default=None)) -> dict[str, str]:
+        """返回不含密钥的发布身份；Gateway 仅据此决定是否开放新 Run。"""
+
+        require_service(authorization)
+        error = resolved.readiness_error()
+        if error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"code": error})
+        snapshot = engine.snapshot_skills()
+        return {
+            "profile_name": resolved.model_profile.logical_name,
+            "profile_digest": resolved.model_profile.digest,
+            "tool_manifest_digest": resolved.tool_manifest_digest,
+            "run_limits_digest": resolved.run_limits_digest,
+            "skill_catalog_digest": snapshot.catalog_digest,
+        }
+
     def require_service(authorization: str | None) -> None:
         """为内部 Run API 统一校验 Gateway 服务凭据。"""
 

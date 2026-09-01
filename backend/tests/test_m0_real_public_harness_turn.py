@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import socket
@@ -29,9 +28,11 @@ from pixelflow.agent_control_plane.persistence.models import PixelFlowAgentHarne
 from pixelflow.agent_control_plane.run_bridge import AgentRunBridge
 from pixelflow.agent_harness import AgentHarnessSidecarClient
 from pixelflow.agent_harness.admission import SQLHarnessAdmissionRepository
+from pixelflow.agent_harness.model_profile import HarnessModelProfile
 from pixelflow.agent_harness.projector import HarnessRunProjector
 from pixelflow.agent_harness.recovery import HarnessRecoveryService
 from pixelflow.agent_tools import AgentToolBroker, SQLAgentToolRepository
+from pixelflow.agent_tools.manifest import manifest
 from pixelflow.platform.persistence import Base
 from pixelflow.tasks import PixelFlowConversationRecord, SQLPixelFlowTaskStore
 from pixelflow.video.contracts import AgentPlan, AgentPlanStatus, VideoWorkspace
@@ -83,9 +84,6 @@ def test_real_authenticated_public_harness_turn_and_sse(
         "confirmation_resume_v1": {"deadline_seconds": 150, "max_model_steps": 10, "max_business_tools": 5, "max_billable_batch_starts": 1},
         "run_recovery_v1": {"deadline_seconds": 90, "max_model_steps": 6, "max_business_tools": 3, "max_billable_batch_starts": 0},
     }
-    profile_digest = "sha256:" + hashlib.sha256(
-        json.dumps({"profile": "deepseek-v4-pro"}, sort_keys=True, separators=(",", ":")).encode(),
-    ).hexdigest()
     monkeypatch.setenv("PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES", json.dumps(limit_profiles))
 
     async def prepare_gateway() -> tuple[object, SQLPixelFlowTaskStore, SQLAgentToolRepository, SQLVideoAgentRepository, SQLCompactionQueueRepository, SQLHarnessAdmissionRepository]:
@@ -159,6 +157,9 @@ def test_real_authenticated_public_harness_turn_and_sse(
         task_store=store,
     )
     gateway_app.state.pixelflow_harness_admission_repository = admission_repository
+    gateway_app.state.pixelflow_harness_model_profile = HarnessModelProfile(
+        "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "m0-real-v1", "m0-real-budget-v1",
+    )
     gateway_app.add_middleware(AuthMiddleware)
     gateway_app.include_router(internal_agent_tools.router)
     gateway_app.include_router(pixelflow_conversations.router)
@@ -192,9 +193,11 @@ def test_real_authenticated_public_harness_turn_and_sse(
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-public-sidecar",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": profile_digest,
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": manifest().digest,
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(limit_profiles),
             "PYTHONPATH": str(sidecar_root / "src"),
@@ -308,6 +311,9 @@ def test_real_authenticated_public_harness_turn_and_sse(
             task_store=store,
         )
         restarted_gateway_app.state.pixelflow_harness_admission_repository = admission_repository
+        restarted_gateway_app.state.pixelflow_harness_model_profile = HarnessModelProfile(
+            "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "m0-real-v1", "m0-real-budget-v1",
+        )
         restarted_gateway_app.add_middleware(AuthMiddleware)
         restarted_gateway_app.include_router(internal_agent_tools.router)
         restarted_gateway_app.include_router(pixelflow_conversations.router)
@@ -493,6 +499,10 @@ def test_real_public_run_recovery_after_sidecar_kill_and_restart(
         binding_repository=repository,
         task_store=store,
         video_repository=video_repository,
+        model_profile=HarnessModelProfile("deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "test-v1", "test-budget-v1"),
+    )
+    gateway_app.state.pixelflow_harness_model_profile = HarnessModelProfile(
+        "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "test-v1", "test-budget-v1",
     )
     gateway_app.add_middleware(AuthMiddleware)
     gateway_app.include_router(internal_agent_tools.router)
@@ -527,8 +537,11 @@ def test_real_public_run_recovery_after_sidecar_kill_and_restart(
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-public-recovery-sidecar",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-pro-ga-260813",
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": manifest().digest,
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
             "PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS": "90",
             "PYTHONPATH": str(sidecar_root / "src"),
         },

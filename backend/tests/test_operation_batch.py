@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from pixelflow.agent_control_plane.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_control_plane.persistence.models import PixelFlowOperationBatchOutboxRow
 from pixelflow.agent_control_plane.persistence.repositories import MemoryAgentRuntimeRepository
+from pixelflow.agent_harness.model_profile import HarnessModelProfile
 from pixelflow.agent_harness.operation_batch_resume import GatewayOperationBatchResumePort
 from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
@@ -713,7 +714,10 @@ async def test_gateway_resume_port_freezes_operation_resume_profile(monkeypatch)
             return SimpleNamespace(run_id="hrun_" + "3" * 32)
 
     bridge = Bridge()
-    port = GatewayOperationBatchResumePort(task_store=Store(), video_repository=Repository(), bridge=bridge)
+    port = GatewayOperationBatchResumePort(
+        task_store=Store(), video_repository=Repository(), bridge=bridge,
+        model_profile=HarnessModelProfile("deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "test-v1", "test-budget-v1"),
+    )
     run_id = await port.create_operation_resume(OperationBatchOutboxRecord("evt_operation_batch_done_test", "batch", "user", "conversation", "workspace", None))
 
     assert run_id == "hrun_" + "3" * 32

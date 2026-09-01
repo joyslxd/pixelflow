@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -23,6 +24,17 @@ from pixelflow_harness_sidecar.client import AgentHarnessSidecarClient
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 
 
+_MODEL_PROFILE = {
+    "logical_name": "deepseek-v4-pro",
+    "model_id": "deepseek-v4-flash-vision-exp",
+    "capability_version": "m0-real-v1",
+    "budget_version": "m0-real-budget-v1",
+}
+_MODEL_PROFILE_DIGEST = "sha256:" + hashlib.sha256(
+    json.dumps(_MODEL_PROFILE, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
+).hexdigest()
+
+
 def _request_payload(*, user_input: str = "请用不超过六个汉字说明连接状态。") -> dict[str, object]:
     """构造不含用户身份或供应商参数的真实 Sidecar 网络 DTO。"""
 
@@ -40,7 +52,7 @@ def _request_payload(*, user_input: str = "请用不超过六个汉字说明连�
         },
         "model": {
             "profile_name": "deepseek-v4-pro",
-            "profile_digest": "sha256:m0-real-model-profile",
+            "profile_digest": _MODEL_PROFILE_DIGEST,
             "max_output_tokens": 1024,
         },
         "context_budget": {
@@ -191,7 +203,7 @@ def _direct_deepseek_tool_call() -> dict[str, object]:
     """以 OpenAI 兼容协议验证当前直连模型的最小 Tool Calling 能力。"""
 
     base_url = os.environ["DEEPSEEK_BASE_URL"].rstrip("/")
-    model_id = os.environ.get("PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp")
+    model_id = "deepseek-v4-flash-vision-exp"
     payload = {
         "model": model_id,
         "messages": [
@@ -319,11 +331,11 @@ def test_real_sidecar_http_persists_and_replays_real_model_run(tmp_path: Path) -
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-http",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
-            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
-                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
-            ),
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": "sha256:m0-real-manifest",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
                 {
                     "m0_real_tool_v1": {
@@ -492,11 +504,11 @@ def test_real_sidecar_context_policy_and_direct_deepseek_tool_call(
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-tool-calling",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
-            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
-                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
-            ),
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": "sha256:m0-real-manifest",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
                 {
                     "m0_real_tool_v1": {
@@ -559,7 +571,7 @@ def test_real_sidecar_context_policy_and_direct_deepseek_tool_call(
         # 由下方强制的 OpenAI 兼容 Tool Calling 直接验证，避免将随机采样当作门禁。
         assert len(calls) <= 1
         direct = _direct_deepseek_tool_call()
-        assert direct["response_model"] == os.environ["PIXELFLOW_HARNESS_MODEL_ID"]
+        assert direct["response_model"] == "deepseek-v4-flash-vision-exp"
         assert direct["finish_reason"] == "tool_calls"
         assert direct["tool_calls_count"] == 1
         assert direct["tool_name"] == "inspect_video_workspace"
@@ -606,11 +618,11 @@ def test_real_sidecar_kill_restart_safely_closes_unfinished_run(tmp_path: Path) 
             "PIXELFLOW_TOOL_BROKER_JWT_ISSUER": "pixelflow-harness-sidecar",
             "PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE": "pixelflow-tool-broker",
             "PIXELFLOW_SIDECAR_INSTANCE_ID": "m0-sidecar-restart",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE": "deepseek-v4-pro",
-            "PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST": "sha256:m0-real-model-profile",
-            "PIXELFLOW_HARNESS_MODEL_ID": os.environ.get(
-                "PIXELFLOW_HARNESS_MODEL_ID", "deepseek-v4-flash-vision-exp"
-            ),
+            "PIXELFLOW_HARNESS_PROFILE_NAME": "deepseek-v4-pro",
+            "PIXELFLOW_HARNESS_CAPABILITY_VERSION": "m0-real-v1",
+            "PIXELFLOW_HARNESS_BUDGET_VERSION": "m0-real-budget-v1",
+            "PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST": "sha256:m0-real-manifest",
+            "PIXELFLOW_HARNESS_MODEL_ID": "deepseek-v4-flash-vision-exp",
             "PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES": json.dumps(
                 {
                     "m0_real_tool_v1": {

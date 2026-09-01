@@ -86,10 +86,12 @@ class DeepSeekHarnessEngine:
     def validate_request(self, request: HarnessRunRequest) -> None:
         """在持久化 accepted Run 前验证模型与限制快照，拒绝漂移请求。"""
 
-        if request.model.profile_name != self._settings.model_profile_name:
+        if request.model.profile_name != self._settings.model_profile.logical_name:
             raise ValueError("模型档案与 Sidecar 启动配置不匹配")
-        if request.model.profile_digest != self._settings.model_profile_digest:
+        if request.model.profile_digest != self._settings.model_profile.digest:
             raise ValueError("模型档案摘要与 Sidecar 启动配置不匹配")
+        if request.toolset.manifest_digest != self._settings.tool_manifest_digest:
+            raise ValueError("Tool Manifest 摘要与 Sidecar 发布配置不匹配")
         self._settings.validate_run_limits(request.limits)
 
     async def execute(
@@ -273,7 +275,7 @@ def build_deepseek_harness_config(
     }
     return config_factory(
         provider="deepseek-official",
-        model=settings.model_id,
+        model=settings.model_profile.model_id,
         max_tokens=request.model.max_output_tokens,
         cwd=str(run_home),
         session_root=str(session_root),

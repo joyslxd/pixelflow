@@ -6,6 +6,7 @@ from .limits import LimitProfile, LimitProfileResolver
 from .port import AgentHarnessPort
 from .sidecar import (
     AgentHarnessSidecarClient,
+    GatewayHarnessRunConfigurationError,
     GatewayHarnessSidecarError,
     PublicAgentEvent,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "AgentHarnessPort",
     "AgentHarnessSidecarClient",
     "GatewayHarnessSidecarError",
+    "GatewayHarnessRunConfigurationError",
     "HarnessRunEvent",
     "HarnessRunHandle",
     "HarnessRunRequest",

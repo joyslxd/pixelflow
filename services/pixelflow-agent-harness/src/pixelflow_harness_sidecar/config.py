@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .model_profile import HarnessModelProfile
+
 
 @dataclass(frozen=True, slots=True)
 class SidecarSettings:
@@ -23,9 +25,8 @@ class SidecarSettings:
     tool_broker_jwt_issuer: str
     tool_broker_jwt_audience: str
     sidecar_instance_id: str
-    model_profile_name: str
-    model_profile_digest: str
-    model_id: str
+    model_profile: HarnessModelProfile
+    tool_manifest_digest: str
     request_timeout_seconds: float
     run_limit_profiles_json: str = ""
 
@@ -41,6 +42,8 @@ class SidecarSettings:
             if run_store_raw
             else agent_home / "run-events" / "runs.sqlite3"
         )
+        model_profile = HarnessModelProfile.from_env()
+        tool_manifest_digest = os.environ.get("PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST", "").strip()
         return cls(
             agent_home=agent_home,
             run_store_path=run_store,
@@ -52,15 +55,8 @@ class SidecarSettings:
             tool_broker_jwt_issuer=os.environ.get("PIXELFLOW_TOOL_BROKER_JWT_ISSUER", "pixelflow-harness-sidecar").strip(),
             tool_broker_jwt_audience=os.environ.get("PIXELFLOW_TOOL_BROKER_JWT_AUDIENCE", "pixelflow-tool-broker").strip(),
             sidecar_instance_id=os.environ.get("PIXELFLOW_SIDECAR_INSTANCE_ID", "").strip(),
-            model_profile_name=os.environ.get(
-                "PIXELFLOW_HARNESS_MODEL_PROFILE",
-                "deepseek-v4-pro",
-            ).strip(),
-            model_profile_digest=os.environ.get("PIXELFLOW_HARNESS_MODEL_PROFILE_DIGEST", "").strip(),
-            model_id=os.environ.get(
-                "PIXELFLOW_HARNESS_MODEL_ID",
-                "deepseek-v4-pro",
-            ).strip(),
+            model_profile=model_profile,
+            tool_manifest_digest=tool_manifest_digest,
             request_timeout_seconds=float(
                 os.environ.get("PIXELFLOW_HARNESS_REQUEST_TIMEOUT_SECONDS", "90"),
             ),
@@ -86,15 +82,30 @@ class SidecarSettings:
             return "model_credential_unconfigured"
         if not os.environ.get("DEEPSEEK_BASE_URL", "").strip():
             return "model_endpoint_unconfigured"
-        if not self.model_profile_name or not self.model_id or not self.model_profile_digest.startswith("sha256:"):
+        if not self.model_profile.digest.startswith("sha256:"):
             return "model_profile_unconfigured"
+        if not self.tool_manifest_digest.startswith("sha256:") or len(self.tool_manifest_digest) != 71:
+            return "tool_manifest_unconfigured"
         if not self.run_limit_profiles_json:
             return "run_limit_profiles_unconfigured"
         try:
             self._limit_profiles()
         except ValueError:
             return "run_limit_profiles_invalid"
+        try:
+            from .skill_snapshot import snapshot_skill_root
+
+            snapshot_skill_root(self.agent_home / "skills")
+        except ValueError:
+            return "skill_snapshot_invalid"
         return None
+
+    @property
+    def run_limits_digest(self) -> str:
+        """返回完整限制发布配置的公开摘要，供 Gateway 预检比较。"""
+
+        encoded = json.dumps(self._limit_profiles(), sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     def validate_run_limits(self, limits: object) -> None:
         """校验 Gateway 冻结的档案、数值和 digest 与本地配置完全一致。"""

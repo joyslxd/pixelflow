@@ -469,23 +469,26 @@ async def _close_harness_admission_after_sidecar_failure(
 ) -> None:
     """Sidecar 不可用时尽力关闭共享准入；竞争失败表示其他实例已先处理。"""
 
-    from pixelflow.agent_harness.admission import (
-        HarnessAdmissionConflictError,
-        SQLHarnessAdmissionRepository,
-    )
+    from pixelflow.agent_harness.admission import HarnessAdmissionService, SQLHarnessAdmissionRepository
 
     repository = getattr(request.app.state, "pixelflow_harness_admission_repository", None)
     if not isinstance(repository, SQLHarnessAdmissionRepository):
         return
-    try:
-        await repository.update_state(
-            open_for_new_runs=False,
-            reason_code="sidecar_unavailable",
-            expected_revision=expected_revision,
-            updated_by="gateway-sidecar-failure",
-        )
-    except HarnessAdmissionConflictError:
-        return
+    await HarnessAdmissionService(repository).close_after_health_failure(
+        expected_revision=expected_revision,
+        updated_by="gateway-health-failure",
+    )
+
+
+def _harness_model_profile(request: Request):
+    """读取启动期冻结的发布档案，Router 禁止重算或硬编码模型身份。"""
+
+    from pixelflow.agent_harness.model_profile import HarnessModelProfile
+
+    profile = getattr(request.app.state, "pixelflow_harness_model_profile", None)
+    if not isinstance(profile, HarnessModelProfile):
+        raise HTTPException(status_code=503, detail={"code": "harness_model_profile_unavailable"})
+    return profile
 
 
 def _harness_run_projector(request: Request):
@@ -679,10 +682,7 @@ async def start_harness_turn(
 ) -> HarnessTurnStartResponse:
     """M0 真实公开 Turn：先持久化用户消息，再创建、绑定并激活 Sidecar Run。"""
 
-    from pixelflow.agent_harness import (
-        GatewayHarnessSidecarError,
-        HarnessRunRequest,
-    )
+    from pixelflow.agent_harness import GatewayHarnessRunConfigurationError, GatewayHarnessSidecarError, HarnessRunRequest
 
     user_id = await get_current_user(request)
     if not user_id:
@@ -749,6 +749,7 @@ async def start_harness_turn(
     from pixelflow.agent_harness.limits import LimitProfileResolver
 
     limits = LimitProfileResolver().resolve("user_turn")
+    model_profile = _harness_model_profile(request)
     try:
         result = await _agent_run_bridge(request).start(
             HarnessRunRequest(
@@ -803,7 +804,8 @@ async def start_harness_turn(
                     "创意方案、分镜和 Prompt。"
                 ),
                 context_digest=context_digest,
-                model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+                model_profile_name=model_profile.logical_name,
+                model_profile_digest=model_profile.digest,
                 context_budget_digest=_harness_digest(
                     {"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32},
                 ),
@@ -817,6 +819,8 @@ async def start_harness_turn(
                 **context,
             ),
         )
+    except GatewayHarnessRunConfigurationError as error:
+        raise HTTPException(status_code=422, detail={"code": "harness_configuration_rejected"}) from error
     except GatewayHarnessSidecarError as error:
         await _close_harness_admission_after_sidecar_failure(
             request,
@@ -1124,6 +1128,7 @@ async def confirm_harness_interrupt(
         request, user_id=user_id, conversation=conversation, workspace=workspace, user_input="用户已确认继续执行。",
     )
     limits = LimitProfileResolver().resolve("confirmation_resume")
+    model_profile = _harness_model_profile(request)
     credential_store = getattr(
         request.app.state,
         "pixelflow_transient_run_credential_store",
@@ -1148,7 +1153,8 @@ async def confirm_harness_interrupt(
                 "受控 Tool 结果继续执行，不得重复确认，也不得扩展为其他计费或破坏性操作。"
             ),
             context_digest=_harness_digest({"interrupt_id": interrupt_id, "workspace_revision": workspace.revision, "context": context}),
-            model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+            model_profile_name=model_profile.logical_name,
+            model_profile_digest=model_profile.digest,
             context_budget_digest=_harness_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
             run_limits_digest=limits.digest, limit_profile=limits.profile, max_model_steps=limits.max_model_steps,
             max_business_tools=limits.max_business_tools, max_billable_batch_starts=limits.max_billable_batch_starts,
@@ -1383,6 +1389,7 @@ async def _start_harness_interrupt_resume(
         request, user_id=user_id, conversation=conversation, workspace=workspace, user_input=user_input,
     )
     limits = LimitProfileResolver().resolve(trigger_type)
+    model_profile = _harness_model_profile(request)
     credential_store = getattr(request.app.state, "pixelflow_transient_run_credential_store", None)
     grant_id: str | None = None
     if authorization and isinstance(credential_store, TransientRunCredentialStore):
@@ -1404,7 +1411,8 @@ async def _start_harness_interrupt_resume(
                 "response": interrupt.response_payload,
                 "context": context,
             }),
-            model_profile_digest=_harness_digest({"profile": "deepseek-v4-pro"}),
+            model_profile_name=model_profile.logical_name,
+            model_profile_digest=model_profile.digest,
             context_budget_digest=_harness_digest({"effective_context_k": 896, "output_reserve_k": 32, "safety_reserve_k": 32}),
             run_limits_digest=limits.digest,
             limit_profile=limits.profile,
