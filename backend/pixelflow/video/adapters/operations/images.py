@@ -73,6 +73,17 @@ class M06ImageGenerationOperationPort:
         except OperationStartQuotaPausedError as exc:
             return ImageGenerationJob(job_id=exc.operation.job_id, asset_id=asset_id, status="paused_quota")
         except (OperationConflictError, ValueError) as exc:
+            # Provider 已返回任务但绑定步骤发生并发冲突时，优先按同一幂等键回读，
+            # 避免把已提交的图片错误标记为 failed 并丢失后续轮询。
+            existing = await self._repository.get_operation_by_idempotency_key(
+                context.user_id,
+                operation_request.idempotency_key,
+            )
+            if existing is not None and existing.provider_job_id:
+                if existing.status is ExternalJobStatus.SUCCEEDED:
+                    return ImageGenerationJob(job_id=existing.job_id, asset_id=asset_id, status="succeeded")
+                if existing.status is ExternalJobStatus.POLLING:
+                    return ImageGenerationJob(job_id=existing.job_id, asset_id=asset_id, status="polling")
             raise VideoToolExecutionError("图片资产 Operation 启动失败") from exc
         if operation.status in {ExternalJobStatus.CREATED, ExternalJobStatus.POLLING}:
             return ImageGenerationJob(job_id=operation.job_id, asset_id=asset_id, status="polling")
