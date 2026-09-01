@@ -21,7 +21,7 @@ if [[ ! -f "$RELEASE_FILE" ]]; then
   echo "缺少 .env.harness-release；请从 .env.harness-release.example 创建非敏感发布配置。" >&2
   exit 1
 fi
-MANIFEST_DIGEST="$(cd "$ROOT_DIR/backend" && PYTHONPATH=. uv run --no-sync python -c 'from pixelflow.agent_tools.manifest import manifest; print(manifest().digest)')"
+MANIFEST_DIGEST="$(cd "$ROOT_DIR/backend" && PYTHONPATH=. uv run python -c 'from pixelflow.agent_tools.manifest import manifest; print(manifest().digest)')"
 if ! grep -q '^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=' "$RELEASE_FILE"; then
   echo "发布配置缺少 PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST。" >&2
   exit 1
