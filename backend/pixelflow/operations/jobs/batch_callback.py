@@ -44,11 +44,13 @@ class OperationBatchTerminalCallback:
         *,
         batch_repository: OperationBatchRepository,
         video_repository: VideoWorkspaceRepository,
+        operation_repository: AgentRuntimeRepository | None = None,
         fallback_resumer: WorkflowGraphResumePort | None = None,
         on_child_terminal: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._batches = batch_repository
         self._video_repository = video_repository
+        self._operations = operation_repository
         self._fallback = fallback_resumer
         self._on_child_terminal = on_child_terminal
 
@@ -110,6 +112,15 @@ class OperationBatchTerminalCallback:
             conversation_id=conversation_id,
             job_id=job_id,
         )
+        if batch is None:
+            # 兼容历史并发冲突产生的占位绑定：Operation 真实 job_id 仍可回读其幂等键。
+            operation = None if self._operations is None else await self._operations.get_operation(user_id, job_id)
+            if operation is not None:
+                batch = await self._batches.get_batch_for_child_job(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    job_id=operation.idempotency_key,
+                )
         if batch is None:
             return False
         child = next(

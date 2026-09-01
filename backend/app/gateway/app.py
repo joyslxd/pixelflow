@@ -238,6 +238,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             batch_terminal_callback = OperationBatchTerminalCallback(
                 batch_repository=batch_repository,
                 video_repository=video_agent_repository,
+                operation_repository=agent_runtime_repository,
                 on_child_terminal=_wake_batch_dispatcher,
             )
             app.state.pixelflow_operation_batch_terminal_callback = batch_terminal_callback
@@ -388,11 +389,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     conversation_id = getattr(operation, "conversation_id", None)
                     if not isinstance(job_id, str) or not isinstance(conversation_id, str):
                         return False
+                    batch = await batch_repository.get_batch_for_child_job(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        job_id=job_id,
+                    )
+                    if batch is not None:
+                        return True
+                    # 兼容旧批次：历史并发冲突可能把子项暂存为 Operation 幂等键，
+                    # 仍允许恢复 Worker 找回对应批次并完成真实 Job 绑定。
+                    operation = await agent_runtime_repository.get_operation(user_id, job_id)
+                    if operation is None:
+                        return False
                     return (
                         await batch_repository.get_batch_for_child_job(
                             user_id=user_id,
                             conversation_id=conversation_id,
-                            job_id=job_id,
+                            job_id=operation.idempotency_key,
                         )
                     ) is not None
 
