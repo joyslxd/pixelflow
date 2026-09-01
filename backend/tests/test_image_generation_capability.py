@@ -470,6 +470,31 @@ def json_load(value: bytes) -> object:
     return json.loads(value)
 
 
+def test_image_provider_defaults_to_enabled_when_content_app_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了 Content-App 时，图片 Provider 默认装配。"""
+
+    monkeypatch.delenv("PIXELFLOW_M06_IMAGE_PROVIDER_ENABLED", raising=False)
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://content.example/api")
+
+    settings = ContentAppImageProviderSettings.from_env()
+
+    assert settings is not None
+    assert settings.base_url == "https://content.example/api"
+
+
+def test_image_provider_can_be_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 false 是唯一关闭已配置图片 Provider 的默认开关。"""
+
+    monkeypatch.setenv("PIXELFLOW_M06_IMAGE_PROVIDER_ENABLED", "false")
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://content.example/api")
+
+    assert ContentAppImageProviderSettings.from_env() is None
+
+
 def test_image_asset_success_projects_ready_and_keeps_provider_reference() -> None:
     patch = build_image_asset_success_patch(
         {

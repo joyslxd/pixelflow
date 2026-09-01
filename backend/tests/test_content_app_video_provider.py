@@ -25,6 +25,31 @@ def _provider(handler) -> ContentAppVideoGenerationProvider:
     )
 
 
+def test_video_provider_defaults_to_enabled_when_content_app_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了 Content-App 时，视频 Provider 默认装配。"""
+
+    monkeypatch.delenv("PIXELFLOW_M06_VIDEO_PROVIDER_ENABLED", raising=False)
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://content.example/api")
+
+    settings = ContentAppVideoProviderSettings.from_env()
+
+    assert settings is not None
+    assert settings.base_url == "https://content.example/api"
+
+
+def test_video_provider_can_be_explicitly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式 false 是唯一关闭已配置视频 Provider 的默认开关。"""
+
+    monkeypatch.setenv("PIXELFLOW_M06_VIDEO_PROVIDER_ENABLED", "false")
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://content.example/api")
+
+    assert ContentAppVideoProviderSettings.from_env() is None
+
+
 @pytest.mark.asyncio
 async def test_start_and_status_reuse_browser_authorization_without_environment_secret() -> None:
     """start 与 status 复用同一浏览器 Authorization，配置文件不保存用户凭据。"""

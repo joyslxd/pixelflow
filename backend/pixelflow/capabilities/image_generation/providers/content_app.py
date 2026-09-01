@@ -41,9 +41,11 @@ class ContentAppImageProviderSettings:
     @classmethod
     def from_env(cls) -> ContentAppImageProviderSettings | None:
         enabled = os.environ.get("PIXELFLOW_M06_IMAGE_PROVIDER_ENABLED", "").strip().lower()
-        if enabled not in {"1", "true", "yes", "on"}:
+        if enabled in {"0", "false", "no", "off"}:
             return None
         base_url = os.environ.get("BORGRISE_BASE_URL", "").strip().rstrip("/")
+        if not base_url:
+            return None
         if not base_url.startswith(("https://", "http://127.0.0.1:")):
             raise ValueError("M06 图片 Provider 必须配置受控 HTTPS 或 loopback content-app 地址")
         return cls(

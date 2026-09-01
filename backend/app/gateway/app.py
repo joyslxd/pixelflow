@@ -285,7 +285,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ContentAppVideoUnderstandingAdapter(base_url=provider_settings.base_url)
                 if provider_settings is not None
                 and os.environ.get("PIXELFLOW_VIDEO_UNDERSTANDING_ENABLED", "").strip().lower()
-                in {"1", "true", "yes", "on"}
+                not in {"0", "false", "no", "off"}
                 else None
             )
             if video_provider is not None:

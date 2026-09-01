@@ -78,12 +78,14 @@ class ContentAppVideoProviderSettings:
 
     @classmethod
     def from_env(cls) -> ContentAppVideoProviderSettings | None:
-        """显式开关关闭时不装配 Provider；开启但配置缺失则失败关闭。"""
+        """配置完整时默认装配 Provider；显式 false 或缺配置时保持安全关闭。"""
 
         enabled = os.environ.get("PIXELFLOW_M06_VIDEO_PROVIDER_ENABLED", "").strip().lower()
-        if enabled not in {"1", "true", "yes", "on"}:
+        if enabled in {"0", "false", "no", "off"}:
             return None
         base_url = os.environ.get("BORGRISE_BASE_URL", "").strip().rstrip("/")
+        if not base_url:
+            return None
         if not base_url.startswith(("https://", "http://127.0.0.1:")):
             raise ValueError("M06 视频 Provider 必须配置受控 HTTPS 或 loopback content-app 地址")
         return cls(
