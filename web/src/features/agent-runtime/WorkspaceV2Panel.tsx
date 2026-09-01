@@ -1,16 +1,18 @@
-/** Workspace V2 四层面板：只展示安全投影，用户编辑统一走 revision CAS Command。 */
+/** Workspace V2 四层只读投影；所有业务修改均通过对话交由 Agent 执行。 */
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import type { PublicOperationV1 } from "@/api/contracts";
 
+import { WorkspaceAssetThumbnail } from "./WorkspaceAssetThumbnail";
 import { operationCounts, projectWorkspaceV2 } from "./workspaceV2";
 
 type Props = {
   summary: Record<string, unknown>;
+  conversationId: string;
+  workspaceId: string;
   revision: number;
   operations: PublicOperationV1[];
-  onApplyPatch: (patch: Record<string, unknown>) => Promise<void>;
 };
 
 const creativeLabels: Record<string, string> = {
@@ -24,10 +26,6 @@ const narrativeLabels: Record<string, string> = {
 };
 const primaryNarrativeKeys = ["concept", "script", "outline", "narration", "dialogue", "sound", "brand_closure"];
 const optionalNarrativeKeys = ["character_arc", "era"];
-
-function fields(source: Record<string, string | number>): Record<string, string> {
-  return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, String(value)]));
-}
 
 function sectionTitle(title: string) {
   return <h3 className="text-sm font-semibold text-ink">{title}</h3>;
@@ -47,149 +45,73 @@ function assetOriginLabel(origin: string): string {
   return ({ existing_material: "已有素材", planned_generation: "待生成素材", provider_output: "已生成素材" } as Record<string, string>)[origin] ?? "待生成素材";
 }
 
-export function WorkspaceV2Panel({ summary, revision, operations, onApplyPatch }: Props) {
+export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revision, operations }: Props) {
   const projection = useMemo(() => projectWorkspaceV2(summary), [summary]);
-  const [creativeDraft, setCreativeDraft] = useState(() => fields(projection.creativeBrief));
-  const [narrativeDraft, setNarrativeDraft] = useState(() => projection.narrativePlan);
-  const [creativeDirty, setCreativeDirty] = useState(false);
-  const [narrativeDirty, setNarrativeDirty] = useState(false);
-  const [saving, setSaving] = useState<"creative" | "narrative" | null>(null);
-  const [conflict, setConflict] = useState("");
-  const [addingNarrative, setAddingNarrative] = useState(false);
-  const [narrativeKeyToAdd, setNarrativeKeyToAdd] = useState("concept");
-
-  useEffect(() => {
-    if (!creativeDirty) setCreativeDraft(fields(projection.creativeBrief));
-  }, [creativeDirty, projection.creativeBrief, revision]);
-  useEffect(() => {
-    if (!narrativeDirty) setNarrativeDraft(projection.narrativePlan);
-  }, [narrativeDirty, projection.narrativePlan, revision]);
-
-  const save = async (kind: "creative" | "narrative") => {
-    if (saving !== null) return;
-    setSaving(kind);
-    setConflict("");
-    try {
-      if (kind === "creative") {
-        const targetDuration = Number(creativeDraft.target_duration_sec);
-        await onApplyPatch({
-          creative_brief: {
-            ...creativeDraft,
-            ...(Number.isInteger(targetDuration) && targetDuration > 0 ? { target_duration_sec: targetDuration } : {}),
-          },
-        });
-        setCreativeDirty(false);
-      } else {
-        await onApplyPatch({ narrative_plan: narrativeDraft });
-        setNarrativeDirty(false);
-      }
-    } catch {
-      // Hook 会刷新权威 revision；此处保留草稿供用户合并后再次提交。
-      setConflict("Workspace 已被更新，本地草稿已保留。请对照最新内容合并后重试。");
-    } finally {
-      setSaving(null);
-    }
-  };
-
   const counts = operationCounts(projection.batches);
   const childTotal = Object.values(counts).reduce((total, value) => total + value, 0);
-  const creativeFieldKeys = orderedFieldKeys(creativeDraft, creativeLabels);
-  const narrativeFieldKeys = orderedFieldKeys(narrativeDraft, narrativeLabels);
+  const creativeFieldKeys = orderedFieldKeys(projection.creativeBrief, creativeLabels).filter((key) => projection.creativeBrief[key] !== undefined);
+  const narrativeFieldKeys = orderedFieldKeys(projection.narrativePlan, narrativeLabels).filter((key) => Boolean(projection.narrativePlan[key]?.trim()));
   const visiblePrimaryNarrativeKeys = narrativeFieldKeys.filter(
-    (key) => primaryNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+    (key) => primaryNarrativeKeys.includes(key),
   );
   const visibleOptionalNarrativeKeys = narrativeFieldKeys.filter(
-    (key) => optionalNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+    (key) => optionalNarrativeKeys.includes(key),
   );
   const visibleExtendedNarrativeKeys = narrativeFieldKeys.filter(
-    (key) => !primaryNarrativeKeys.includes(key) && !optionalNarrativeKeys.includes(key) && Boolean(narrativeDraft[key]?.trim()),
+    (key) => !primaryNarrativeKeys.includes(key) && !optionalNarrativeKeys.includes(key),
   );
-  const editNarrativeField = (key: string, value: string) => {
-    setNarrativeDirty(true);
-    setNarrativeDraft((current) => ({ ...current, [key]: value }));
-  };
-  const narrativeEditor = (key: string) => (
-    <label key={key} className="block space-y-1">
-      <span>{narrativeLabels[key] ?? key}</span>
-      <textarea
-        className={`w-full rounded border border-line bg-surface p-2 text-ink ${key === "script" || key === "outline" ? "min-h-32" : "min-h-16"}`}
-        maxLength={key === "script" || key === "outline" ? 8_000 : 2_000}
-        value={narrativeDraft[key] ?? ""}
-        onChange={(event) => editNarrativeField(key, event.target.value)}
-      />
-    </label>
-  );
+  const narrativeFact = (key: string) => <article key={key} className="rounded bg-surface p-3"><p className="font-medium text-ink">{narrativeLabels[key] ?? key}</p><p className="mt-1 whitespace-pre-wrap leading-6">{projection.narrativePlan[key]}</p></article>;
 
   return (
     <div className="mt-2 space-y-4 text-xs text-ink-soft">
       <p>Workspace V{projection.schemaVersion} · revision {revision}</p>
+      <p className="rounded border border-accent/20 bg-accent-soft p-3 text-accent">工作空间仅用于查看。要修改创意、脚本、资产或分镜，请在左侧对话中直接描述你的要求。</p>
       {projection.awaitingProductionConstraints ? <p className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-900">存在待确认的生产约束。</p> : null}
-      {conflict ? <p className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-900" role="alert">{conflict}</p> : null}
 
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle("创意与生产约束")}
         <div className="grid gap-2 sm:grid-cols-2">
           {creativeFieldKeys.map((key) => (
-            <label key={key} className="space-y-1">
-              <span>{creativeLabels[key] ?? key}</span>
-              <input
-                className="w-full rounded border border-line bg-surface px-2 py-1 text-ink"
-                value={creativeDraft[key] ?? ""}
-                onChange={(event) => { setCreativeDirty(true); setCreativeDraft((current) => ({ ...current, [key]: event.target.value })); }}
-              />
-            </label>
+            <article key={key} className="rounded bg-surface p-3">
+              <p>{creativeLabels[key] ?? key}</p>
+              <p className="mt-1 break-words font-medium text-ink">{projection.creativeBrief[key]}</p>
+            </article>
           ))}
         </div>
-        <button className="rounded border border-line px-2 py-1 disabled:opacity-50" disabled={saving !== null || !creativeDirty} onClick={() => void save("creative")}>
-          {saving === "creative" ? "保存中…" : `保存约束（r${revision}）`}
-        </button>
+        {creativeFieldKeys.length === 0 ? <p>暂无已确认的生产约束。</p> : null}
       </section>
 
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle("叙事与脚本")}
-        {visiblePrimaryNarrativeKeys.map(narrativeEditor)}
+        {visiblePrimaryNarrativeKeys.map(narrativeFact)}
         {visiblePrimaryNarrativeKeys.length === 0 ? <p>尚未填写叙事约束。</p> : null}
         {visibleOptionalNarrativeKeys.length > 0 ? (
           <details className="rounded bg-surface p-2">
             <summary className="cursor-pointer text-ink">人物与世界观</summary>
-            <div className="mt-2 space-y-2">{visibleOptionalNarrativeKeys.map(narrativeEditor)}</div>
+            <div className="mt-2 space-y-2">{visibleOptionalNarrativeKeys.map(narrativeFact)}</div>
           </details>
         ) : null}
         {visibleExtendedNarrativeKeys.length > 0 ? (
           <details className="rounded bg-surface p-2">
             <summary className="cursor-pointer text-ink">更多叙事约束</summary>
-            <div className="mt-2 space-y-2">{visibleExtendedNarrativeKeys.map(narrativeEditor)}</div>
+            <div className="mt-2 space-y-2">{visibleExtendedNarrativeKeys.map(narrativeFact)}</div>
           </details>
         ) : null}
-        {addingNarrative ? (
-          <div className="space-y-2 rounded border border-line bg-surface p-2">
-            <label className="block space-y-1">
-              <span>选择要添加的叙事约束</span>
-              <select className="w-full rounded border border-line bg-surface px-2 py-1 text-ink" value={narrativeKeyToAdd} onChange={(event) => setNarrativeKeyToAdd(event.target.value)}>
-                {Object.entries(narrativeLabels).filter(([key]) => !narrativeDraft[key]?.trim()).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-              </select>
-            </label>
-            {narrativeEditor(narrativeKeyToAdd)}
-            <button className="rounded border border-line px-2 py-1" onClick={() => setAddingNarrative(false)}>完成添加</button>
-          </div>
-        ) : (
-          <button className="rounded border border-line px-2 py-1" onClick={() => setAddingNarrative(true)}>添加叙事约束</button>
-        )}
-        <button className="rounded border border-line px-2 py-1 disabled:opacity-50" disabled={saving !== null || !narrativeDirty} onClick={() => void save("narrative")}>
-          {saving === "narrative" ? "保存中…" : `保存叙事与脚本（r${revision}）`}
-        </button>
       </section>
 
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle(`资产注册表（${projection.assets.length}）`)}
         {projection.assets.map((asset) => (
-          <article key={asset.assetId} className="rounded bg-surface p-2">
-            <p className="font-medium text-ink">{asset.slot} · {asset.role}</p>
-            <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
-            {asset.generationPrompt ? <details><summary>资产生成提示词</summary><p className="mt-1 whitespace-pre-wrap">{asset.generationPrompt}</p></details> : null}
-            {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
-            {asset.operationStatus ? <p>生成任务：{statusLabel(asset.operationStatus)}</p> : null}
-            {asset.artifactRef ? <p>Artifact：{asset.artifactRef}</p> : null}
+          <article key={asset.assetId} className="flex gap-3 rounded bg-surface p-3">
+            {asset.origin === "existing_material" ? <WorkspaceAssetThumbnail conversationId={conversationId} workspaceId={workspaceId} assetId={asset.assetId} alt={asset.role} /> : null}
+            <div className="min-w-0">
+              <p className="font-medium text-ink">{asset.slot} · {asset.role}</p>
+              <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
+              {asset.generationPrompt ? <details><summary>资产生成提示词</summary><p className="mt-1 whitespace-pre-wrap">{asset.generationPrompt}</p></details> : null}
+              {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
+              {asset.operationStatus ? <p>生成任务：{statusLabel(asset.operationStatus)}</p> : null}
+              {asset.artifactRef ? <p className="truncate">Artifact：{asset.artifactRef}</p> : null}
+            </div>
           </article>
         ))}
         {projection.assets.length === 0 ? <p>暂无资产注册记录。</p> : null}
