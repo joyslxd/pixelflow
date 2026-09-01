@@ -42,6 +42,10 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     recoveringRunId,
   } = useAgentConversation(conversationId ?? routeConversationId);
   const snapshot = runtime.snapshot;
+  // Snapshot 是刷新/重连后的权威运行态；不能只依赖 inputStatus（hydrate 期间可能尚未收到状态事件）。
+  const agentBusy = runtime.inputStatus !== "idle"
+    || snapshot?.status === "accepted"
+    || snapshot?.status === "running";
   const visible = useMemo(() => projectVisible(runtime), [runtime]);
   const recoveryRequired = isRecoveryRequired(snapshot)
     && detail?.latest_harness_run_is_user_turn === true;
@@ -123,7 +127,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
           <OperationProgress operations={runtime.operations} />
           <Composer
             canSend={canSend && detail !== null}
-            sending={runtime.inputStatus === "sending"}
+            sending={agentBusy}
             inputStatus={runtime.inputStatus}
             onSubmit={submitTurn}
           />
