@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +17,9 @@ from .contracts import HarnessRunRequest, HarnessRunState, RunStatus
 from .deepseek_engine import DeepSeekHarnessEngine
 from .event_store import RunRequestConflictError, SqliteRunEventStore
 from .run_service import RunActivationError, RunService
+
+
+logger = logging.getLogger(__name__)
 
 
 def _cordis_path() -> str:
@@ -99,6 +103,12 @@ def create_app(settings: SidecarSettings | None = None) -> FastAPI:
         except RunRequestConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "run_request_conflict"}) from exc
         except ValueError as exc:
+            # 这里只记录本服务主动定义的协议/配置拒绝原因；不记录请求正文、
+            # Tool 参数、模型响应或任何下游异常，以便 Gateway 503 可排障。
+            logger.warning(
+                "sidecar_run_rejected reason_code=%s",
+                _safe_run_rejection_code(exc),
+            )
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "run_request_rejected"}) from exc
 
     @app.post("/internal/v1/runs/{run_id}/activate", response_model=HarnessRunState)
@@ -181,3 +191,18 @@ def create_app(settings: SidecarSettings | None = None) -> FastAPI:
         )
 
     return app
+
+
+def _safe_run_rejection_code(error: ValueError) -> str:
+    """将 Sidecar 主动定义的 Run 拒绝语义收敛为固定日志码。"""
+
+    reason = str(error)
+    if reason == "模型档案与 Sidecar 启动配置不匹配":
+        return "model_profile_name_mismatch"
+    if reason == "模型档案摘要与 Sidecar 启动配置不匹配":
+        return "model_profile_digest_mismatch"
+    if reason.startswith("Run 限制"):
+        return "run_limits_mismatch"
+    if reason.startswith("Skill "):
+        return "skill_snapshot_invalid"
+    return "run_request_rejected"
