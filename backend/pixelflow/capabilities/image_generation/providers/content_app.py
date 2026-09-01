@@ -16,6 +16,9 @@ from pixelflow.operations.jobs.providers import (
     ProviderJobOutcome,
     ProviderJobSnapshot,
 )
+from pixelflow.platform.content_app_authorization import (
+    TransientContentAppAuthorizationStore,
+)
 
 _ENDPOINTS = {
     "text_to_image": "/picture/text_to_image",
@@ -55,12 +58,20 @@ class ContentAppImageProviderSettings:
 class ContentAppImageGenerationAdapter:
     """将图片生成请求映射到 Content-App，Authorization 仅用于当前 start。"""
 
-    def __init__(self, settings: ContentAppImageProviderSettings, *, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: ContentAppImageProviderSettings,
+        *,
+        client: httpx.AsyncClient | None = None,
+        authorization_store: TransientContentAppAuthorizationStore | None = None,
+    ) -> None:
         self._settings = settings
         self.provider_id = settings.provider_id
         self.profile_version = settings.profile_version
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(connect=settings.connect_timeout_seconds, read=settings.read_timeout_seconds, write=settings.read_timeout_seconds, pool=settings.connect_timeout_seconds))
+        self._authorization_store = authorization_store or TransientContentAppAuthorizationStore()
+        self._owns_authorization_store = authorization_store is None
 
     def prepare_operation_request(self, request: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         mode = str(request.get("generation_mode") or "").strip()
@@ -89,7 +100,13 @@ class ContentAppImageGenerationAdapter:
             if response.status_code == 402:
                 return _quota_snapshot()
             response.raise_for_status()
-            return _to_snapshot(response.json(), expected_job_id=None)
+            snapshot = _to_snapshot(response.json(), expected_job_id=None)
+            if snapshot.provider_job_id is not None and snapshot.outcome is ProviderJobOutcome.POLLING:
+                await self._authorization_store.put_job(
+                    provider_job_id=snapshot.provider_job_id,
+                    authorization=_bearer(authorization),
+                )
+            return snapshot
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 402:
                 return _quota_snapshot()
@@ -98,12 +115,20 @@ class ContentAppImageGenerationAdapter:
             raise RuntimeError("content_app_image_start_failed") from exc
 
     async def status(self, provider_job_id: str, *, user_id: str, conversation_id: str) -> ProviderJobSnapshot:
-        del user_id, conversation_id
+        del conversation_id
         try:
-            response = await self._client.get(f"{self._settings.base_url}/task/{provider_job_id}/status")
+            authorization = await self._authorization_store.borrow(
+                provider_job_id=provider_job_id,
+                user_id=user_id,
+            )
+            response = await self._client.get(
+                f"{self._settings.base_url}/task/{provider_job_id}/status",
+                headers={"Authorization": authorization},
+            )
             if response.status_code == 402:
                 return _quota_snapshot(provider_job_id)
             if response.status_code == 404:
+                await self._authorization_store.discard_job(provider_job_id=provider_job_id)
                 return ProviderJobSnapshot(provider_job_id=provider_job_id, outcome=ProviderJobOutcome.EXPIRED, reason_code="provider_job_expired", message="供应商原任务已过期，需要用户手动重新发起。")
             response.raise_for_status()
             return _to_snapshot(response.json(), expected_job_id=provider_job_id)
@@ -111,6 +136,8 @@ class ContentAppImageGenerationAdapter:
             raise RuntimeError("content_app_image_status_failed") from exc
 
     async def aclose(self) -> None:
+        if self._owns_authorization_store:
+            await self._authorization_store.aclose()
         if self._owns_client:
             await self._client.aclose()
 

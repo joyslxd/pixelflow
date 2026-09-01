@@ -66,6 +66,28 @@ async def test_content_app_image_adapter_maps_task_and_image_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_content_app_image_adapter_reuses_authorization_for_status() -> None:
+    requests: list[tuple[str, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith("text_to_image"):
+            return httpx.Response(200, json={"data": {"taskId": "img-task-auth", "status": "processing"}})
+        return httpx.Response(200, json={"data": {"taskId": "img-task-auth", "status": "completed", "images": ["https://assets.example/image.png"]}})
+
+    adapter = ContentAppImageGenerationAdapter(
+        ContentAppImageProviderSettings("https://content.example/api", "image", "v1"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    await adapter.start({"generation_mode": "text_to_image", "prompt": "厨房", "model": "seeddream-5.0", "ratio": "1:1", "size": "1080p"}, authorization="Bearer transient", idempotency_key="operation-key")
+    snapshot = await adapter.status("img-task-auth", user_id="user", conversation_id="conversation")
+
+    assert snapshot.outcome.value == "succeeded"
+    assert requests[-1] == ("/api/task/img-task-auth/status", "Bearer transient")
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_generate_image_assets_creates_batch_for_planned_assets() -> None:
     repository = MemoryOperationBatchRepository()
     workspace = VideoWorkspace(

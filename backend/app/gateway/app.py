@@ -271,7 +271,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_video_generation_provider = video_provider
             image_provider_settings = ContentAppImageProviderSettings.from_env()
             image_provider = (
-                ContentAppImageGenerationAdapter(image_provider_settings)
+                ContentAppImageGenerationAdapter(
+                    image_provider_settings,
+                    authorization_store=content_app_authorization_store,
+                )
                 if image_provider_settings is not None
                 else None
             )
