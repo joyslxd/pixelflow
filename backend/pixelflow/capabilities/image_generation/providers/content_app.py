@@ -33,6 +33,7 @@ class ContentAppImageProviderSettings:
     profile_version: str
     connect_timeout_seconds: float = 10
     read_timeout_seconds: float = 30
+    project_id: str = "1"
 
     @classmethod
     def from_env(cls) -> ContentAppImageProviderSettings | None:
@@ -46,6 +47,8 @@ class ContentAppImageProviderSettings:
             base_url=base_url,
             provider_id=os.environ.get("PIXELFLOW_M06_IMAGE_PROVIDER_ID", "content-app-image"),
             profile_version=os.environ.get("PIXELFLOW_M06_IMAGE_PROVIDER_PROFILE_VERSION", "v1"),
+            # 用途：复用 content-app 图片生成的项目计费上下文；影响：缺省与当前 admin 图片创作页一致。
+            project_id=os.environ.get("PIXELFLOW_M06_IMAGE_PROJECT_ID", "1").strip() or "1",
         )
 
 
@@ -72,6 +75,7 @@ class ContentAppImageGenerationAdapter:
         try:
             response = await self._client.post(
                 f"{self._settings.base_url}{_ENDPOINTS[mode]}",
+                params={"projectId": self._settings.project_id},
                 headers={
                     "Authorization": _bearer(authorization),
                     "Idempotency-Key": idempotency_key,
@@ -128,11 +132,33 @@ class _ExistingImageJobService:
 
 
 def _start_payload(request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """映射 content-app 文生图 DTO，比例以 width/height 传递而非 ratio。"""
+
     mode = str(request["generation_mode"])
-    payload: dict[str, JsonValue] = {"prompt": str(request["prompt"]), "model": str(request["model"]), "size": str(request["size"]), "ratio": str(request["ratio"]), "num_images": 1}
+    width, height = _ratio_dimensions(str(request["ratio"]))
+    model = str(request["model"])
+    payload: dict[str, JsonValue] = {
+        "prompt": str(request["prompt"]),
+        "model": model,
+        "model_version": model,
+        "width": width,
+        "height": height,
+        "imageSize": str(request["size"]),
+        "num": 1,
+        "oldFileOrderList": [],
+    }
     if mode == "reference_image":
         payload["reference_image_urls"] = list(_strings(request.get("reference_image_urls")))
     return payload
+
+
+def _ratio_dimensions(ratio: str) -> tuple[str, str]:
+    """将工作区比例转换为 content-app 图片接口的 width/height 字符串。"""
+
+    parts = ratio.strip().split(":", 1)
+    if len(parts) != 2 or not all(part.isdigit() and 0 < int(part) <= 99 for part in parts):
+        raise ValueError("image_generation_ratio_invalid")
+    return parts[0], parts[1]
 
 
 def _to_snapshot(payload: Mapping[str, object], *, expected_job_id: str | None) -> ProviderJobSnapshot:

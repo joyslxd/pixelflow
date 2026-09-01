@@ -99,8 +99,8 @@ def _image_generation_request(
         # 资产注册表是唯一 Prompt 来源，创意 Brief 和生产合同不得拼接到图片 Prompt。
         "prompt": prompt,
         "model": str(asset.get("model") or "seeddream-5.0"),
-        # 默认 2K；只有未来接入模型能力档案后才可将已声明支持 4K 的模型提升到 4K。
-        "size": "2k",
+        # Seedream 5.0 当前 content-app 生图页实际支持并计费的默认清晰度是 1080p。
+        "size": str(asset.get("size") or "1080p"),
         "ratio": ratio,
         "reference_image_urls": asset.get("reference_image_urls") or [],
     }

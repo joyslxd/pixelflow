@@ -50,8 +50,17 @@ async def test_content_app_image_adapter_maps_task_and_image_result() -> None:
 
     assert snapshot.provider_job_id == "img-task-1"
     assert snapshot.outcome.value == "polling"
-    assert seen["url"] == "https://content.example/api/picture/text_to_image"
-    assert seen["json"] == {"prompt": "厨房", "model": "seeddream-5.0", "size": "1080p", "ratio": "9:16", "num_images": 1}
+    assert seen["url"] == "https://content.example/api/picture/text_to_image?projectId=1"
+    assert seen["json"] == {
+        "prompt": "厨房",
+        "model": "seeddream-5.0",
+        "model_version": "seeddream-5.0",
+        "width": "9",
+        "height": "16",
+        "imageSize": "1080p",
+        "num": 1,
+        "oldFileOrderList": [],
+    }
     assert seen["headers"]["modeltype"] == "seeddream-5.0"
     assert seen["headers"]["billtype"] == "2"
 
@@ -113,7 +122,7 @@ async def test_generate_image_assets_unavailable_result_matches_manifest_observa
     assert set(result.model_observation).issubset(tool.spec.model_observation_keys)
 
 
-def test_image_generation_request_uses_workspace_ratio_2k_and_asset_prompt() -> None:
+def test_image_generation_request_uses_workspace_ratio_1080p_and_asset_prompt() -> None:
     request = _image_generation_request(
         {
             "creative_brief": {"aspect_ratio": "9:16"},
@@ -129,7 +138,7 @@ def test_image_generation_request_uses_workspace_ratio_2k_and_asset_prompt() -> 
 
     assert request["prompt"] == "资产注册表中的唯一图片提示词"
     assert request["ratio"] == "16:9"
-    assert request["size"] == "2k"
+    assert request["size"] == "1080p"
 
 
 def test_image_operation_stage_matches_batch_child_identity() -> None:
