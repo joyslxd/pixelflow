@@ -2,6 +2,7 @@
 
 from .batch import (
     MAX_CHILD_OPERATIONS_PER_BATCH,
+    MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH,
     OperationBatchChild,
     OperationBatchPlan,
     build_operation_batch_completion_event_id,
@@ -75,6 +76,7 @@ __all__ = [
     "OperationCompletionRecord",
     "OperationCoordinator",
     "MAX_CHILD_OPERATIONS_PER_BATCH",
+    "MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH",
     "MemoryOperationBatchRepository",
     "OperationBatchChild",
     "OperationBatchChildRecord",

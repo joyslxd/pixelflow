@@ -19,6 +19,7 @@ from pixelflow.agent_tools.video.credential_store import TransientBatchCredentia
 from pixelflow.agent_tools.video.scene import SceneGenerationBatchResult, SceneGenerationJob
 from pixelflow.operations.jobs import (
     MAX_CHILD_OPERATIONS_PER_BATCH,
+    MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH,
     OperationBatchRecord,
     OperationBatchRepository,
     OperationStartCoordinator,
@@ -232,7 +233,7 @@ class M06SceneGenerationBatchDispatcher:
         operation_port: M06SceneGenerationOperationPort,
         max_concurrent_child_operations_per_batch: int = 6,
     ) -> None:
-        if not 1 <= max_concurrent_child_operations_per_batch <= 6:
+        if not 1 <= max_concurrent_child_operations_per_batch <= MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH:
             raise ValueError("每批次并发子 Operation 必须在 1 到 6 之间")
         self._batch_repository = batch_repository
         self._operation_port = operation_port
@@ -245,15 +246,16 @@ class M06SceneGenerationBatchDispatcher:
         context: VideoToolContext,
         scenes_by_id: Mapping[str, Mapping[str, JsonValue]],
         attempt: int,
+        now: datetime | None = None,
     ) -> dict[str, SceneGenerationJob]:
         """按槽位启动子 Operation，并把 Job 身份或终态原子回写批次。"""
 
         claimed = await self._batch_repository.claim_children(
             batch_id=batch.batch_id,
             max_concurrent=self._max_concurrent,
+            now=now,
         )
-        jobs: dict[str, SceneGenerationJob] = {}
-        for child in claimed:
+        async def dispatch_child(child) -> tuple[str, SceneGenerationJob]:
             scene = scenes_by_id.get(child.scene_id)
             if scene is None:
                 await self._batch_repository.mark_child_terminal(
@@ -262,13 +264,12 @@ class M06SceneGenerationBatchDispatcher:
                     status="failed",
                     job_id=child.operation_idempotency_key,
                 )
-                jobs[child.operation_idempotency_key] = SceneGenerationJob(
+                return child.operation_idempotency_key, SceneGenerationJob(
                     job_id=child.operation_idempotency_key,
                     scene_id=child.scene_id,
                     variant_index=child.variant_index,
                     status="failed",
                 )
-                continue
             try:
                 job = await self._operation_port.start_scene_variant(
                     context,
@@ -285,13 +286,12 @@ class M06SceneGenerationBatchDispatcher:
                     status="failed",
                     job_id=child.operation_idempotency_key,
                 )
-                jobs[child.operation_idempotency_key] = SceneGenerationJob(
+                return child.operation_idempotency_key, SceneGenerationJob(
                     job_id=child.operation_idempotency_key,
                     scene_id=child.scene_id,
                     variant_index=child.variant_index,
                     status="failed",
                 )
-                continue
             if (
                 job.scene_id != child.scene_id
                 or job.variant_index != child.variant_index
@@ -310,8 +310,10 @@ class M06SceneGenerationBatchDispatcher:
                     child_key=child.operation_idempotency_key,
                     job_id=job.job_id,
                 )
-            jobs[child.operation_idempotency_key] = job
-        return jobs
+            return child.operation_idempotency_key, job
+
+        results = await asyncio.gather(*(dispatch_child(child) for child in claimed))
+        return dict(results)
 
 
 class M06SceneGenerationBatchOperationPort:
@@ -443,6 +445,7 @@ class M06SceneGenerationBatchDispatcherWorker:
         worker_id: str,
         scan_interval: timedelta = timedelta(seconds=1),
         scan_limit: int = 100,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not worker_id.strip() or scan_interval <= timedelta(0) or scan_limit < 1:
             raise ValueError("批次 Dispatcher Worker 配置无效")
@@ -453,6 +456,7 @@ class M06SceneGenerationBatchDispatcherWorker:
         self._worker_id = worker_id.strip()
         self._scan_interval = scan_interval
         self._scan_limit = scan_limit
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._wake = asyncio.Event()
@@ -466,7 +470,8 @@ class M06SceneGenerationBatchDispatcherWorker:
         """处理所有当前可安全启动的批次；无授权只保留队列，不伪造 Provider start。"""
 
         dispatched = 0
-        for batch in await self._batches.list_dispatchable_batches(limit=self._scan_limit):
+        now = self._clock()
+        for batch in await self._batches.list_dispatchable_batches(limit=self._scan_limit, now=now):
             credential = await self._credentials.get(batch_id=batch.batch_id)
             if credential is None:
                 # 用户 Authorization 不得持久化。重启或租约过期后，等待新的显式授权。
@@ -504,6 +509,7 @@ class M06SceneGenerationBatchDispatcherWorker:
                     ),
                     scenes_by_id=scenes_by_id,
                     attempt=batch.attempt,
+                    now=now,
                 )
                 dispatched += 1
             except Exception as exc:  # noqa: BLE001 - 保留状态给下一轮与 M06 lease 恢复。

@@ -319,6 +319,7 @@ class OperationRecoveryRuntime:
         poll_interval: timedelta = timedelta(seconds=2),
         scan_interval: timedelta = timedelta(seconds=1),
         scan_limit: int = 100,
+        max_concurrent_polls: int = 6,
     ) -> None:
         if not isinstance(resolver, ProviderJobAdapterResolver):
             raise TypeError("resolver 必须实现 ProviderJobAdapterResolver")
@@ -331,6 +332,8 @@ class OperationRecoveryRuntime:
             raise TypeError("quota_resumer 必须实现 WorkflowGraphQuotaStatePort")
         if isinstance(scan_limit, bool) or not isinstance(scan_limit, int) or scan_limit < 1 or scan_limit > 1000:
             raise ValueError("scan_limit 必须是 1 到 1000 的整数")
+        if isinstance(max_concurrent_polls, bool) or not isinstance(max_concurrent_polls, int) or not 1 <= max_concurrent_polls <= 32:
+            raise ValueError("max_concurrent_polls 必须是 1 到 32 的整数")
         self._repository = repository
         self._resolver = resolver
         self._resumer = resumer
@@ -355,6 +358,7 @@ class OperationRecoveryRuntime:
             scan_interval,
         )
         self._scan_limit = scan_limit
+        self._max_concurrent_polls = max_concurrent_polls
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -400,30 +404,38 @@ class OperationRecoveryRuntime:
             now=self._clock(),
             limit=self._scan_limit,
         )
-        for candidate in due:
-            if not await self._accept_candidate(candidate.user_id, candidate.operation):
-                continue
-            try:
-                operation = candidate.operation
-                adapter = self._resolver.resolve(operation.stage)
-                claim_time = self._clock()
-                claimed = await self._repository.claim_operation_lease(
-                    candidate.user_id,
-                    operation.conversation_id,
-                    operation.job_id,
-                    lease_owner=self._worker_id,
-                    now=claim_time,
-                    lease_expires_at=claim_time + self._lease_duration,
-                )
-                if claimed is None:
-                    continue
-                await self._poll_claimed(
-                    candidate.user_id,
-                    claimed,
-                    adapter=adapter,
-                )
-            except Exception as exc:
-                self._log_candidate_failure("operation_poll", exc)
+        accepted_due = [
+            candidate
+            for candidate in due
+            if await self._accept_candidate(candidate.user_id, candidate.operation)
+        ]
+        semaphore = asyncio.Semaphore(self._max_concurrent_polls)
+
+        async def poll_candidate(candidate) -> None:
+            async with semaphore:
+                try:
+                    operation = candidate.operation
+                    adapter = self._resolver.resolve(operation.stage)
+                    claim_time = self._clock()
+                    claimed = await self._repository.claim_operation_lease(
+                        candidate.user_id,
+                        operation.conversation_id,
+                        operation.job_id,
+                        lease_owner=self._worker_id,
+                        now=claim_time,
+                        lease_expires_at=claim_time + self._lease_duration,
+                    )
+                    if claimed is None:
+                        return
+                    await self._poll_claimed(
+                        candidate.user_id,
+                        claimed,
+                        adapter=adapter,
+                    )
+                except Exception as exc:
+                    self._log_candidate_failure("operation_poll", exc)
+
+        await asyncio.gather(*(poll_candidate(candidate) for candidate in accepted_due))
 
     async def _accept_candidate(self, user_id: str, operation: OperationRecord) -> bool:
         """可选范围过滤使多个 M06 Worker 不会互相领取不属于自己的 Operation。"""

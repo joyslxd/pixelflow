@@ -12,7 +12,10 @@ from pixelflow.agent_control_plane.contracts.base import ContractModel
 from ..ports import OperationConflictError
 from .identity import build_operation_idempotency_key
 
-MAX_CHILD_OPERATIONS_PER_BATCH = 6
+# 逻辑批次容量与并发窗口分离：一个用户请求可以保留完整 child 集合，
+# Dispatcher 仍只允许有限数量的 child 同时 start/polling。
+MAX_CHILD_OPERATIONS_PER_BATCH = 120
+MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH = 6
 
 
 class OperationBatchChild(ContractModel):
@@ -66,7 +69,9 @@ def build_operation_batch_plan(
         for variant_index in range(1, variant_count + 1)
     )
     if len(child_pairs) > MAX_CHILD_OPERATIONS_PER_BATCH:
-        raise OperationConflictError("单个计费批次最多包含 6 个子 Operation")
+        raise OperationConflictError(
+            f"单个计费批次最多包含 {MAX_CHILD_OPERATIONS_PER_BATCH} 个子 Operation"
+        )
     # 一个 Tool Call 可选择很多镜头；拆分后的每个批次都必须有稳定且不同的身份。
     # batch_index 只由 Gateway 按用户选择镜头的稳定顺序派生，模型不参与身份生成。
     batch_identity_payload: dict[str, Any] = {
@@ -119,6 +124,7 @@ def _digest(value: dict[str, Any]) -> str:
 
 __all__ = [
     "MAX_CHILD_OPERATIONS_PER_BATCH",
+    "MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH",
     "OperationBatchChild",
     "OperationBatchPlan",
     "build_operation_batch_completion_event_id",

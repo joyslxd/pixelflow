@@ -15,8 +15,10 @@ from pixelflow.capabilities.image_generation import (
     ContentAppImageProviderSettings,
 )
 from pixelflow.operations.jobs.batch import build_operation_batch_plan
+from pixelflow.operations.jobs.batch_callback import OperationBatchTerminalCallback
 from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepository
 from pixelflow.video.adapters.operations.images import (
+    ImageGenerationJob,
     M06ImageGenerationBatchDispatcher,
     M06ImageGenerationBatchDispatcherWorker,
     M06ImageGenerationBatchOperationPort,
@@ -271,6 +273,7 @@ async def test_image_worker_marks_stale_starting_child_failed_when_credential_is
         credential_store=TransientBatchCredentialStore(),
         worker_id="test-image-worker",
         scan_interval=timedelta(seconds=1),
+        clock=lambda: datetime.now(UTC) + timedelta(seconds=31),
     )
 
     await worker.run_once()
@@ -284,6 +287,109 @@ async def test_image_worker_marks_stale_starting_child_failed_when_credential_is
     assert current is not None
     assert current.children[0].status == "failed"
     assert "image_batch_starting_credential_missing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_image_worker_migrates_legacy_workspace_assets_before_dispatch() -> None:
+    """Dispatcher 必须读取数据库中尚未写入 V2 标记的旧 Workspace 资产。"""
+
+    class RecordingOperationPort:
+        def __init__(self) -> None:
+            self.asset_ids: list[str] = []
+
+        async def start_asset(self, _context: object, *, asset: object, **_kwargs: object) -> ImageGenerationJob:
+            self.asset_ids.append(str(asset["asset_id"]))  # type: ignore[index]
+            return ImageGenerationJob(job_id="operation:image:legacy", asset_id=str(asset["asset_id"]), status="polling")  # type: ignore[index]
+
+    repository = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "e" * 32,
+        tool_call_id="call_image_legacy",
+        scene_ids=("asset_char_lead_01",),
+        variant_count=1,
+        attempt=1,
+        stage_prefix="generate_image_asset",
+    )
+    batch = await repository.create_or_read(
+        user_id="user",
+        conversation_id="conversation-images",
+        workspace_id="workspace-images-legacy",
+        plan=plan,
+        run_id="hrun_" + "e" * 32,
+        tool_call_id="call_image_legacy",
+        attempt=1,
+    )
+    videos = MemoryVideoAgentRepository()
+    await videos.create_workspace(
+        "user",
+        VideoWorkspace(
+            workspace_id="workspace-images-legacy",
+            conversation_id="conversation-images",
+            revision=1,
+            payload={
+                "global_assets": {
+                    "characters": [{
+                        "asset_id": "asset_char_lead_01",
+                        "name": "女主",
+                        "generation_prompt": "女主参考图",
+                    }],
+                },
+            },
+        ),
+    )
+    credentials = TransientBatchCredentialStore()
+    await credentials.put(batch_id=batch.batch_id, authorization="credential")
+    operation_port = RecordingOperationPort()
+    worker = M06ImageGenerationBatchDispatcherWorker(
+        batch_repository=repository,
+        video_repository=videos,
+        dispatcher=M06ImageGenerationBatchDispatcher(
+            batch_repository=repository,
+            operation_port=operation_port,  # type: ignore[arg-type]
+        ),
+        credential_store=credentials,
+        worker_id="test-image-worker-legacy",
+    )
+
+    assert await worker.run_once() == 1
+    assert operation_port.asset_ids == ["asset_char_lead_01"]
+
+
+@pytest.mark.asyncio
+async def test_image_callback_migrates_legacy_workspace_assets_before_projection() -> None:
+    """图片终态回调必须沿用 Worker 的 V2 资产匹配边界。"""
+
+    videos = MemoryVideoAgentRepository()
+    await videos.create_workspace(
+        "user",
+        VideoWorkspace(
+            workspace_id="workspace-images-callback-legacy",
+            conversation_id="conversation-images",
+            revision=1,
+            payload={
+                "global_assets": {
+                    "characters": [{"asset_id": "asset_char_lead_01", "name": "女主"}],
+                },
+            },
+        ),
+    )
+    callback = OperationBatchTerminalCallback(
+        batch_repository=MemoryOperationBatchRepository(),
+        video_repository=videos,
+    )
+
+    await callback._project_image_asset_terminal(  # noqa: SLF001
+        batch_workspace_id="workspace-images-callback-legacy",
+        user_id="user",
+        asset_stage=f"generate_image_asset:{_image_operation_stage('asset_char_lead_01').split(':')[1]}:v1",
+        status="succeeded",
+        payload={"result": {"artifact_ref": "artifact:image:legacy", "image_url": "https://cdn.example/legacy.png"}},
+        now=datetime.now(UTC),
+    )
+
+    current = await videos.get_workspace("user", "workspace-images-callback-legacy")
+    assert current is not None
+    assert current.payload["asset_registry"][0]["state"] == "ready"
 
 
 @pytest.mark.asyncio

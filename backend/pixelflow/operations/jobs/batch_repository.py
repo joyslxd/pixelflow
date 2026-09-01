@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +22,7 @@ from .batch import OperationBatchPlan, build_operation_batch_completion_event_id
 
 ChildStatus = Literal["queued", "starting", "polling", "succeeded", "failed", "timeout", "expired"]
 _TERMINAL = frozenset({"succeeded", "failed", "timeout", "expired"})
+STARTING_CHILD_LEASE_DURATION = timedelta(seconds=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,7 @@ class OperationBatchChildRecord:
     variant_index: int
     status: ChildStatus
     job_id: str | None
+    started_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,16 @@ class OperationBatchOutboxRecord:
     resume_run_id: str | None
 
 
+def _utc(value: datetime) -> datetime:
+    """统一内存与 SQLite 返回的有/无时区时间，避免 lease 比较异常。"""
+
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _starting_expired(started_at: datetime | None, now: datetime) -> bool:
+    return started_at is None or _utc(started_at) + STARTING_CHILD_LEASE_DURATION <= _utc(now)
+
+
 class OperationBatchRepository(Protocol):
     async def create_or_read(
         self,
@@ -72,8 +84,8 @@ class OperationBatchRepository(Protocol):
         attempt: int | None = None,
         source_workspace_revision: int | None = None,
     ) -> OperationBatchRecord: ...
-    async def claim_children(self, *, batch_id: str, max_concurrent: int) -> tuple[OperationBatchChildRecord, ...]: ...
-    async def list_dispatchable_batches(self, *, limit: int) -> tuple[OperationBatchRecord, ...]: ...
+    async def claim_children(self, *, batch_id: str, max_concurrent: int, now: datetime | None = None) -> tuple[OperationBatchChildRecord, ...]: ...
+    async def list_dispatchable_batches(self, *, limit: int, now: datetime | None = None) -> tuple[OperationBatchRecord, ...]: ...
 
     async def mark_child_polling(self, *, batch_id: str, child_key: str, job_id: str) -> OperationBatchRecord: ...
     async def mark_child_terminal(self, *, batch_id: str, child_key: str, status: ChildStatus, job_id: str) -> OperationBatchRecord: ...
@@ -148,34 +160,56 @@ class MemoryOperationBatchRepository:
                 raise AgentRuntimeRecordConflictError("OperationBatch 幂等键被不同请求占用")
             return existing
 
-    async def claim_children(self, *, batch_id: str, max_concurrent: int) -> tuple[OperationBatchChildRecord, ...]:
+    async def claim_children(self, *, batch_id: str, max_concurrent: int, now: datetime | None = None) -> tuple[OperationBatchChildRecord, ...]:
         if max_concurrent < 1:
             raise ValueError("批次并发槽位必须为正整数")
         async with self._lock:
             record = self._by_id(batch_id)
-            # starting 无批次级 lease：重启或进程崩溃后可以安全重领。真正的
-            # Provider 去重由同一 child key 对应的 M06 Operation start lease 保证。
-            active = sum(child.status == "polling" for child in record.children)
+            observed_at = now or datetime.now(UTC)
+            active = sum(
+                child.status == "polling"
+                or (
+                    child.status == "starting"
+                    and not _starting_expired(child.started_at, observed_at)
+                )
+                for child in record.children
+            )
             slots = max(0, max_concurrent - active)
             claimed: list[OperationBatchChildRecord] = []
             children: list[OperationBatchChildRecord] = []
             for child in record.children:
-                if child.status in {"queued", "starting"} and len(claimed) < slots:
-                    child = OperationBatchChildRecord(child.operation_idempotency_key, child.scene_id, child.variant_index, "starting", child.job_id)
+                starting_expired = child.status == "starting" and _starting_expired(child.started_at, observed_at)
+                if (child.status == "queued" or starting_expired) and len(claimed) < slots:
+                    child = OperationBatchChildRecord(
+                        child.operation_idempotency_key,
+                        child.scene_id,
+                        child.variant_index,
+                        "starting",
+                        child.job_id,
+                        observed_at,
+                    )
                     claimed.append(child)
                 children.append(child)
             self._replace(record, children=tuple(children), status="running" if claimed else record.status)
             return tuple(claimed)
 
-    async def list_dispatchable_batches(self, *, limit: int) -> tuple[OperationBatchRecord, ...]:
+    async def list_dispatchable_batches(self, *, limit: int, now: datetime | None = None) -> tuple[OperationBatchRecord, ...]:
         if limit < 1:
             raise ValueError("批次扫描上限必须为正整数")
+        observed_at = now or datetime.now(UTC)
         async with self._lock:
             return tuple(
                 record
                 for record in self._records.values()
                 if record.status in {"queued", "running"}
-                and any(child.status in {"queued", "starting"} for child in record.children)
+                and any(
+                    child.status == "queued"
+                    or (
+                        child.status == "starting"
+                        and _starting_expired(child.started_at, observed_at)
+                    )
+                    for child in record.children
+                )
             )[:limit]
 
     async def mark_child_terminal(self, *, batch_id: str, child_key: str, status: ChildStatus, job_id: str) -> OperationBatchRecord:
@@ -192,7 +226,7 @@ class MemoryOperationBatchRepository:
                     if existing.status != status or existing.job_id != job_id:
                         raise AgentRuntimeRecordConflictError("子 Operation 终态漂移")
                     return record
-            children = tuple(OperationBatchChildRecord(child.operation_idempotency_key, child.scene_id, child.variant_index, status, job_id) if child.operation_idempotency_key == child_key else child for child in record.children)
+            children = tuple(OperationBatchChildRecord(child.operation_idempotency_key, child.scene_id, child.variant_index, status, job_id, None) if child.operation_idempotency_key == child_key else child for child in record.children)
             completed = all(child.status in _TERMINAL for child in children)
             return self._replace(record, children=children, status="completed" if completed else "running", completion_event_id=build_operation_batch_completion_event_id(record.batch_id) if completed else None)
 
@@ -234,6 +268,7 @@ class MemoryOperationBatchRepository:
                     child.variant_index,
                     "polling" if child.operation_idempotency_key == child_key else child.status,
                     job_id if child.operation_idempotency_key == child_key else child.job_id,
+                    None if child.operation_idempotency_key == child_key else child.started_at,
                 )
                 for child in record.children
             )
@@ -338,7 +373,7 @@ class SQLOperationBatchRepository:
                 raise AgentRuntimeRecordConflictError("OperationBatch 创建结果不可见")
             return await self._read(session, row, workspace_id, plan, run_id=run_id, tool_call_id=tool_call_id, attempt=attempt, source_workspace_revision=source_workspace_revision)
 
-    async def claim_children(self, *, batch_id: str, max_concurrent: int) -> tuple[OperationBatchChildRecord, ...]:
+    async def claim_children(self, *, batch_id: str, max_concurrent: int, now: datetime | None = None) -> tuple[OperationBatchChildRecord, ...]:
         if max_concurrent < 1:
             raise ValueError("批次并发槽位必须为正整数")
         async with self._session_factory() as session:
@@ -356,43 +391,87 @@ class SQLOperationBatchRepository:
                         )
                     ).all()
                 )
-                slots = max(0, max_concurrent - sum(row.status == "polling" for row in rows))
-                claimed = [row for row in rows if row.status in {"queued", "starting"}][:slots]
+                observed_at = now or datetime.now(UTC)
+                active = sum(
+                    row.status == "polling"
+                    or (
+                        row.status == "starting"
+                        and not _starting_expired(row.started_at, observed_at)
+                    )
+                    for row in rows
+                )
+                slots = max(0, max_concurrent - active)
+                claimed = [
+                    row
+                    for row in rows
+                    if row.status == "queued"
+                    or (
+                        row.status == "starting"
+                        and (
+                            row.started_at is None
+                            or _starting_expired(row.started_at, observed_at)
+                        )
+                    )
+                ][:slots]
                 for row in claimed:
                     row.status = "starting"
-                    row.started_at = datetime.now(UTC)
+                    row.started_at = observed_at
                 if claimed:
                     batch.status = "running"
                 return tuple(_child(row) for row in claimed)
 
-    async def list_dispatchable_batches(self, *, limit: int) -> tuple[OperationBatchRecord, ...]:
+    async def list_dispatchable_batches(self, *, limit: int, now: datetime | None = None) -> tuple[OperationBatchRecord, ...]:
         if limit < 1:
             raise ValueError("批次扫描上限必须为正整数")
+        observed_at = now or datetime.now(UTC)
+        cutoff = observed_at - STARTING_CHILD_LEASE_DURATION
+        dispatchable_child = select(PixelFlowOperationBatchChildRow.batch_id).where(
+            PixelFlowOperationBatchChildRow.batch_id == PixelFlowOperationBatchRow.batch_id,
+            or_(
+                PixelFlowOperationBatchChildRow.status == "queued",
+                and_(
+                    PixelFlowOperationBatchChildRow.status == "starting",
+                    or_(
+                        PixelFlowOperationBatchChildRow.started_at.is_(None),
+                        PixelFlowOperationBatchChildRow.started_at <= cutoff,
+                    ),
+                ),
+            ),
+        ).exists()
         async with self._session_factory() as session:
             rows = list(
                 (
                     await session.scalars(
                         select(PixelFlowOperationBatchRow)
-                        .where(PixelFlowOperationBatchRow.status.in_(("queued", "running")))
+                        .where(
+                            PixelFlowOperationBatchRow.status.in_(("queued", "running")),
+                            dispatchable_child,
+                        )
                         .order_by(PixelFlowOperationBatchRow.created_at)
                         .limit(limit)
                     )
                 ).all()
             )
-            result: list[OperationBatchRecord] = []
-            for row in rows:
-                children = list(
-                    (
-                        await session.scalars(
-                            select(PixelFlowOperationBatchChildRow).where(
-                                PixelFlowOperationBatchChildRow.batch_id == row.batch_id
+            if not rows:
+                return ()
+            children = list(
+                (
+                    await session.scalars(
+                        select(PixelFlowOperationBatchChildRow).where(
+                            PixelFlowOperationBatchChildRow.batch_id.in_(
+                                [row.batch_id for row in rows]
                             )
                         )
-                    ).all()
-                )
-                if any(child.status in {"queued", "starting"} for child in children):
-                    result.append(_record(row, children))
-            return tuple(result)
+                    )
+                ).all()
+            )
+            children_by_batch: dict[str, list[PixelFlowOperationBatchChildRow]] = {}
+            for child in children:
+                children_by_batch.setdefault(child.batch_id, []).append(child)
+            return tuple(
+                _record(row, children_by_batch.get(row.batch_id, []))
+                for row in rows
+            )
 
     async def mark_child_terminal(self, *, batch_id: str, child_key: str, status: ChildStatus, job_id: str) -> OperationBatchRecord:
         if status not in _TERMINAL:
@@ -639,7 +718,7 @@ class SQLOperationBatchRepository:
 
 
 def _child(row: PixelFlowOperationBatchChildRow) -> OperationBatchChildRecord:
-    return OperationBatchChildRecord(row.operation_idempotency_key, row.scene_id, row.variant_index, row.status, row.job_id)  # type: ignore[arg-type]
+    return OperationBatchChildRecord(row.operation_idempotency_key, row.scene_id, row.variant_index, row.status, row.job_id, row.started_at)  # type: ignore[arg-type]
 
 
 def _record(row: PixelFlowOperationBatchRow, children: list[PixelFlowOperationBatchChildRow]) -> OperationBatchRecord:

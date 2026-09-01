@@ -20,6 +20,7 @@ from pixelflow.video.adapters.operations.projector import (
     build_scene_generation_failure_patch,
     build_scene_generation_success_patch,
 )
+from pixelflow.video.workspace.payload import migrate_workspace_payload
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
 from ..ports import OperationConflictError
@@ -184,15 +185,17 @@ class OperationBatchTerminalCallback:
         workspace = await self._video_repository.get_workspace(user_id, batch_workspace_id)
         if workspace is None:
             raise AgentRuntimeRecordConflictError("图片资产权威工作区不可用")
-        assets = workspace.payload.get("asset_registry", []) if isinstance(workspace.payload, Mapping) else []
+        # 终态回调也读取 Repository 的原始 JSON，必须与图片 Worker 使用同一 V2 迁移边界。
+        workspace_payload = migrate_workspace_payload(workspace.payload)
+        assets = workspace_payload.get("asset_registry", [])
         asset_id = next((str(item.get("asset_id")) for item in assets if isinstance(item, Mapping) and hashlib.sha256(str(item.get("asset_id") or "").encode()).hexdigest()[:12] == digest), None)
         if asset_id is None:
             raise AgentRuntimeRecordConflictError("图片资产终态无法匹配资产身份")
         result = payload.get("result")
         patch = (
-            build_image_asset_success_patch(workspace.payload, asset_id=asset_id, result=result, now=now)
+            build_image_asset_success_patch(workspace_payload, asset_id=asset_id, result=result, now=now)
             if status == "succeeded" and isinstance(result, Mapping)
-            else build_image_asset_failure_patch(workspace.payload, asset_id=asset_id, status=status, reason_code=_optional_text(payload.get("reason_code")), now=now)
+            else build_image_asset_failure_patch(workspace_payload, asset_id=asset_id, status=status, reason_code=_optional_text(payload.get("reason_code")), now=now)
         )
         if patch is not None:
             await self._video_repository.apply_workspace_patch(user_id, workspace.workspace_id, patch, expected_revision=workspace.revision, now=now)

@@ -1,5 +1,6 @@
 """验证 M5 OperationBatch 的双重幂等身份与批次上限。"""
 
+import asyncio
 import hashlib
 from datetime import UTC, datetime, timedelta
 
@@ -9,7 +10,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pixelflow.agent_control_plane.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_control_plane.persistence.models import PixelFlowOperationBatchOutboxRow
-from pixelflow.agent_control_plane.persistence.repositories import MemoryAgentRuntimeRepository
+from pixelflow.agent_control_plane.persistence.repositories import (
+    MemoryAgentRuntimeRepository,
+    OperationRecord,
+    OwnedOperationRecord,
+)
 from pixelflow.agent_harness.model_profile import HarnessModelProfile
 from pixelflow.agent_harness.operation_batch_resume import GatewayOperationBatchResumePort
 from pixelflow.agent_tools.video.contracts import VideoToolContext
@@ -28,9 +33,11 @@ from pixelflow.operations.jobs.batch_repository import MemoryOperationBatchRepos
 from pixelflow.operations.jobs.batch_resume import OperationBatchResumeDispatcher
 from pixelflow.operations.jobs.identity import build_operation_request
 from pixelflow.operations.jobs.providers import ProviderJobAdapter
-from pixelflow.operations.jobs.recovery import OperationStartCoordinator
+from pixelflow.operations.jobs.recovery import (
+    OperationRecoveryRuntime,
+    OperationStartCoordinator,
+)
 from pixelflow.operations.namespace import workflow_operation_namespace
-from pixelflow.operations.ports import OperationConflictError
 from pixelflow.platform.persistence import Base
 from pixelflow.tasks import PixelFlowConversationRecord
 from pixelflow.video.adapters.operations.scenes import (
@@ -229,17 +236,18 @@ async def test_sql_outbox_lease_and_acknowledgement_are_idempotent(tmp_path) -> 
     assert delivered == replay
 
 
-def test_batch_rejects_more_than_six_children() -> None:
-    """6 镜头 × 1 版本是上限，超出时必须在接触 Provider 前拒绝。"""
+def test_batch_accepts_more_children_than_its_concurrency_window() -> None:
+    """逻辑 Batch 可容纳更多 child，Dispatcher 再按并发窗口启动。"""
 
-    with pytest.raises(OperationConflictError):
-        build_operation_batch_plan(
-            run_id="hrun_" + "b" * 32,
-            tool_call_id="tool-call-2",
-            scene_ids=("1", "2", "3", "4", "5", "6", "7"),
-            variant_count=1,
-            attempt=1,
-        )
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "b" * 32,
+        tool_call_id="tool-call-2",
+        scene_ids=("1", "2", "3", "4", "5", "6", "7"),
+        variant_count=1,
+        attempt=1,
+    )
+
+    assert len(plan.children) == 7
 
 
 @pytest.mark.asyncio
@@ -421,8 +429,8 @@ async def test_scene_batch_port_splits_arbitrary_selection_into_m06_batches() ->
         attempt=1,
     )
 
-    assert [len(result.jobs) for result in results] == [6, 6, 5]
-    assert len({result.batch_id for result in results}) == 3
+    assert [len(result.jobs) for result in results] == [17]
+    assert len({result.batch_id for result in results}) == 1
     assert [job.scene_id for result in results for job in result.jobs] == [
         str(index) for index in range(1, 18)
     ]
@@ -433,6 +441,196 @@ async def test_scene_batch_port_splits_arbitrary_selection_into_m06_batches() ->
         attempt=1,
     )
     assert replay == results
+
+
+@pytest.mark.asyncio
+async def test_scene_dispatcher_starts_claimed_children_concurrently() -> None:
+    """批次并发窗口应同时启动多个 Provider Operation。"""
+
+    class BlockingSceneOperationPort:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.release = asyncio.Event()
+            self.started = asyncio.Event()
+
+        async def start_scene_variant(self, context, *, scene, variant_index, attempt, workflow_id=None, expected_operation_idempotency_key=None):
+            del context, variant_index, attempt, workflow_id, expected_operation_idempotency_key
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.started.set()
+            await self.release.wait()
+            self.active -= 1
+            return SceneGenerationJob(
+                job_id=f"job-{scene['scene_id']}",
+                scene_id=str(scene["scene_id"]),
+                variant_index=1,
+                status="polling",
+            )
+
+    batches = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "p" * 32,
+        tool_call_id="tool-call-concurrent",
+        scene_ids=("scene-1", "scene-2"),
+        variant_count=1,
+        attempt=1,
+    )
+    batch = await batches.create_or_read(
+        user_id="user",
+        conversation_id="conversation",
+        workspace_id="workspace",
+        plan=plan,
+    )
+    operation_port = BlockingSceneOperationPort()
+    dispatcher = M06SceneGenerationBatchDispatcher(
+        batch_repository=batches,
+        operation_port=operation_port,  # type: ignore[arg-type]
+        max_concurrent_child_operations_per_batch=2,
+    )
+    dispatch_task = asyncio.create_task(
+        dispatcher.dispatch_start_slots(
+            batch=batch,
+            context=VideoToolContext(
+                user_id="user",
+                workspace=VideoWorkspace(
+                    workspace_id="workspace",
+                    conversation_id="conversation",
+                    revision=1,
+                    payload={},
+                ),
+            ),
+            scenes_by_id={"scene-1": {"scene_id": "scene-1"}, "scene-2": {"scene_id": "scene-2"}},
+            attempt=1,
+        )
+    )
+    await asyncio.wait_for(operation_port.started.wait(), timeout=1)
+    assert operation_port.max_active == 2
+    operation_port.release.set()
+    await dispatch_task
+
+
+@pytest.mark.asyncio
+async def test_operation_recovery_polls_due_operations_concurrently() -> None:
+    """Recovery 一轮内的多个 Provider status 查询应受控并发。"""
+
+    class BlockingService:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def start(self, request, *, authorization, idempotency_key):
+            del request, authorization, idempotency_key
+            raise AssertionError("恢复轮询不应重新 start Provider")
+
+        async def status(self, provider_job_id):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.started.set()
+            await self.release.wait()
+            self.active -= 1
+            return {"job_id": provider_job_id, "status": "processing"}
+
+    class Repository:
+        def __init__(self, operations) -> None:
+            self.operations = operations
+
+        async def list_pending_operation_quota_events(self, *, now, limit):
+            del now, limit
+            return []
+
+        async def list_pending_operation_completions(self, *, now, limit):
+            del now, limit
+            return []
+
+        async def list_due_operations(self, *, now, limit):
+            del now, limit
+            return [OwnedOperationRecord(user_id="user", operation=operation) for operation in self.operations]
+
+        async def claim_operation_lease(self, user_id, conversation_id, job_id, *, lease_owner, now, lease_expires_at):
+            del user_id, conversation_id, lease_owner, now, lease_expires_at
+            return next(operation for operation in self.operations if operation.job_id == job_id)
+
+        async def schedule_operation_poll(self, user_id, conversation_id, job_id, *, lease_owner, now, next_poll_at):
+            del user_id, conversation_id, lease_owner, now, next_poll_at
+            return next(operation for operation in self.operations if operation.job_id == job_id)
+
+    class Resolver:
+        def __init__(self, adapter) -> None:
+            self.adapter = adapter
+
+        def resolve(self, stage):
+            del stage
+            return self.adapter
+
+    class Resumer:
+        async def resume_external_job(self, *args, **kwargs):
+            del args, kwargs
+
+    now = datetime.now(UTC)
+    operations = [
+        OperationRecord(
+            job_id=f"job-{index}",
+            provider_job_id=f"provider-{index}",
+            workflow_id="workflow",
+            conversation_id="conversation",
+            stage="generate_scene:abc:v1",
+            stage_version=1,
+            status="polling",
+            attempt=1,
+            request_hash="sha256:" + "a" * 64,
+            idempotency_key=f"operation:v1:{index}",
+            next_poll_at=now,
+            lease_owner=None,
+            lease_expires_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        for index in range(2)
+    ]
+    service = BlockingService()
+    runtime = OperationRecoveryRuntime(
+        Repository(operations),  # type: ignore[arg-type]
+        resolver=Resolver(ProviderJobAdapter(service)),  # type: ignore[arg-type]
+        resumer=Resumer(),  # type: ignore[arg-type]
+        worker_id="test-recovery",
+        max_concurrent_polls=2,
+    )
+    task = asyncio.create_task(runtime.run_once())
+    await asyncio.wait_for(service.started.wait(), timeout=1)
+    assert service.max_active == 2
+    service.release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_batch_does_not_reclaim_active_starting_children() -> None:
+    """Provider start 尚未返回时，下一轮扫描不能重复领取同一 child。"""
+
+    repository = MemoryOperationBatchRepository()
+    plan = build_operation_batch_plan(
+        run_id="hrun_" + "q" * 32,
+        tool_call_id="tool-call-start-lease",
+        scene_ids=("scene-1", "scene-2"),
+        variant_count=1,
+        attempt=1,
+    )
+    batch = await repository.create_or_read(
+        user_id="user",
+        conversation_id="conversation",
+        workspace_id="workspace",
+        plan=plan,
+    )
+
+    first = await repository.claim_children(batch_id=batch.batch_id, max_concurrent=2)
+    second = await repository.claim_children(batch_id=batch.batch_id, max_concurrent=2)
+
+    assert len(first) == 2
+    assert second == ()
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import Mapping
-from datetime import timedelta
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import JsonValue
@@ -20,6 +20,7 @@ from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExe
 from pixelflow.agent_tools.video.credential_store import TransientBatchCredentialStore
 from pixelflow.operations.jobs import (
     MAX_CHILD_OPERATIONS_PER_BATCH,
+    MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH,
     OperationBatchRecord,
     OperationBatchRepository,
     OperationStartCoordinator,
@@ -30,6 +31,7 @@ from pixelflow.operations.jobs import (
 )
 from pixelflow.operations.ports import OperationConflictError
 from pixelflow.video.services.production_fields import workspace_resolved_aspect_ratio
+from pixelflow.video.workspace.payload import migrate_workspace_payload
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
 logger = logging.getLogger(__name__)
@@ -129,22 +131,26 @@ def _image_operation_stage(asset_id: str) -> str:
 
 class M06ImageGenerationBatchDispatcher:
     def __init__(self, *, batch_repository: OperationBatchRepository, operation_port: M06ImageGenerationOperationPort, max_concurrent: int = 6) -> None:
-        if not 1 <= max_concurrent <= 6:
+        if not 1 <= max_concurrent <= MAX_CONCURRENT_CHILD_OPERATIONS_PER_BATCH:
             raise ValueError("图片批次并发槽位必须在 1 到 6 之间")
         self._batches, self._operations, self._max = batch_repository, operation_port, max_concurrent
 
-    async def dispatch_start_slots(self, *, batch: OperationBatchRecord, context: VideoToolContext, assets_by_id: Mapping[str, Mapping[str, JsonValue]], attempt: int) -> dict[str, ImageGenerationJob]:
-        jobs: dict[str, ImageGenerationJob] = {}
-        for child in await self._batches.claim_children(batch_id=batch.batch_id, max_concurrent=self._max):
+    async def dispatch_start_slots(self, *, batch: OperationBatchRecord, context: VideoToolContext, assets_by_id: Mapping[str, Mapping[str, JsonValue]], attempt: int, now: datetime | None = None) -> dict[str, ImageGenerationJob]:
+        async def dispatch_child(child) -> tuple[str, ImageGenerationJob]:
             try:
                 asset = assets_by_id.get(child.scene_id)
                 if asset is None:
+                    logger.warning(
+                        "image_batch_child_failed batch_id=%s child_key=%s reason_code=asset_not_found",
+                        batch.batch_id,
+                        child.operation_idempotency_key,
+                    )
                     job = ImageGenerationJob(job_id=child.operation_idempotency_key, asset_id=child.scene_id, status="failed")
                 else:
                     job = await self._operations.start_asset(context, asset=asset, attempt=attempt, workflow_id=batch.batch_id, expected_operation_idempotency_key=child.operation_idempotency_key)
             except Exception as exc:  # noqa: BLE001 - 子项失败必须收口，不能遗留 starting。
                 logger.warning(
-                    "image_batch_child_start_failed batch_id=%s child_key=%s error_type=%s",
+                    "image_batch_child_start_failed batch_id=%s child_key=%s error_type=%s reason_code=start_failed",
                     batch.batch_id,
                     child.operation_idempotency_key,
                     type(exc).__name__,
@@ -160,8 +166,14 @@ class M06ImageGenerationBatchDispatcher:
                 await self._batches.mark_child_polling(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, job_id=job.job_id)
             else:
                 await self._batches.mark_child_terminal(batch_id=batch.batch_id, child_key=child.operation_idempotency_key, status="failed", job_id=job.job_id)
-            jobs[child.operation_idempotency_key] = job
-        return jobs
+            return child.operation_idempotency_key, job
+
+        claimed = await self._batches.claim_children(
+            batch_id=batch.batch_id,
+            max_concurrent=self._max,
+            now=now,
+        )
+        return dict(await asyncio.gather(*(dispatch_child(child) for child in claimed)))
 
 
 class M06ImageGenerationBatchOperationPort:
@@ -224,9 +236,11 @@ class M06ImageGenerationBatchDispatcherWorker:
         credential_store: TransientBatchCredentialStore,
         worker_id: str,
         scan_interval: timedelta = timedelta(seconds=1),
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._batches, self._videos, self._dispatcher, self._credentials = batch_repository, video_repository, dispatcher, credential_store
         self._worker_id, self._scan_interval = worker_id, scan_interval
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._wake = asyncio.Event()
@@ -236,7 +250,8 @@ class M06ImageGenerationBatchDispatcherWorker:
 
     async def run_once(self) -> int:
         dispatched = 0
-        for batch in await self._batches.list_dispatchable_batches(limit=100):
+        now = self._clock()
+        for batch in await self._batches.list_dispatchable_batches(limit=100, now=now):
             credential = await self._credentials.get(batch_id=batch.batch_id)
             if credential is None:
                 # 授权仅允许进程内短暂保存。进程重启后，已领取但尚未启动的
@@ -262,8 +277,15 @@ class M06ImageGenerationBatchDispatcherWorker:
             workspace = await self._videos.get_workspace(batch.user_id, batch.workspace_id)
             if workspace is None or workspace.conversation_id != batch.conversation_id:
                 continue
-            payload = workspace.payload if isinstance(workspace.payload, Mapping) else {}
-            assets = {str(item.get("asset_id") or "").strip(): item for item in payload.get("asset_registry", []) if isinstance(item, Mapping)}
+            # Repository 返回原始 JSON；这里必须与 Harness Tool 使用同一 V2 迁移边界，
+            # 否则旧 Workspace 的 global_assets 会被误判为没有可调度资产。
+            payload = migrate_workspace_payload(workspace.payload)
+            raw_assets = payload.get("asset_registry")
+            assets = {
+                str(item.get("asset_id") or "").strip(): item
+                for item in raw_assets
+                if isinstance(item, Mapping) and str(item.get("asset_id") or "").strip()
+            } if isinstance(raw_assets, list) else {}
             try:
                 await self._dispatcher.dispatch_start_slots(
                     batch=batch,
@@ -276,6 +298,7 @@ class M06ImageGenerationBatchDispatcherWorker:
                     ),
                     assets_by_id=assets,
                     attempt=batch.attempt,
+                    now=now,
                 )
                 dispatched += 1
             except Exception as exc:  # noqa: BLE001 - 单批次异常不得中断其它批次扫描。
