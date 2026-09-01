@@ -318,6 +318,45 @@ class PixelFlowAgentOperationRow(Base):
     )
 
 
+class PixelFlowGenerationJobRow(Base):
+    """图片和视频轻量生成 Job 的 Gateway 权威记录。"""
+
+    __tablename__ = "pixelflow_generation_jobs"
+
+    generation_job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    item_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    variant_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    request_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    provider_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    failure_reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    next_poll_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(_timestamp_type(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(_timestamp_type(), nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        CheckConstraint("variant_index >= 1 AND variant_index <= 3", name="ck_pf_generation_jobs_variant_index"),
+        CheckConstraint("kind IN ('image', 'video')", name="ck_pf_generation_jobs_kind"),
+        CheckConstraint(
+            "status IN ('queued', 'starting', 'polling', 'succeeded', 'failed', 'timeout', 'expired', 'indeterminate')",
+            name="ck_pf_generation_jobs_status",
+        ),
+        Index("ix_pf_generation_jobs_owner_workspace", "user_id", "conversation_id", "workspace_id", "created_at"),
+        Index("ix_pf_generation_jobs_start", "status", "lease_expires_at", "created_at"),
+        Index("ix_pf_generation_jobs_poll", "status", "next_poll_at", "lease_expires_at"),
+    )
+
+
 class PixelFlowOperationBatchRow(Base):
     """M5 计费批次权威记录；仅批次终态可以触发 operation_resume。"""
 
@@ -724,6 +763,7 @@ AGENT_RUNTIME_SUPPORT_TABLES = (
     PixelFlowVideoAgentWorkspaceRow.__table__,
     PixelFlowVideoAgentPlanRow.__table__,
     PixelFlowVideoAgentPlanStepRow.__table__,
+    PixelFlowGenerationJobRow.__table__,
     # 用途：持久化 M5 计费批次及子 Operation；影响：只有批次终态可创建 operation_resume。
     PixelFlowOperationBatchRow.__table__,
     PixelFlowOperationBatchChildRow.__table__,
