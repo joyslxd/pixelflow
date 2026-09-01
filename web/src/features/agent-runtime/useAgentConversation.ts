@@ -161,8 +161,10 @@ export function useAgentConversation(initialConversationId?: string) {
           runtimeRef.current = next;
           setRuntime(next);
           if (shouldReloadSnapshot(event, result)) {
-            await hydrateRun(conversationId, runId);
-            return "reload";
+            const keepStreaming = await hydrateRun(conversationId, runId);
+            // Tool 完成只需以 Snapshot 收敛 Workspace，当前 SSE 仍可继续消费后续 delta。
+            // 仅 sequence gap 或 Run 已终态时才断开重连，避免浏览器持续显示 canceled。
+            return result === "gap" || !keepStreaming ? "reload" : "continue";
           }
           return "continue";
         },
