@@ -15,7 +15,6 @@ from .deepseek_engine import DeepSeekHarnessEngine, HarnessExecutionError
 from .event_store import RunRequestConflictError, SqliteRunEventStore
 from .skill_snapshot import SkillCatalogSnapshot
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -161,24 +160,35 @@ class RunService:
                     interrupt_id=result.suspension_interrupt_id,
                 )
                 return
+            if result.tool_results_seen:
+                for tool_name in result.tool_names:
+                    await self._store.append_event(
+                        run_id,
+                        "tool.completed",
+                        {"tool_name": tool_name},
+                    )
             if result.finish_reason != "completed":
+                finish_failure_codes = {
+                    "deadline_exceeded": (TerminationReason.DEADLINE_EXCEEDED, "deadline_exceeded"),
+                    "max_model_steps": (TerminationReason.MAX_MODEL_STEPS, "max_model_steps"),
+                    "max_business_tools": (TerminationReason.MAX_BUSINESS_TOOLS, "max_business_tools"),
+                    "max_output_tokens": (TerminationReason.MAX_OUTPUT_TOKENS, "max_output_tokens"),
+                }
+                termination, failure_code = finish_failure_codes.get(
+                    result.finish_reason,
+                    (TerminationReason.ENGINE_ERROR, "engine_finish_reason_unexpected"),
+                )
                 await self._store.transition(
                     run_id,
                     status=RunStatus.FAILED,
-                    termination_reason=TerminationReason.ENGINE_ERROR,
+                    termination_reason=termination,
                 )
                 await self._store.append_event(
                     run_id,
                     "run.failed",
-                    {"code": "engine_finish_reason_unexpected"},
+                    {"code": failure_code},
                 )
                 return
-            for tool_name in result.tool_names:
-                await self._store.append_event(
-                    run_id,
-                    "tool.completed",
-                    {"tool_name": tool_name},
-                )
             if not result.notification_events_emitted:
                 for summary in result.public_summaries:
                     await self._store.append_event(
@@ -219,7 +229,7 @@ class RunService:
             # 持久化 Run 状态阻止后续公开事件。外部 GenerationJob 取消不在此边界内。
             await self._store.cancel(run_id)
             return
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - Run 必须统一收口未知 Runtime 异常。
             diagnostic = (
                 error.diagnostic
                 if isinstance(error, HarnessExecutionError)

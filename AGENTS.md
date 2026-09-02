@@ -41,3 +41,14 @@ PixelFlow 只保留新 Harness 架构：
 - Gateway 是权威状态写入方；Sidecar 只能通过 Tool Broker 请求业务动作，不能直连数据库、Provider 或宿主文件系统。
 - Tool 修改工作区前必须校验用户、会话、revision、Run binding 与幂等键。
 - Sidecar、Gateway 与 Mem0 的 Secret 仅从部署环境注入。Linux 容器编排见 `services/pixelflow-agent-harness/deploy/docker-compose.linux.yml`。
+
+## Agent 扩展治理
+
+- 修改系统指令、Harness Plugin、Skill、Tool Manifest/Broker、Run/恢复入口或领域 Workspace 前，必须使用 `skills/agent-extension-governance`。
+- 通用 Agent 系统指令只能包含跨领域事实来源、受控 Tool、注入防护、用户沟通和非固定工作流边界；不得包含视频/PPT/表格等领域 Tool 名、Provider、模型、DTO 字段、Prompt 模板或固定业务阶段。
+- 领域创作规则与 Tool 选择建议放在领域 `SKILL.md`；可硬性验证的状态、权限、确认、费用、revision 与幂等约束必须由 Gateway Tool Broker/Service 强制执行，不能只依赖 Prompt 或 Skill。
+- 所有 `user_turn`、`confirmation_resume`、`form_resume`、`authorization_resume` 与 `run_recovery` 必须叠加同一通用系统指令；触发类型只能附加最小专用补充，不能替换通用边界。
+- Harness Plugin 只负责稳定 Tool Manifest 注册、上下文/挂起策略和事件映射；禁止持有用户 Authorization、Provider Secret、数据库连接或直接调用 Provider。
+- 新增领域能力时按需新增 Workspace、Repository、Service、Projection、Tool 与 Skill；已有领域增加业务动作通常新增/修改 Tool 与 Skill。Provider 更换只修改 Capability Port/Adapter 与能力档案，不修改通用 Agent 底座。
+- 付费异步图片/视频生成使用 Gateway GenerationJob 调度、轮询和 Workspace 回写；不得恢复旧 Batch/Child Operation/M06 生成编排。
+- 修改通用指令、恢复入口或 Tool 路由时必须增加回归测试，覆盖用户 Turn 与受影响的恢复 Run；不得只通过断言提示词文案证明安全性。

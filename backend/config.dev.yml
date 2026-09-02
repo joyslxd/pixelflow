@@ -46,7 +46,7 @@ pixelflow:
   content_app_internal_upload_enabled: false # 用途：控制内部上传兼容开关；影响：保持 false，避免旧 Provider 任务恢复。
 
 content_app:
-  base_url: "https://test-video.borgrise.com" # 用途：配置本地开发使用的 content-app HTTPS 地址；影响：图片、视频和视频理解 Provider 在未显式关闭时默认装配，但实际调用仍需用户确认与 Authorization。
+  base_url: "https://test-video.borgrise.com/api" # 用途：配置本地开发使用的 content-app API 根地址，必须含 /api；影响：生图/生视频会直接拼接 /picture/* 与 /video/*，漏写 /api 会打到站点 HTML。
   remote_verify_enabled: true # 用途：控制远端 Authorization 校验；影响：true 时每个受保护请求校验用户登录态。
   verify_timeout_seconds: 10 # 用途：限制登录态校验秒数；影响：超时拒绝受保护请求。
   skip_ssl_verify: false # 用途：控制 TLS 证书校验；影响：false 要求服务端证书可信。

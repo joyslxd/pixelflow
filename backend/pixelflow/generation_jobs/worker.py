@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
@@ -11,7 +13,11 @@ from pydantic import JsonValue
 
 from pixelflow.capabilities.image_generation.port import ImageGenerationProvider
 from pixelflow.capabilities.video_generation.port import VideoGenerationProvider
-from pixelflow.generation_jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
+from pixelflow.generation_jobs.providers import (
+    ProviderJobMappingError,
+    ProviderJobOutcome,
+    ProviderJobSnapshot,
+)
 from pixelflow.video.workspace.repository import VideoWorkspaceRepository
 
 from .contracts import GenerationJobKind, GenerationJobRecord, GenerationJobStatus
@@ -25,6 +31,7 @@ from .projector import (
 from .repository import GenerationJobRepository
 
 logger = logging.getLogger(__name__)
+_SAFE_PROVIDER_REASON_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
 
 
 class GenerationJobWorker:
@@ -73,6 +80,7 @@ class GenerationJobWorker:
         """领取并处理当前最多 6 个 start 与 6 个 due poll 任务。"""
 
         now = self._clock()
+        await self._jobs.reopen_missing_image_results(now=now)
         start_jobs = await self._jobs.claim_start_jobs(
             worker_id=self._worker_id,
             now=now,
@@ -126,6 +134,8 @@ class GenerationJobWorker:
                 idempotency_key=job.idempotency_key,
             )
             await self._accept_snapshot(job, snapshot, phase="start")
+        except ProviderJobMappingError as exc:
+            await self._fail_provider_mapping(job, exc, phase="start")
         except Exception as exc:  # noqa: BLE001 - Provider 原始异常不得进入日志或 Workspace。
             logger.warning(
                 "generation_job_start_failed job_id=%s kind=%s error_type=%s",
@@ -141,15 +151,11 @@ class GenerationJobWorker:
             await self._finish_failure(job, GenerationJobStatus.INDETERMINATE, "provider_job_unavailable")
             return
         credential = await self._credentials.get(generation_job_id=job.generation_job_id)
-        if credential is None:
+        if credential is None and job.kind is not GenerationJobKind.IMAGE:
             await self._finish_failure(job, GenerationJobStatus.INDETERMINATE, "authorization_unavailable")
             return
         try:
-            snapshot = await provider.status(
-                job.provider_job_id,
-                user_id=job.user_id,
-                conversation_id=job.conversation_id,
-            )
+            snapshot = await self._provider_status(provider, job, credential)
             if snapshot.outcome is ProviderJobOutcome.POLLING:
                 await self._jobs.reschedule_poll(
                     generation_job_id=job.generation_job_id,
@@ -159,6 +165,8 @@ class GenerationJobWorker:
                 )
                 return
             await self._accept_snapshot(job, snapshot, phase="poll")
+        except ProviderJobMappingError as exc:
+            await self._fail_provider_mapping(job, exc, phase="poll")
         except Exception as exc:  # noqa: BLE001 - 单轮失败释放 lease，下一轮安全重试 status。
             logger.warning(
                 "generation_job_poll_failed job_id=%s kind=%s error_type=%s",
@@ -179,6 +187,66 @@ class GenerationJobWorker:
                     job.generation_job_id,
                     type(lease_exc).__name__,
                 )
+
+    async def _fail_provider_mapping(
+        self,
+        job: GenerationJobRecord,
+        exc: ProviderJobMappingError,
+        *,
+        phase: str,
+    ) -> None:
+        """把受控映射失败写成终态，避免轮询在已完成但 DTO 不合法的任务上空转。"""
+
+        reason_code = _safe_provider_mapping_reason(exc.reason_code)
+        diagnostics = exc.diagnostics
+        if diagnostics is not None and _provider_diagnostics_enabled():
+            logger.warning(
+                "generation_job_%s_mapping_failed job_id=%s kind=%s reason_code=%s "
+                "status_code=%s content_type=%s response_length=%s field_paths=%s",
+                phase,
+                job.generation_job_id,
+                job.kind.value,
+                reason_code,
+                diagnostics.status_code,
+                diagnostics.content_type,
+                diagnostics.response_length,
+                ",".join(diagnostics.field_paths) or "none",
+            )
+        else:
+            logger.warning(
+                "generation_job_%s_mapping_failed job_id=%s kind=%s reason_code=%s",
+                phase,
+                job.generation_job_id,
+                job.kind.value,
+                reason_code,
+            )
+        await self._finish_failure(
+            job,
+            GenerationJobStatus.INDETERMINATE,
+            f"provider_{phase}_{reason_code}",
+        )
+
+    async def _provider_status(
+        self,
+        provider: ImageGenerationProvider | VideoGenerationProvider,
+        job: GenerationJobRecord,
+        credential,
+    ) -> ProviderJobSnapshot:
+        """图片轮询带上用户授权；视频仍走 Provider 自己的任务租约。"""
+
+        if job.kind is GenerationJobKind.IMAGE:
+            authorization = credential.borrow_authorization() if credential is not None else ""
+            return await provider.status(
+                job.provider_job_id,
+                user_id=job.user_id,
+                conversation_id=job.conversation_id,
+                authorization=authorization,
+            )
+        return await provider.status(
+            job.provider_job_id,
+            user_id=job.user_id,
+            conversation_id=job.conversation_id,
+        )
 
     async def _accept_snapshot(
         self,
@@ -290,6 +358,26 @@ def _result_mapping(value: object) -> dict[str, JsonValue]:
         str(key): item
         for key, item in value.items()
         if isinstance(key, str)
+    }
+
+
+def _safe_provider_mapping_reason(reason_code: str) -> str:
+    """只允许受控的小写原因码进入日志和 Workspace。"""
+
+    normalized = reason_code.strip().lower()
+    if _SAFE_PROVIDER_REASON_CODE.fullmatch(normalized):
+        return normalized
+    return "response_mapping_failed"
+
+
+def _provider_diagnostics_enabled() -> bool:
+    """只在显式开启本地诊断时输出受控响应结构。"""
+
+    return os.environ.get("PIXELFLOW_IMAGE_PROVIDER_DIAGNOSTICS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 

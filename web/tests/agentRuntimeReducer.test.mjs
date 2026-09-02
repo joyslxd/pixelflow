@@ -148,6 +148,21 @@ test("Sidecar 确认挂起可从 run.state_changed 恢复中断", () => {
   assert.equal(isTerminalSnapshot(state.snapshot), true);
 });
 
+test("生成操作挂起事件停止处理中并允许继续发送下一条指令", () => {
+  let state = hydrateSnapshot({ ...fixture.snapshot, events: [], last_sequence: 0, status: "running" });
+  const suspended = {
+    ...fixture.snapshot.events[0],
+    sequence: 1,
+    type: "run.state_changed",
+    payload: { status: "suspended_operation" },
+  };
+  [state] = applyPublicEvent(state, suspended);
+  assert.equal(state.snapshot.status, "suspended_operation");
+  assert.equal(state.currentRun.status, "suspended_operation");
+  assert.equal(state.inputStatus, "idle");
+  assert.equal(isTerminalSnapshot(state.snapshot), true);
+});
+
 test("输出上限导致无公开回复时标记为可继续恢复", () => {
   const recoverySnapshot = {
     ...fixture.snapshot,
@@ -183,4 +198,23 @@ test("通用中断事件保留表单和授权的稳定身份", () => {
     ["hint_form", "form"],
     ["hint_authorization", "authorization_required"],
   ]);
+});
+
+test("hydrate 保留更新的 Workspace revision，避免挂起快照盖掉生成进度", () => {
+  const snapshotWorkspace = {
+    workspace_id: "ws-1",
+    revision: 3,
+    summary: { asset_registry: [{ asset_id: "a", kind: "character", role: "女主", state: "planned" }] },
+  };
+  const liveWorkspace = {
+    workspace_id: "ws-1",
+    revision: 5,
+    summary: { asset_registry: [{ asset_id: "a", kind: "character", role: "女主", state: "failed" }] },
+  };
+  const state = hydrateSnapshot({
+    ...fixture.snapshot,
+    workspace: snapshotWorkspace,
+  }, { videoWorkspace: liveWorkspace });
+  assert.equal(state.videoWorkspace.revision, 5);
+  assert.equal(state.videoWorkspace.summary.asset_registry[0].state, "failed");
 });

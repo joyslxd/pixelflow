@@ -1,6 +1,6 @@
 /** F1 输入框：不接手填 workspace_id；旧对话只读，运行中新输入显示已排队。 */
 
-import { ChangeEvent, FormEvent, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, KeyboardEvent, useRef, useState } from "react";
 
 import type { TurnMaterialV1 } from "@/api/contracts";
 import { uploadContentAppFile } from "@/api/contentAppAssets";
@@ -55,6 +55,14 @@ export function Composer({
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void submitContent(input.trim());
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    /** 多行输入里 Enter 换行；⌘/Ctrl + Enter 仍走同一发送路径。 */
+
+    if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
     event.preventDefault();
     void submitContent(input.trim());
   };
@@ -135,22 +143,24 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      <div className="flex gap-2">
-        <input
+      <div className="flex items-end gap-2">
+        <textarea
           name="content"
           value={input}
+          rows={4}
           onChange={(event) => setInput(event.target.value)}
+          onKeyDown={handleComposerKeyDown}
           placeholder="输入给 Agent"
-          className="min-w-0 flex-1 rounded border border-line px-3 py-2"
+          className="h-[7rem] min-w-0 flex-1 resize-none overflow-y-auto rounded border border-line px-3 py-2 leading-6"
         />
         <input ref={fileInputRef} className="sr-only" type="file" multiple onChange={(event) => void uploadFiles(event)} />
-        <button type="button" className="rounded border border-line px-3 text-ink disabled:opacity-50" disabled={uploading || sending} onClick={() => fileInputRef.current?.click()}>
+        <button type="button" className="h-10 rounded border border-line px-3 text-ink disabled:opacity-50" disabled={uploading || sending} onClick={() => fileInputRef.current?.click()}>
           {uploading ? "上传中…" : "上传文件"}
         </button>
         <button
           type="submit"
           disabled={sending}
-          className="rounded bg-accent px-4 text-white disabled:opacity-50"
+          className="h-10 rounded bg-accent px-4 text-white disabled:opacity-50"
         >
           发送
         </button>

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 WORKSPACE_SCHEMA_VERSION = 2
 _ARTIFACT_PREFIX = "artifact:"
@@ -16,6 +17,19 @@ MAX_SCENE_DURATION_SEC = 30
 AssetState = Literal["planned", "generating", "ready", "failed"]
 AssetOrigin = Literal["existing_material", "planned_generation", "provider_output"]
 GenerationMode = Literal["independent", "extend", "reference"]
+_SEEDANCE_MODEL = re.compile(r"^seedance-(\d+(?:\.\d+)?)(?:-(mini|fast))?$")
+
+
+def canonicalize_video_model(value: str) -> str:
+    """把展示名收成 Content-App 计费目录 ID，例如 Seedance 2.5 → seedance-2.5。"""
+
+    compact = re.sub(r"[\s_]+", "-", value.strip().casefold())
+    compact = re.sub(r"^seedance-?(\d)", r"seedance-\1", compact)
+    match = _SEEDANCE_MODEL.fullmatch(compact)
+    if match is None:
+        return value.strip()
+    suffix = f"-{match.group(2)}" if match.group(2) else ""
+    return f"seedance-{match.group(1)}{suffix}"
 
 
 class WorkspaceCreationContract(BaseModel):
@@ -27,6 +41,13 @@ class WorkspaceCreationContract(BaseModel):
     video_ratio: str = Field(min_length=1, max_length=32)
     video_size: str = Field(min_length=1, max_length=32)
     video_sound: Literal["on", "off"]
+
+    @field_validator("video_model", mode="before")
+    @classmethod
+    def canonicalize_model_id(cls, value: object) -> object:
+        if isinstance(value, str):
+            return canonicalize_video_model(value)
+        return value
 
 
 class WorkspaceAssetRecord(BaseModel):
@@ -279,6 +300,7 @@ __all__ = [
     "WorkspaceCreationContract",
     "WorkspacePayloadV2",
     "WorkspacePromptPackage",
+    "canonicalize_video_model",
     "material_asset_records",
     "migrate_workspace_payload",
 ]

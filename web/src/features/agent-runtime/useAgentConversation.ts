@@ -144,7 +144,7 @@ export function useAgentConversation(initialConversationId?: string) {
     const snapshot = await getHarnessSnapshot(conversationId, runId);
     const current = runtimeRef.current;
     const next = hydrateSnapshot(snapshot, {
-      videoWorkspace: snapshot.workspace ?? current.videoWorkspace,
+      videoWorkspace: current.videoWorkspace,
       messages: current.messages,
       connection: "connected",
     });
@@ -154,6 +154,34 @@ export function useAgentConversation(initialConversationId?: string) {
     setRuntime(next);
     return !isTerminalSnapshot(snapshot);
   }, [flushRuntimeRender]);
+
+  useEffect(() => {
+    /** 生成挂起后 SSE 会停；工作台只回读 Gateway 公开 Workspace，不自建任务进度。 */
+
+    const conversationId = detail?.conversation.conversation_id;
+    if (!conversationId || runtime.snapshot?.status !== "suspended_operation") return undefined;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const refresh = async (): Promise<void> => {
+      try {
+        const latest = await getOrCreateVideoWorkspace(conversationId);
+        if (cancelled) return;
+        const next = replaceVideoWorkspace(runtimeRef.current, latest);
+        runtimeRef.current = next;
+        setRuntime(next);
+      } catch {
+        // 挂起期间单次回读失败不得中断后续轮询，否则工作台会停在过期摘要。
+      }
+    };
+    void refresh();
+    timer = setInterval(() => {
+      void refresh();
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearInterval(timer);
+    };
+  }, [detail?.conversation.conversation_id, runtime.snapshot?.status]);
 
   const findNewerRun = useCallback(async (conversationId: string, runId: string): Promise<string | null> => {
     /** 仅在当前 SSE 结束后回读一次会话索引，自动恢复 Run 不再触发定时完整会话轮询。 */

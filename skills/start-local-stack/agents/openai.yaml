@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Local Stack"
+  short_description: "Safely start and verify a project service stack"
+  default_prompt: "Use $start-local-stack to detect, start, restart, and verify this project’s local services without exposing secrets."

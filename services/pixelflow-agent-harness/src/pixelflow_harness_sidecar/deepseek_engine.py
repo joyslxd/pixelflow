@@ -19,7 +19,6 @@ from .config import SidecarSettings
 from .contracts import HarnessRunRequest
 from .skill_snapshot import SkillCatalogSnapshot, snapshot_skill_root
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +58,7 @@ class DeepSeekEngineResult:
     final_response: str
     finish_reason: str | None
     tool_names: tuple[str, ...]
+    tool_results_seen: bool = False
     suspension_kind: str | None = None
     suspension_interrupt_id: str | None = None
     response_deltas: tuple[str, ...] = field(default_factory=tuple)
@@ -183,7 +183,7 @@ class DeepSeekHarnessEngine:
             if harness is not None:
                 try:
                     harness.close()
-                except Exception:
+                except Exception:  # noqa: BLE001 - Runtime 清理异常不能覆盖主异常。
                     # 已有主异常时清理失败不覆盖原始阶段；日志只保留固定类型，不输出底层文本。
                     logger.warning("harness_cleanup_failed run_id=%s", run_id)
 
@@ -205,7 +205,7 @@ class DeepSeekHarnessEngine:
         )
         request_url = f"{self._settings.tool_broker_base_url}/agent/internal/agent-tools/manifest"
         try:
-            with urlopen(  # noqa: S310 - URL 已由 Sidecar 启动配置的内部地址校验。
+            with urlopen(  # URL 已由 Sidecar 启动配置的内部地址校验。
                 Request(request_url, headers={"Authorization": f"Bearer {token}"}),
                 timeout=10,
             ) as response:
@@ -358,28 +358,29 @@ def _project_harness_result(
     # 某些已部署 Runtime 只经 Session notification 发送最终 message；与 run() 返回
     # 的同一 Run 事件合并后再按既有白名单投影，不把 notification 私有字段公开。
     events = [*runtime_events, *(notification_events or [])]
-    tool_names = tuple(
-        str(data.get("name"))
-        for event in events
-        if isinstance(event, dict)
-        and event.get("type") == "tool/call"
-        and isinstance((data := event.get("data")), dict)
-        and isinstance(data.get("name"), str)
-    )
+    tool_names = _tool_names_from_events(events)
     suspension = _suspension_from_tool_events(events)
     if suspension is not None:
         return DeepSeekEngineResult(
             final_response="",
             finish_reason="suspended",
             tool_names=tool_names,
+            tool_results_seen=_has_tool_results(events),
             suspension_kind=suspension[0],
             suspension_interrupt_id=suspension[1],
             notification_events_emitted=notification_events_emitted,
         )
     response = _public_text_from_result(result)
-    finish_reason = getattr(result, "finish_reason", None)
-    if finish_reason is not None and not isinstance(finish_reason, str):
+    raw_finish_reason = getattr(result, "finish_reason", None)
+    if raw_finish_reason is not None and not isinstance(raw_finish_reason, str):
         raise HarnessProjectionError("finish_reason_invalid")
+    finish_reason = _normalize_finish_reason(raw_finish_reason, events)
+    logger.info(
+        "harness_result_projected finish_reason=%s tool_names=%s runtime_event_types=%s",
+        finish_reason or "none",
+        tool_names,
+        _safe_event_types(runtime_events),
+    )
     if not response:
         response = _public_text_from_chunks(events).strip()
     if not response:
@@ -397,7 +398,7 @@ def _project_harness_result(
         )
         # Runtime 在达到输出上限前可能只产出内部 reasoning。此时不能伪造最终
         # 回复，但 Gateway 可在确认没有业务 Tool 副作用后创建冻结恢复 Run。
-        if finish_reason in {"max-tokens", "max_tokens"}:
+        if finish_reason in {"max-tokens", "max_tokens", "max_output_tokens"}:
             raise HarnessProjectionError("max_output_tokens_without_public_response")
         raise HarnessProjectionError("final_response_missing")
     # Runtime 直接透传 ``turn/end.reason.kind``；不同 Provider 对正常文本收束分别
@@ -410,6 +411,7 @@ def _project_harness_result(
         final_response=response[:8_000],
         finish_reason=finish_reason,
         tool_names=tool_names,
+        tool_results_seen=_has_tool_results(events),
         response_deltas=_safe_response_chunks(response[:8_000]),
         # 公开摘要只能由可审计的 Tool 名称派生，绝不转发模型 reasoning。
         public_summaries=tuple(
@@ -468,6 +470,119 @@ def _safe_event_types(events: list[object]) -> tuple[str, ...]:
         and isinstance((event_type := event.get("type")), str)
         and 0 < len(event_type) <= 128
     )
+
+
+_RUNTIME_ERROR_REASON_ALLOWLIST = {
+    "deadline_exceeded": "deadline_exceeded",
+    "max_model_steps": "max_model_steps",
+    "max_business_tools": "max_business_tools",
+}
+_RUNTIME_FINISH_REASON_ALIASES = {
+    "max-tokens": "max_output_tokens",
+    "max_tokens": "max_output_tokens",
+}
+
+
+def _normalize_finish_reason(finish_reason: object, events: list[object]) -> str | None:
+    """把当前 Runtime 的 turn/end reason 投影为固定 PixelFlow 结束原因。"""
+
+    if finish_reason is None or not isinstance(finish_reason, str):
+        return finish_reason if isinstance(finish_reason, str) else None
+    if finish_reason in _RUNTIME_FINISH_REASON_ALIASES:
+        return _RUNTIME_FINISH_REASON_ALIASES[finish_reason]
+    if finish_reason != "error":
+        return finish_reason
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "turn/end":
+            continue
+        data = event.get("data")
+        reason = data.get("reason") if isinstance(data, dict) else None
+        error = reason.get("error") if isinstance(reason, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        if isinstance(code, str) and code in _RUNTIME_ERROR_REASON_ALLOWLIST:
+            return _RUNTIME_ERROR_REASON_ALLOWLIST[code]
+        break
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") not in {"tool/result", "tool_result"}:
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        for code in _tool_result_error_codes(data):
+            return _RUNTIME_ERROR_REASON_ALLOWLIST[code]
+    return "error"
+
+
+def _tool_result_error_codes(data: dict[str, object]) -> tuple[str, ...]:
+    """从 Runtime Tool 错误文本中只提取策略层允许的固定错误码。"""
+
+    message = data.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return ()
+    codes: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool-result" or block.get("isError") is not True:
+            continue
+        result_content = block.get("content")
+        if not isinstance(result_content, list):
+            continue
+        for result_block in result_content:
+            if not isinstance(result_block, dict) or result_block.get("type") != "text":
+                continue
+            text = result_block.get("text")
+            if not isinstance(text, str):
+                continue
+            prefix = "Error: "
+            code = text.strip().removeprefix(prefix)
+            if code in _RUNTIME_ERROR_REASON_ALLOWLIST and code not in codes:
+                codes.append(code)
+    return tuple(codes)
+
+
+def _tool_names_from_events(events: list[object]) -> tuple[str, ...]:
+    """兼容直接 tool/call 与 assistant/message 内 tool-call 块，并按名称去重。"""
+
+    names: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        data = event.get("data")
+        if event_type == "tool/call" and isinstance(data, dict):
+            _append_tool_name(names, data.get("name"))
+        if event_type in {"assistant/message", "assistant/chunk"}:
+            _append_tool_names_from_content(names, data)
+    return tuple(names)
+
+
+def _has_tool_results(events: list[object]) -> bool:
+    """确认 Runtime 至少收到一个 Tool result，避免把模型意图伪造为已完成。"""
+
+    return any(
+        isinstance(event, dict) and event.get("type") in {"tool/result", "tool_result"}
+        for event in events
+    )
+
+
+def _append_tool_name(names: list[str], value: object) -> None:
+    """只接受 Runtime 明确提供的安全 Tool 名称，不读取参数或模型文本。"""
+
+    if isinstance(value, str) and 0 < len(value) <= 128 and value not in names:
+        names.append(value)
+
+
+def _append_tool_names_from_content(names: list[str], value: object) -> None:
+    """从 assistant 内容块递归读取 type=tool-call 的名称。"""
+
+    if isinstance(value, dict):
+        if value.get("type") in {"tool-call", "tool_call"}:
+            _append_tool_name(names, value.get("name"))
+        for child in value.values():
+            _append_tool_names_from_content(names, child)
+    elif isinstance(value, list):
+        for child in value:
+            _append_tool_names_from_content(names, child)
 
 
 def _safe_assistant_chunk_types(events: list[object]) -> tuple[str, ...]:

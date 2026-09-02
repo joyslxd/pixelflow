@@ -112,9 +112,11 @@ class PrepareScenePackagesInput(BaseModel):
     # 模型只能通过 asset_updates 补充其产品/角色/场景等语义。
     asset_registry: tuple[PlannedAssetInput, ...] = ()
     asset_updates: tuple[ExistingMaterialAssetUpdate, ...] = Field(default=(), max_length=120)
-    # 可与分镜一起冻结；若模型/档案尚未选定，Agent 也可稍后用
+    # 与分镜一起冻结；若模型/档案尚未选定，Agent 也可稍后用
     # set_video_generation_contract 单独写入，避免为补参数重写整份脚本。
     creation_contract: WorkspaceCreationContract | None = None
+    # 用途：显式声明整份分镜覆盖。影响：已有分镜时缺省拒绝，避免局部改镜被做成全量重建。
+    replace_existing: bool = False
 
     @model_validator(mode="after")
     def validate_duration_and_ids(self) -> PrepareScenePackagesInput:
@@ -125,6 +127,31 @@ class PrepareScenePackagesInput(BaseModel):
         if len(set(update_ids)) != len(update_ids):
             raise ValueError("已有素材语义补充 asset_id 不能重复")
         return self
+
+
+def _workspace_has_storyboard(payload: Mapping[str, object]) -> bool:
+    """判断当前 Workspace 是否已有可修订分镜，不读取镜头正文。"""
+
+    for key in ("scenes", "scene_packages"):
+        raw = payload.get(key)
+        if isinstance(raw, list) and any(isinstance(item, Mapping) for item in raw):
+            return True
+    return False
+
+
+def _reject_unconfirmed_storyboard_replace(
+    payload: Mapping[str, object],
+    *,
+    replace_existing: bool,
+) -> None:
+    """已有分镜时拒绝隐式整包覆盖；局部修订必须走 patch/revise。"""
+
+    if replace_existing or not _workspace_has_storyboard(payload):
+        return
+    raise VideoToolValidationError(
+        "工作区已有分镜；局部修订请使用 patch_scene 或 revise_storyboard。"
+        "仅当用户明确要求整份重建时，才能设置 replace_existing=true"
+    )
 
 
 def _validate_and_canonicalize_scene_references(
@@ -215,7 +242,10 @@ class PrepareScenePackagesTool:
     spec = VideoToolSpec(
         name="prepare_scene_packages",
         description=(
-            "写入脚本和分镜包；面向 Seedance 2.5 时，先使用已加载的导演/提示词 Skill "
+            "仅当工作区尚无分镜，或用户明确要求整份脚本/分镜从零重建时，一次性写入脚本和分镜包。"
+            "已有分镜时改第 N 段必须改用 patch_scene 或 revise_storyboard；确需整份覆盖时必须"
+            " replace_existing=true，否则本 Tool 拒绝。"
+            "面向 Seedance 2.5 时，先使用已加载的导演/提示词 Skill "
             "将每段 prompt 编排为可提交的完整正文，再原样写入，不得仅写摘要；"
             "asset_registry 只登记新的待生成素材（必须含 generation_prompt）；用户已上传素材已经"
             "由 Gateway 登记，若要补充产品/角色/场景语义，只能用 asset_updates 提交其 asset_id、"
@@ -261,6 +291,10 @@ class PrepareScenePackagesTool:
             raise VideoToolValidationError("脚本或分镜参数无效") from exc
 
         payload = migrate_workspace_payload(context.workspace.payload)
+        _reject_unconfirmed_storyboard_replace(
+            payload,
+            replace_existing=request.replace_existing,
+        )
         previous_script = payload.get("script")
         script_data = dict(previous_script) if isinstance(previous_script, Mapping) else {}
         script_data.update({"content": request.script.strip(), "status": "已编辑"})
@@ -360,7 +394,11 @@ class ReviseStoryboardTool:
 
     spec = VideoToolSpec(
         name="revise_storyboard",
-        description="批量局部修订分镜 Prompt 和生产字段；保留旧资产并标记待重新生成，不自动触发生成。",
+        description=(
+            "已有分镜后，批量局部修订若干镜的 Prompt 和生产字段；保留旧资产与 asset_id，"
+            "标记待重新生成，不自动触发生成。用户改一段或多段剧情时用本 Tool 或 patch_scene，"
+            "不要调用 prepare_scene_packages。"
+        ),
         input_model=ReviseStoryboardInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,
@@ -461,9 +499,11 @@ class CreateStoryboardTool(PrepareScenePackagesTool):
             **PrepareScenePackagesTool.spec.__dict__,
             "name": "create_storyboard",
             "description": (
-                "创建或覆盖当前项目分镜；asset_registry 仅登记新的待生成资产，用户上传素材"
-                "只能通过 asset_updates 补充语义，不能覆盖其 Artifact、状态或来源；单镜最长 30 秒，"
-                "长片生成由 M06 批次拆分。"
+                "与 prepare_scene_packages 同义：仅用于创建尚不存在的分镜，或用户明确要求整份覆盖。"
+                "已有分镜的局部修改必须改用 patch_scene 或 revise_storyboard；确需整份覆盖时必须"
+                " replace_existing=true。"
+                "asset_registry 仅登记新的待生成资产，用户上传素材只能通过 asset_updates 补充语义，"
+                "不能覆盖其 Artifact、状态或来源；单镜最长 30 秒，长片生成由 M06 批次拆分。"
             ),
         }
     )

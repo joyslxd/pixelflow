@@ -13,6 +13,7 @@ from pydantic import JsonValue
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
 from pixelflow.capabilities.image_generation.port import ImageGenerationProvider
 from pixelflow.capabilities.video_generation.port import VideoGenerationProvider
+from pixelflow.generation_jobs.providers import ProviderJobMappingError
 from pixelflow.video.services.production_fields import workspace_resolved_aspect_ratio
 
 from .contracts import GenerationJobKind, GenerationJobRecord, GenerationJobStatus
@@ -160,7 +161,10 @@ class GenerationJobService:
             if not item_id:
                 raise VideoToolExecutionError("生成项目缺少稳定身份")
             request = dict(request_builder(item, index))
-            normalized = dict(provider.prepare_operation_request(request))
+            try:
+                normalized = dict(provider.prepare_operation_request(request))
+            except ProviderJobMappingError as exc:
+                raise VideoToolExecutionError("视频生成请求未能映射到供应商接口") from exc
             provider_id = str(normalized.get("provider_id") or provider.provider_id).strip()
             profile_version = str(
                 normalized.get("provider_profile_version") or provider.profile_version

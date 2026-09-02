@@ -20,6 +20,8 @@ from pixelflow.generation_jobs.providers import (
 from pixelflow.platform.content_app_authorization import (
     TransientContentAppAuthorizationStore,
 )
+from pixelflow.platform.content_app_url import optional_content_app_base_url
+from pixelflow.video.workspace.payload import canonicalize_video_model
 
 _MODE_ENDPOINTS = {
     "text_to_video": "/video/text-to-video",
@@ -82,11 +84,9 @@ class ContentAppVideoProviderSettings:
         enabled = os.environ.get("PIXELFLOW_M06_VIDEO_PROVIDER_ENABLED", "").strip().lower()
         if enabled in {"0", "false", "no", "off"}:
             return None
-        base_url = os.environ.get("BORGRISE_BASE_URL", "").strip().rstrip("/")
-        if not base_url:
+        base_url = optional_content_app_base_url(os.environ.get("BORGRISE_BASE_URL", ""))
+        if base_url is None:
             return None
-        if not base_url.startswith(("https://", "http://127.0.0.1:")):
-            raise ValueError("M06 视频 Provider 必须配置受控 HTTPS 或 loopback content-app 地址")
         return cls(
             base_url=base_url,
             provider_id=_env_text("PIXELFLOW_M06_VIDEO_PROVIDER_ID", "content-app-video"),
@@ -132,8 +132,12 @@ class ContentAppVideoGenerationProvider:
         mode = _required_text(request, "generation_mode")
         if mode not in _MODE_ENDPOINTS:
             raise ProviderJobMappingError("video_generation_mode_unsupported")
+        payload = dict(request)
+        model = payload.get("model")
+        if isinstance(model, str):
+            payload["model"] = canonicalize_video_model(model)
         return {
-            **dict(request),
+            **payload,
             "provider_id": self.provider_id,
             "provider_profile_version": self.profile_version,
         }
@@ -235,6 +239,8 @@ class ContentAppVideoGenerationProvider:
 
     def _url(self, path: str) -> str:
         return f"{self._settings.base_url}{path}"
+
+
 def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:
     from pixelflow.generation_jobs.providers import ProviderJobOutcome
 
@@ -360,8 +366,12 @@ def _to_snapshot(payload: Mapping[str, object], *, expected_job_id: str | None) 
 
 
 def _raise_or_json(response: httpx.Response) -> Mapping[str, object]:
-    if response.status_code in {402, 404}:
-        raise _ContentAppHTTPError(response.status_code)
+    if response.status_code == 402:
+        if _billing_profile_missing(response):
+            raise ProviderJobMappingError("video_billing_profile_missing")
+        raise _ContentAppHTTPError(402)
+    if response.status_code == 404:
+        raise _ContentAppHTTPError(404)
     if response.is_error:
         raise _ContentAppHTTPError(response.status_code)
     try:
@@ -371,6 +381,32 @@ def _raise_or_json(response: httpx.Response) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ProviderJobMappingError("provider_response_not_object")
     return value
+
+
+def _billing_profile_missing(response: httpx.Response) -> bool:
+    """402 且正文只表示计费档缺失时，不得映射成额度不足。"""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if payload is not None and _contains_billing_profile_marker(payload):
+        return True
+    text = response.text
+    return isinstance(text, str) and _contains_billing_profile_marker(text)
+
+
+def _contains_billing_profile_marker(value: object, *, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    if isinstance(value, str):
+        lowered = value.casefold()
+        return "价格配置不存在" in value or "price config" in lowered
+    if isinstance(value, Mapping):
+        return any(_contains_billing_profile_marker(item, depth=depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_billing_profile_marker(item, depth=depth + 1) for item in value[:20])
+    return False
 
 
 def _result_value(source: Mapping[str, object]) -> object:

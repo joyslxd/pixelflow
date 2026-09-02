@@ -22,6 +22,17 @@ export type VisibleProjection = {
   responsePreview: string;
 };
 
+export function preferWorkspace(
+  snapshotWorkspace: VideoWorkspaceProjectionV1 | null | undefined,
+  liveWorkspace: VideoWorkspaceProjectionV1 | null | undefined,
+): VideoWorkspaceProjectionV1 | null {
+  /** 挂起快照可能落后于 Worker 回写；revision 更大的公开投影才是当前进度。 */
+
+  if (snapshotWorkspace == null) return liveWorkspace ?? null;
+  if (liveWorkspace == null) return snapshotWorkspace;
+  return liveWorkspace.revision > snapshotWorkspace.revision ? liveWorkspace : snapshotWorkspace;
+}
+
 export function hydrateSnapshot(
   snapshot: AgentSnapshotV1,
   extras: {
@@ -40,7 +51,7 @@ export function hydrateSnapshot(
   }
   if (snapshot.last_sequence < previous) throw new Error("snapshot_sequence_invalid");
 
-  const workspace = snapshot.workspace ?? extras.videoWorkspace ?? null;
+  const workspace = preferWorkspace(snapshot.workspace, extras.videoWorkspace);
   let state: AgentWorkspaceState = {
     ...initialAgentWorkspaceState,
     conversationId: snapshot.conversation_id || null,

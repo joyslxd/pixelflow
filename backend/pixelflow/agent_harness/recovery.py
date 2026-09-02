@@ -13,6 +13,7 @@ from .contracts import HarnessRunRequest
 from .limits import LimitProfileResolver
 from .model_profile import HarnessModelProfile
 from .port import AgentHarnessPort
+from .system_instruction import compose_system_instruction
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +84,7 @@ class HarnessRecoveryService:
             trigger_id=recovery.recovery_event_id,
             trigger_type="run_recovery",
             user_input=message.content,
-            system_instruction=(
-                "你是 PixelFlow 视频 Agent。这是一次在旧 Harness Run 中断后的安全恢复。"
-                "只能依据当前权威工作区与已加载 Skill 作答；不得假设旧 Session 仍可用。"
-            ),
+            system_instruction=compose_system_instruction("run_recovery"),
             context_digest=_digest(
                 {
                     "recovery_event_id": recovery.recovery_event_id,

@@ -82,7 +82,7 @@ export function isTerminalStatus(status: string | null | undefined): boolean {
 }
 
 export function isTerminalSnapshot(snapshot: AgentSnapshotV1 | null): boolean {
-  /** Sidecar 挂起不属于旧 RunStatus 枚举，需从已冻结的公开状态事件判断停止重连。 */
+  /** 挂起状态属于公开 RunStatus；兼容事件尾部仍能判断旧 Snapshot 的可停止状态。 */
 
   if (isTerminalStatus(snapshot?.status)) return true;
   const lastState = [...(snapshot?.events ?? [])]
@@ -365,6 +365,9 @@ function payloadStatus(payload: Record<string, unknown>): RunStatusV1 | null {
   if (
     status === "accepted"
     || status === "running"
+    || status === "suspended_operation"
+    || status === "suspended_confirmation"
+    || status === "suspended_authorization"
     || status === "completed"
     || status === "failed"
     || status === "cancelled"

@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 
 import { WorkspaceAssetThumbnail } from "./WorkspaceAssetThumbnail";
+import { WorkspaceScenePreview } from "./WorkspaceScenePreview";
 import { generationJobCounts, projectWorkspaceV2 } from "./workspaceV2";
 
 type Props = {
@@ -35,11 +36,24 @@ function orderedFieldKeys(source: Record<string, string | number>, labels: Recor
 }
 
 function statusLabel(status: string): string {
-  return (({ planned: "已规划", generating: "生成中", ready: "已就绪", failed: "失败", queued: "等待调度", polling: "处理中", succeeded: "已完成", paused: "已暂停" } as Record<string, string>)[status.toLowerCase()] ?? status) || "未知";
+  return (({ planned: "已规划", generating: "生成中", ready: "已就绪", failed: "失败", queued: "等待调度", polling: "处理中", succeeded: "已完成", paused: "已暂停", starting: "处理中", indeterminate: "失败" } as Record<string, string>)[status.toLowerCase()] ?? status) || "未知";
 }
 
 function assetOriginLabel(origin: string): string {
   return ({ existing_material: "已有素材", planned_generation: "待生成素材", provider_output: "已生成素材" } as Record<string, string>)[origin] ?? "待生成素材";
+}
+
+function AssetStatusMark({ state }: { state: string }) {
+  if (state === "generating") {
+    return <div className="grid h-16 w-16 shrink-0 place-items-center rounded-lg border border-accent/40 bg-accent-soft"><span className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-label="生成中" /></div>;
+  }
+  if (state === "failed") {
+    return <div className="grid h-16 w-16 shrink-0 place-items-center rounded-lg border border-red-200 bg-red-50 text-[10px] text-red-700">失败</div>;
+  }
+  if (state === "ready") {
+    return <div className="grid h-16 w-16 shrink-0 place-items-center rounded-lg border border-emerald-200 bg-emerald-50 text-[10px] text-emerald-800">已生成</div>;
+  }
+  return <div className="grid h-16 w-16 shrink-0 place-items-center rounded-lg border border-dashed border-line bg-canvas text-[10px] text-ink-soft">待生成</div>;
 }
 
 export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revision }: Props) {
@@ -99,14 +113,16 @@ export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revisio
         {sectionTitle(`资产注册表（${projection.assets.length}）`)}
         {projection.assets.map((asset) => (
           <article key={asset.assetId} className="flex gap-3 rounded bg-surface p-3">
-            {asset.origin === "existing_material" ? <WorkspaceAssetThumbnail conversationId={conversationId} workspaceId={workspaceId} assetId={asset.assetId} alt={asset.role} /> : null}
+            {asset.state === "ready"
+              ? <WorkspaceAssetThumbnail conversationId={conversationId} workspaceId={workspaceId} assetId={asset.assetId} alt={asset.role} revision={revision} />
+              : <AssetStatusMark state={asset.state} />}
             <div className="min-w-0">
               <p className="font-medium text-ink">{asset.slot} · {asset.role}</p>
               <p>{assetOriginLabel(asset.origin)} · {asset.kind} · {statusLabel(asset.state)} · {asset.usableForVideo ? "可用于视频" : "暂不可用于视频"}</p>
               {asset.generationPrompt ? <details><summary>资产生成提示词</summary><p className="mt-1 whitespace-pre-wrap">{asset.generationPrompt}</p></details> : null}
               {asset.referenceAssetIds.length > 0 ? <p>参考：{asset.referenceAssetIds.join("、")}</p> : null}
               {asset.generationStatus ? <p>生成任务：{statusLabel(asset.generationStatus)}</p> : null}
-              {asset.artifactRef ? <p className="truncate">Artifact：{asset.artifactRef}</p> : null}
+              {asset.failureReasonCode ? <p>失败码：{asset.failureReasonCode}</p> : null}
             </div>
           </article>
         ))}
@@ -121,6 +137,18 @@ export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revisio
           {projection.packages.map((item) => (
             <li key={item.segmentId} className="rounded bg-surface p-2">
               <p className="font-medium text-ink">{item.sequence}. {item.segmentId} · {item.durationSec ?? "—"} 秒 · {item.generationMode} · {statusLabel(item.state)}</p>
+              {item.hasPreview ? (
+                <WorkspaceScenePreview
+                  src={item.previewUrl}
+                  title={`${item.sequence}. ${item.segmentId}`}
+                />
+              ) : item.state === "generating" ? (
+                <div className="mt-2 grid h-24 place-items-center rounded-lg border border-accent/40 bg-accent-soft">
+                  <span className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-label="成片生成中" />
+                </div>
+              ) : item.state === "failed" ? (
+                <div className="mt-2 grid h-24 place-items-center rounded-lg border border-red-200 bg-red-50 text-[10px] text-red-700">成片失败</div>
+              ) : null}
               {item.promptSummary ? <details><summary>已优化 Prompt{item.promptCharCount !== null ? `（${item.promptCharCount} 字）` : ""}</summary><p className="mt-1 whitespace-pre-wrap">{item.promptSummary}</p>{item.promptTruncated ? <p className="mt-1 text-amber-800">当前仅显示前 8,000 字；请拆分该段或使用单段详情读取完整文本。</p> : null}</details> : null}
               {item.referenceAssetIds.length > 0 ? <p>引用：{item.referenceAssetIds.join("、")}</p> : null}
               {[item.continuityFrom && `承接 ${item.continuityFrom}`, item.transitionOut && `转场 ${item.transitionOut}`, item.era, item.camera, item.sound].filter(Boolean).map((detail) => <p key={detail}>{detail}</p>)}
@@ -134,11 +162,20 @@ export function WorkspaceV2Panel({ summary, conversationId, workspaceId, revisio
       <section className="space-y-2 rounded bg-canvas p-3">
         {sectionTitle("GenerationJob 进度")}
         <p>任务 {projection.generationJobs.length} · 等待 {counts.queued} · 处理中 {counts.polling} · 完成 {counts.succeeded} · 失败 {counts.failed} · 暂停 {counts.paused}</p>
-        {projection.generationJobs.map((job) => <p key={job.jobId} className="rounded bg-surface p-2">{job.jobId} · {job.kind} · {job.itemId || "—"} · {statusLabel(job.status)}</p>)}
+        {projection.generationJobs.map((job) => <p key={job.jobId} className="rounded bg-surface p-2">{job.itemId || job.jobId} · {job.kind} · {statusLabel(job.status)}</p>)}
         {projection.generationJobs.length === 0 ? <p>暂无生成任务。</p> : null}
       </section>
 
-      {projection.outputs.length > 0 ? <section className="space-y-2 rounded bg-canvas p-3">{sectionTitle("输出")} {projection.outputs.map((output) => <p key={output.outputId} className="rounded bg-surface p-2">{output.title} · {output.kind} · {statusLabel(output.status)}</p>)}</section> : null}
+      {projection.mergedReady ? (
+        <section className="space-y-2 rounded bg-canvas p-3">
+          {sectionTitle("合并成片")}
+          {projection.mergedPreviewUrl ? (
+            <WorkspaceScenePreview src={projection.mergedPreviewUrl} title="合并成片" />
+          ) : (
+            <p>成片已生成，当前预览地址不可播放。</p>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }

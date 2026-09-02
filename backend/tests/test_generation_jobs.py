@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,7 +14,12 @@ from pixelflow.generation_jobs.contracts import (
     GenerationJobStatus,
 )
 from pixelflow.generation_jobs.credentials import TransientGenerationJobCredentialStore
-from pixelflow.generation_jobs.providers import ProviderJobOutcome, ProviderJobSnapshot
+from pixelflow.generation_jobs.providers import (
+    ProviderJobMappingError,
+    ProviderJobOutcome,
+    ProviderJobSnapshot,
+    ProviderResponseDiagnostics,
+)
 from pixelflow.generation_jobs.repository import MemoryGenerationJobRepository, SQLGenerationJobRepository
 from pixelflow.generation_jobs.service import GenerationJobService
 from pixelflow.generation_jobs.worker import GenerationJobWorker
@@ -70,8 +76,8 @@ class _FakeProvider:
             message="供应商任务处理中。",
         )
 
-    async def status(self, provider_job_id, *, user_id, conversation_id):
-        del user_id, conversation_id
+    async def status(self, provider_job_id, *, user_id, conversation_id, authorization=""):
+        del user_id, conversation_id, authorization
         return ProviderJobSnapshot(
             provider_job_id=provider_job_id,
             outcome=ProviderJobOutcome.SUCCEEDED,
@@ -81,6 +87,40 @@ class _FakeProvider:
             },
             reason_code="provider_succeeded",
             message="供应商任务已完成。",
+        )
+
+
+class _MappingErrorProvider(_FakeProvider):
+    async def start(self, request, *, authorization, idempotency_key):
+        del request, authorization, idempotency_key
+        raise ProviderJobMappingError("image_provider_job_id_missing")
+
+
+class _MappingErrorWithDiagnosticsProvider(_FakeProvider):
+    async def start(self, request, *, authorization, idempotency_key):
+        del request, authorization, idempotency_key
+        raise ProviderJobMappingError(
+            "image_provider_job_id_missing",
+            diagnostics=ProviderResponseDiagnostics(
+                status_code=200,
+                content_type="application/json",
+                response_length=128,
+                field_paths=("data.task.status",),
+            ),
+        )
+
+
+class _PollMappingErrorProvider(_FakeProvider):
+    async def status(self, provider_job_id, *, user_id, conversation_id, authorization=""):
+        del user_id, conversation_id, authorization
+        raise ProviderJobMappingError(
+            "image_result_url_missing",
+            diagnostics=ProviderResponseDiagnostics(
+                status_code=200,
+                content_type="application/json",
+                response_length=96,
+                field_paths=("data.status", "data.result.data"),
+            ),
         )
 
 
@@ -216,6 +256,162 @@ async def test_generation_job_worker_starts_polls_and_projects_image_result() ->
     asset = updated_workspace.payload["asset_registry"][0]
     assert asset["state"] == "ready"
     assert asset["provider_artifact_ref"] == "artifact:image:image-1"
+    assert asset["image_url"] == "https://cdn.example/image-1.png"
+    assert asset["generation_job_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_generation_job_worker_preserves_safe_provider_mapping_reason() -> None:
+    repository = MemoryGenerationJobRepository()
+    credentials = TransientGenerationJobCredentialStore()
+    context = _context()
+    workspace_repository = MemoryVideoAgentRepository()
+    await workspace_repository.create_workspace(context.user_id, context.workspace)
+    service = GenerationJobService(
+        repository=repository,
+        image_provider=_MappingErrorProvider(),
+        credential_store=credentials,
+    )
+    submission = (await service.submit_images(
+        context,
+        assets=(context.workspace.payload["asset_registry"][0],),
+        attempt=1,
+    ))[0]
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=workspace_repository,
+        credential_store=credentials,
+        image_provider=_MappingErrorProvider(),
+        worker_id="generation-worker-mapping-error-test",
+    )
+
+    assert await worker.run_once() == 1
+    failed = await repository.get(submission.job_id)
+    assert failed is not None
+    assert failed.status is GenerationJobStatus.INDETERMINATE
+    assert failed.failure_reason_code == "provider_start_image_provider_job_id_missing"
+
+
+@pytest.mark.asyncio
+async def test_generation_job_worker_logs_only_safe_provider_diagnostics(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("PIXELFLOW_IMAGE_PROVIDER_DIAGNOSTICS", "true")
+    caplog.set_level(logging.WARNING, logger="pixelflow.generation_jobs.worker")
+    repository = MemoryGenerationJobRepository()
+    credentials = TransientGenerationJobCredentialStore()
+    context = _context()
+    workspace_repository = MemoryVideoAgentRepository()
+    await workspace_repository.create_workspace(context.user_id, context.workspace)
+    service = GenerationJobService(
+        repository=repository,
+        image_provider=_MappingErrorWithDiagnosticsProvider(),
+        credential_store=credentials,
+    )
+    submission = (await service.submit_images(
+        context,
+        assets=(context.workspace.payload["asset_registry"][0],),
+        attempt=1,
+    ))[0]
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=workspace_repository,
+        credential_store=credentials,
+        image_provider=_MappingErrorWithDiagnosticsProvider(),
+        worker_id="generation-worker-diagnostics-test",
+    )
+
+    assert await worker.run_once() == 1
+    assert "status_code=200" in caplog.text
+    assert "content_type=application/json" in caplog.text
+    assert "response_length=128" in caplog.text
+    assert "field_paths=data.task.status" in caplog.text
+    assert "private prompt" not in caplog.text
+    assert submission.job_id in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generation_job_worker_fails_poll_mapping_error_instead_of_retrying() -> None:
+    repository = MemoryGenerationJobRepository()
+    credentials = TransientGenerationJobCredentialStore()
+    context = _context()
+    workspace_repository = MemoryVideoAgentRepository()
+    await workspace_repository.create_workspace(context.user_id, context.workspace)
+    service = GenerationJobService(
+        repository=repository,
+        image_provider=_PollMappingErrorProvider(),
+        credential_store=credentials,
+    )
+    submission = (await service.submit_images(
+        context,
+        assets=(context.workspace.payload["asset_registry"][0],),
+        attempt=1,
+    ))[0]
+    now = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=workspace_repository,
+        credential_store=credentials,
+        image_provider=_PollMappingErrorProvider(),
+        worker_id="generation-worker-poll-mapping-test",
+        clock=lambda: now,
+    )
+
+    assert await worker.run_once() == 1
+    started = await repository.get(submission.job_id)
+    assert started is not None
+    assert started.status is GenerationJobStatus.POLLING
+
+    now = now + timedelta(seconds=3)
+    assert await worker.run_once() == 1
+    failed = await repository.get(submission.job_id)
+    assert failed is not None
+    assert failed.status is GenerationJobStatus.INDETERMINATE
+    assert failed.failure_reason_code == "provider_poll_image_result_url_missing"
+
+
+@pytest.mark.asyncio
+async def test_generation_job_worker_reclaims_missing_image_result() -> None:
+    repository = MemoryGenerationJobRepository()
+    context = _context()
+    job_id = "generation-job-reclaim-1"
+    context.workspace.payload["asset_registry"] = [
+        {
+            **dict(context.workspace.payload["asset_registry"][0]),
+            "state": "generating",
+            "generation_job_id": job_id,
+            "generation_job_status": "queued",
+        }
+    ]
+    workspace_repository = MemoryVideoAgentRepository()
+    await workspace_repository.create_workspace(context.user_id, context.workspace)
+    now = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+    await repository.create_or_read(
+        _job(job_id=job_id, idempotency_key="generation:v1:reclaim").model_copy(
+            update={
+                "item_id": "asset-host",
+                "status": GenerationJobStatus.INDETERMINATE,
+                "provider_job_id": "provider-image-1",
+                "failure_reason_code": "provider_result_missing",
+            }
+        )
+    )
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=workspace_repository,
+        credential_store=TransientGenerationJobCredentialStore(),
+        image_provider=_FakeProvider(),
+        worker_id="generation-worker-reclaim-test",
+        clock=lambda: now,
+    )
+
+    assert await worker.run_once() == 1
+    completed = await repository.get(job_id)
+    assert completed is not None
+    assert completed.status is GenerationJobStatus.SUCCEEDED
+    updated = await workspace_repository.get_workspace(context.user_id, context.workspace.workspace_id)
+    assert updated is not None
+    asset = updated.payload["asset_registry"][0]
+    assert asset["state"] == "ready"
+    assert asset["generation_job_status"] == "succeeded"
     assert asset["image_url"] == "https://cdn.example/image-1.png"
 
 

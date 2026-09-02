@@ -203,6 +203,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 ContentAppImageGenerationAdapter,
                 ContentAppImageProviderSettings,
             )
+            from pixelflow.capabilities.video_delivery import ContentAppVideoMergeAdapter
             from pixelflow.capabilities.video_generation.providers import (
                 ContentAppVideoGenerationProvider,
                 ContentAppVideoProviderSettings,
@@ -241,7 +242,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             app.state.pixelflow_video_generation_provider = video_provider
             image_provider_settings = ContentAppImageProviderSettings.from_env()
             image_provider = (
-                ContentAppImageGenerationAdapter(image_provider_settings)
+                ContentAppImageGenerationAdapter(
+                    image_provider_settings,
+                    authorization_store=content_app_authorization_store,
+                )
                 if image_provider_settings is not None
                 else None
             )
@@ -272,10 +276,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 )
                 await generation_job_worker.start()
                 app.state.pixelflow_generation_job_worker = generation_job_worker
+            delivery_operation_port = (
+                ContentAppVideoMergeAdapter(base_url=provider_settings.base_url)
+                if provider_settings is not None
+                else None
+            )
+            app.state.pixelflow_video_delivery_port = delivery_operation_port
             video_tools = runtime_video_tool_registry(
                 plan_repository=video_agent_repository,
                 generation_job_service=generation_job_service,
                 video_understanding_port=video_understanding_adapter,
+                delivery_operation_port=delivery_operation_port,
             )
             tool_manifest = manifest(video_tools)
             app.state.pixelflow_agent_tool_broker = AgentToolBroker(
@@ -457,6 +468,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             if video_generation_provider is not None:
                 await video_generation_provider.aclose()
+            video_delivery_port = getattr(
+                app.state,
+                "pixelflow_video_delivery_port",
+                None,
+            )
+            if video_delivery_port is not None:
+                await video_delivery_port.aclose()
             image_generation_provider = getattr(
                 app.state,
                 "pixelflow_image_generation_provider",

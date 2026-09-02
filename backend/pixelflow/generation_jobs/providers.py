@@ -6,6 +6,7 @@ import copy
 import math
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
@@ -144,9 +145,41 @@ _RESULT_FORBIDDEN_OUTCOMES = frozenset(
 class ProviderJobMappingError(ValueError):
     """供应商 DTO 不满足稳定映射合同，拒绝猜测任务状态。"""
 
-    def __init__(self, reason_code: str = "provider_response_invalid") -> None:
+    def __init__(
+        self,
+        reason_code: str = "provider_response_invalid",
+        *,
+        diagnostics: ProviderResponseDiagnostics | None = None,
+    ) -> None:
         self.reason_code = reason_code
+        self.diagnostics = diagnostics
         super().__init__(f"Provider Job 响应映射失败：{reason_code}")
+
+
+@dataclass(frozen=True)
+class ProviderResponseDiagnostics:
+    """仅在内存中保存的脱敏 Provider 响应结构诊断。"""
+
+    status_code: int
+    content_type: str
+    response_length: int
+    field_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        status_code = self.status_code if 100 <= self.status_code <= 599 else 0
+        content_type = self.content_type.split(";", 1)[0].strip().lower()[:128]
+        if not re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", content_type):
+            content_type = "unknown"
+        response_length = max(0, min(self.response_length, 10_000_000))
+        field_paths = tuple(
+            path.strip()[:256]
+            for path in self.field_paths
+            if isinstance(path, str) and re.fullmatch(r"[A-Za-z0-9_.:\[\]-]{1,256}", path.strip())
+        )[:128]
+        object.__setattr__(self, "status_code", status_code)
+        object.__setattr__(self, "content_type", content_type)
+        object.__setattr__(self, "response_length", response_length)
+        object.__setattr__(self, "field_paths", field_paths)
 
 
 class ProviderJobCallError(RuntimeError):

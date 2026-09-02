@@ -256,7 +256,10 @@ class InspectSceneTool:
 class PatchSceneTool:
     spec = VideoToolSpec(
         name="patch_scene",
-        description="只修改指定镜头允许变更的创作字段，并写入 dirty_scene_ids",
+        description=(
+            "已有分镜后，只改指定一镜的剧情、Prompt、对白、运镜或参考素材，并写入 dirty_scene_ids。"
+            "用户说第 N 段/第 N 镜不对时优先使用；不要为此重建人物资产或调用 prepare_scene_packages。"
+        ),
         input_model=PatchSceneInput,
         cost_level=VideoToolCostLevel.NONE,
         confirmation_required=False,

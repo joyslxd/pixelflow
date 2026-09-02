@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 from pixelflow.video.contracts import AgentPlan, PlanStepStatus, VideoWorkspace
 from pixelflow.video.services.production_fields import (
@@ -52,6 +53,8 @@ REGISTERED_SCENE_ASSET_IMAGE_MODELS: tuple[dict[str, str], ...] = (
     {"id": "seeddream-5.0", "label": "Seedream 5.0"},
 )
 
+# 用途：公开成片预览只允许已验证 TOS 域；影响：工作台可直连播放，Sidecar 也只能看到白名单 HTTPS。
+_PUBLIC_MEDIA_HOST_SUFFIXES = (".tos-cn-beijing.volces.com", ".vitamazing.top")
 _SECRET_KEY_FRAGMENTS = (
     "credential",
     "secret",
@@ -63,7 +66,7 @@ _SECRET_KEY_FRAGMENTS = (
 )
 
 # 用途：V2 工作台在首屏展示已确认的创作合同；影响：只传递用户拥有的规划文本，
-# 并保持媒体 URL、Provider 原文和凭据不出现在浏览器 Snapshot 中。
+# 成片仅公开白名单 TOS 播放地址，凭据和 Provider 原文仍不进入 Snapshot。
 _V2_CREATIVE_FIELDS = {
     "brand", "product", "audience", "platform", "aspect_ratio", "target_duration_sec",
     "audio", "cta", "creative_direction", "concept", "tone", "visual_style",
@@ -129,6 +132,29 @@ def _safe_v2_narrative_plan(payload: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+_BUSY_JOB_STATUSES = {"queued", "starting", "polling"}
+_FAILED_ASSET_STATES = {"failed", "timeout", "expired", "indeterminate"}
+
+
+def _public_asset_generation(item: Mapping[str, Any]) -> tuple[str, str | None, str | None, str | None]:
+    """把内部 Job 字段收成工作台可展示的状态，不透传 URL 或 Provider 原文。"""
+
+    state = _bounded_text(item.get("state"), maximum=32) or "planned"
+    job_id = _bounded_text(item.get("generation_job_id"), maximum=128)
+    job_status = _bounded_text(
+        item.get("generation_job_status") or item.get("generation_status"),
+        maximum=32,
+    )
+    failure_code = _bounded_text(item.get("failure_reason_code"), maximum=128)
+    if state == "ready":
+        return "ready", job_id, "succeeded" if job_id else None, None
+    if state in _FAILED_ASSET_STATES:
+        return "failed", job_id, "failed" if job_id else None, failure_code
+    if job_id and (state in {"planned", "generating"} or job_status in _BUSY_JOB_STATUSES):
+        return "generating", job_id, job_status if job_status in _BUSY_JOB_STATUSES else "queued", None
+    return state, job_id, job_status, failure_code
+
+
 def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """投影稳定资产身份和状态，禁止 URL、Provider 响应及未知扩展字段。"""
 
@@ -141,6 +167,7 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         role = _bounded_text(item.get("role"), maximum=256)
         if asset_id is None or kind is None or role is None:
             continue
+        state, job_id, job_status, failure_code = _public_asset_generation(item)
         entry: dict[str, Any] = {
             "asset_id": asset_id,
             "slot": _bounded_text(item.get("slot"), maximum=64),
@@ -148,7 +175,10 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "role": role,
             "origin": _bounded_text(item.get("origin"), maximum=32) or "planned_generation",
             "generation_prompt": _bounded_text(item.get("generation_prompt"), maximum=8_000),
-            "state": _bounded_text(item.get("state"), maximum=32) or "planned",
+            "state": state,
+            "generation_job_id": job_id,
+            "generation_job_status": job_status,
+            "failure_reason_code": failure_code,
             "reference_asset_ids": [
                 reference[:128]
                 for reference in _as_list(item.get("reference_asset_ids"))[:32]
@@ -160,46 +190,247 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _safe_v2_prompt_packages(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+def public_workspace_media_url(url: object) -> str | None:
+    """只公开白名单 HTTPS TOS 地址，拒绝用户信息和任意外链。"""
+
+    if not isinstance(url, str) or not url.strip():
+        return None
+    parsed = urlparse(url.strip())
+    host = parsed.hostname.lower() if parsed.hostname else ""
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or not host
+        or not any(host.endswith(suffix) for suffix in _PUBLIC_MEDIA_HOST_SUFFIXES)
+    ):
+        return None
+    return url.strip()
+
+
+def _merged_video_digest(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """投影合并成片的可播放地址；非白名单主机只保留已完成事实、不给 URL。"""
+
+    merged = _as_mapping(payload.get("merged_video")) or {}
+    candidates: list[object] = [
+        merged.get("merged_video_url"),
+        merged.get("video_url"),
+    ]
+    for item in _as_list(payload.get("outputs")):
+        if isinstance(item, Mapping) and str(item.get("output_type") or "") == "mp4":
+            candidates.append(item.get("video_url"))
+    for item in _as_list(payload.get("deliveries")):
+        if (
+            isinstance(item, Mapping)
+            and str(item.get("output_type") or "") == "mp4"
+            and str(item.get("status") or "") == "succeeded"
+        ):
+            candidates.append(item.get("video_url"))
+    for candidate in candidates:
+        url = public_workspace_media_url(candidate)
+        if url:
+            return {"ok": True, "preview_url": url}
+    if merged.get("ok") is True:
+        return {"ok": True}
+    return None
+
+
+def workspace_scene_preview_url(payload: Mapping[str, Any], scene_id: str) -> str | None:
+    """从权威 Workspace 取出可公开的成片地址，优先已审核版本。"""
+
+    if not str(scene_id).strip():
+        return None
+    scene = _workspace_scene_record(payload, scene_id)
+    if scene is None:
+        return None
+    for candidate in _scene_preview_url_candidates(scene):
+        public = public_workspace_media_url(candidate)
+        if public:
+            return public
+    return None
+
+
+def _workspace_scene_record(payload: Mapping[str, Any], scene_id: str) -> Mapping[str, Any] | None:
+    """按 scene_id 或 segment_id 定位分镜。"""
+
+    scenes = payload.get("scenes")
+    if not isinstance(scenes, list):
+        scenes = payload.get("scene_packages")
+    if not isinstance(scenes, list):
+        return None
+    target = str(scene_id).strip()
+    for item in scenes:
+        if not isinstance(item, Mapping):
+            continue
+        identifiers = {str(item.get("scene_id") or "").strip(), str(item.get("segment_id") or "").strip()}
+        if target in identifiers:
+            return item
+    return None
+
+
+def _scene_preview_url_candidates(scene: Mapping[str, Any]) -> list[str]:
+    """只收集 HTTPS 成片地址，顺序：镜头主 URL、已选 variant、成功任务。"""
+
+    urls: list[str] = []
+    primary = _https_media_url(scene.get("video_url"))
+    if primary:
+        urls.append(primary)
+    approved = str(scene.get("approved_variant_id") or "").strip()
+    variants = scene.get("variants")
+    if isinstance(variants, list):
+        selected: list[str] = []
+        rest: list[str] = []
+        for item in variants:
+            if not isinstance(item, Mapping):
+                continue
+            url = _https_media_url(item.get("video_url"))
+            if not url:
+                continue
+            variant_id = str(item.get("variant_id") or "").strip()
+            if item.get("selected") is True or (approved and variant_id == approved):
+                selected.append(url)
+            else:
+                rest.append(url)
+        urls.extend(selected)
+        urls.extend(rest)
+    jobs = scene.get("generation_jobs")
+    if isinstance(jobs, list):
+        for item in jobs:
+            if not isinstance(item, Mapping) or str(item.get("status") or "") != "succeeded":
+                continue
+            url = _https_media_url(item.get("video_url"))
+            if url:
+                urls.append(url)
+    return urls
+
+
+def _https_media_url(value: object) -> str | None:
+    """只接受 https 媒体地址，拒绝相对路径和内部 artifact。"""
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if text.lower().startswith("https://") else None
+
+
+def _scene_video_state_index(payload: Mapping[str, Any], video_status: Mapping[str, Any]) -> dict[str, str]:
+    """用 scene_id / segment_id 对齐成片状态，供 Prompt Package 工作台回显。"""
+
+    by_scene_id = {
+        str(item.get("scene_id") or "").strip(): str(item.get("state") or "").strip()
+        for item in _as_list(video_status.get("scene_video_states"))
+        if isinstance(item, Mapping) and str(item.get("scene_id") or "").strip()
+    }
+    index = dict(by_scene_id)
+    for scene in _as_list(payload.get("scenes") or payload.get("scene_packages")):
+        if not isinstance(scene, Mapping):
+            continue
+        scene_id = str(scene.get("scene_id") or "").strip()
+        segment_id = str(scene.get("segment_id") or "").strip()
+        state = by_scene_id.get(scene_id)
+        if state and segment_id:
+            index[segment_id] = state
+    return index
+
+
+def _scene_preview_url_index(payload: Mapping[str, Any]) -> dict[str, str]:
+    """按 scene_id / segment_id 给出可直连的成片地址。"""
+
+    index: dict[str, str] = {}
+    for scene in _as_list(payload.get("scenes") or payload.get("scene_packages")):
+        if not isinstance(scene, Mapping):
+            continue
+        scene_id = str(scene.get("scene_id") or "").strip()
+        url = workspace_scene_preview_url({"scenes": [scene]}, scene_id or str(scene.get("segment_id") or "").strip())
+        if not url:
+            continue
+        for key in (scene_id, str(scene.get("segment_id") or "").strip()):
+            if key:
+                index[key] = url
+    return index
+
+
+def _prompt_package_public_state(
+    item: Mapping[str, Any],
+    video_states: Mapping[str, str],
+    preview_urls: Mapping[str, str],
+) -> tuple[str, str | None]:
+    """Package 规划态不能单独代表成片；白名单 TOS 地址才进入工作台播放器。"""
+
+    segment_id = _bounded_text(item.get("segment_id") or item.get("scene_id"), maximum=128) or ""
+    declared = _bounded_text(item.get("state"), maximum=32) or "planned"
+    video_state = video_states.get(segment_id)
+    if video_state == "ready":
+        return "ready", preview_urls.get(segment_id)
+    if video_state == "polling":
+        return "generating", None
+    if video_state == "failed":
+        return "failed", None
+    return declared, None
+
+
+def _safe_v2_prompt_packages(
+    payload: Mapping[str, Any],
+    video_states: Mapping[str, str] | None = None,
+    preview_urls: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """投影每段可审阅 Prompt；正文有界以避免 Snapshot 被长片内容无限放大。"""
 
+    states = video_states or {}
+    urls = preview_urls or {}
     result: list[dict[str, Any]] = []
     for index, item in enumerate(_as_list(payload.get("prompt_packages"))[:_V2_PACKAGE_LIMIT], start=1):
         if not isinstance(item, Mapping):
             continue
-        segment_id = _bounded_text(item.get("segment_id") or item.get("scene_id"), maximum=128)
-        prompt = _bounded_text(item.get("prompt"), maximum=_V2_PROMPT_PREVIEW_CHARS)
-        duration = item.get("duration_sec")
-        if segment_id is None or prompt is None or not isinstance(duration, int) or isinstance(duration, bool):
-            continue
-        entry: dict[str, Any] = {
-            "segment_id": segment_id,
-            "sequence": item.get("sequence") if isinstance(item.get("sequence"), int) and item.get("sequence") > 0 else index,
-            "duration_sec": duration,
-            "generation_mode": _bounded_text(item.get("generation_mode"), maximum=64) or "independent",
-            # 该字段是当前用户可审阅的 Seedance Prompt 正文，不是 Provider 请求或模型原文。
-            "prompt_summary": prompt,
-            "prompt_char_count": len(str(item.get("prompt") or "").strip()),
-            "prompt_truncated": len(str(item.get("prompt") or "").strip()) > _V2_PROMPT_PREVIEW_CHARS,
-            "reference_asset_ids": [
-                reference[:128]
-                for reference in _as_list(item.get("reference_asset_ids"))[:32]
-                if isinstance(reference, str) and reference.strip()
-            ],
-            "continuity_from": _bounded_text(item.get("continuity_from"), maximum=128),
-            "transition_out": _bounded_text(item.get("transition_out"), maximum=2_000),
-            "era": _bounded_text(item.get("era"), maximum=512),
-            "camera": _bounded_text(item.get("camera") or item.get("camera_movement"), maximum=2_000),
-            "sound": _bounded_text(item.get("sound"), maximum=2_000),
-            "hard_constraints": [
-                constraint[:2_000]
-                for constraint in _as_list(item.get("hard_constraints"))[:64]
-                if isinstance(constraint, str) and constraint.strip()
-            ],
-            "state": _bounded_text(item.get("state"), maximum=32) or "planned",
-        }
-        result.append({key: value for key, value in entry.items() if value is not None})
+        entry = _public_prompt_package_entry(item, index, states, urls)
+        if entry is not None:
+            result.append(entry)
     return result
+
+
+def _public_prompt_package_entry(
+    item: Mapping[str, Any],
+    index: int,
+    video_states: Mapping[str, str],
+    preview_urls: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """单段公开字段：成片只带白名单 TOS 播放地址。"""
+
+    segment_id = _bounded_text(item.get("segment_id") or item.get("scene_id"), maximum=128)
+    prompt = _bounded_text(item.get("prompt"), maximum=_V2_PROMPT_PREVIEW_CHARS)
+    duration = item.get("duration_sec")
+    if segment_id is None or prompt is None or not isinstance(duration, int) or isinstance(duration, bool):
+        return None
+    state, preview_url = _prompt_package_public_state(item, video_states, preview_urls)
+    sequence = item.get("sequence")
+    entry: dict[str, Any] = {
+        "segment_id": segment_id,
+        "sequence": sequence if isinstance(sequence, int) and sequence > 0 else index,
+        "duration_sec": duration,
+        "generation_mode": _bounded_text(item.get("generation_mode"), maximum=64) or "independent",
+        "prompt_summary": prompt,
+        "prompt_char_count": len(str(item.get("prompt") or "").strip()),
+        "prompt_truncated": len(str(item.get("prompt") or "").strip()) > _V2_PROMPT_PREVIEW_CHARS,
+        "reference_asset_ids": [
+            reference[:128]
+            for reference in _as_list(item.get("reference_asset_ids"))[:32]
+            if isinstance(reference, str) and reference.strip()
+        ],
+        "continuity_from": _bounded_text(item.get("continuity_from"), maximum=128),
+        "transition_out": _bounded_text(item.get("transition_out"), maximum=2_000),
+        "era": _bounded_text(item.get("era"), maximum=512),
+        "camera": _bounded_text(item.get("camera") or item.get("camera_movement"), maximum=2_000),
+        "sound": _bounded_text(item.get("sound"), maximum=2_000),
+        "hard_constraints": [
+            constraint[:2_000]
+            for constraint in _as_list(item.get("hard_constraints"))[:64]
+            if isinstance(constraint, str) and constraint.strip()
+        ],
+        "state": state,
+        "has_preview": True if preview_url else None,
+        "preview_url": preview_url,
+    }
+    return {key: value for key, value in entry.items() if value is not None}
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any] | None:
@@ -402,11 +633,68 @@ def _job_status_bucket(status: str) -> str:
     normalized = status.strip().casefold()
     if normalized in {"succeeded", "success", "completed"}:
         return "succeeded"
-    if normalized in {"failed", "timeout", "expired", "error"}:
+    if normalized in {"failed", "timeout", "expired", "error", "indeterminate"}:
         return "failed"
-    if normalized in {"polling", "created", "running", "start_paused_quota"}:
+    if normalized in {
+        "polling",
+        "queued",
+        "starting",
+        "created",
+        "running",
+        "generating",
+        "start_paused_quota",
+    }:
         return "polling"
     return "other"
+
+
+def _latest_generation_job(scene: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """只认该镜最后一条 GenerationJob，历史失败不得盖住当前重试。"""
+
+    jobs = [item for item in _as_list(scene.get("generation_jobs")) if isinstance(item, Mapping)]
+    return jobs[-1] if jobs else None
+
+
+def _scene_public_video_state(scene: Mapping[str, Any]) -> str:
+    """当前镜头公开态：进行中优先于旧失败和旧成片。"""
+
+    latest = _latest_generation_job(scene)
+    latest_bucket = _job_status_bucket(str(latest.get("status") or "")) if latest else "other"
+    regenerating = str(scene.get("edit_status") or "").strip() == "重新生成中"
+    if latest_bucket == "polling" or (regenerating and latest_bucket not in {"succeeded", "failed"}):
+        return "polling"
+    if _scene_has_video_url(scene) or latest_bucket == "succeeded":
+        return "ready"
+    if latest_bucket == "failed":
+        return "failed"
+    return "idle"
+
+
+def _public_generation_jobs(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """每镜只公开最新视频任务身份和状态，不含 URL。"""
+
+    result: list[dict[str, Any]] = []
+    for scene in _as_list(payload.get("scenes") or payload.get("scene_packages")):
+        if not isinstance(scene, Mapping) or len(result) >= 24:
+            continue
+        scene_id = _bounded_text(scene.get("scene_id"), maximum=128)
+        latest = _latest_generation_job(scene)
+        job_id = _bounded_text(
+            (latest or {}).get("job_id") or (latest or {}).get("generation_job_id"),
+            maximum=128,
+        )
+        status = _bounded_text((latest or {}).get("status"), maximum=32)
+        if scene_id is None or job_id is None or status is None:
+            continue
+        result.append(
+            {
+                "generation_job_id": job_id,
+                "item_id": scene_id,
+                "kind": "video",
+                "status": status,
+            }
+        )
+    return result
 
 
 def summarize_scene_video_status(payload: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -432,29 +720,15 @@ def summarize_scene_video_status(payload: Mapping[str, Any] | None) -> dict[str,
         scene_id = str(scene.get("scene_id") or "").strip()
         if not scene_id:
             continue
-        has_video = _scene_has_video_url(scene)
-        jobs = _as_list(scene.get("generation_jobs"))
-        job_buckets = [
-            _job_status_bucket(str(job.get("status") or ""))
-            for job in jobs
-            if isinstance(job, Mapping)
-        ]
-        if has_video:
+        state = _scene_public_video_state(scene)
+        if state == "ready":
             ready += 1
-            state = "ready"
-        elif any(bucket == "failed" for bucket in job_buckets) and not any(
-            bucket == "polling" for bucket in job_buckets
-        ):
-            failed += 1
-            state = "failed"
-        elif any(bucket == "polling" for bucket in job_buckets) or str(
-            scene.get("edit_status") or ""
-        ).strip() == "重新生成中":
+        elif state == "polling":
             polling += 1
-            state = "polling"
+        elif state == "failed":
+            failed += 1
         else:
             idle += 1
-            state = "idle"
         if len(per_scene) < 24:
             entry: dict[str, Any] = {
                 "scene_id": scene_id,
@@ -513,6 +787,8 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
     asset_status = summarize_scene_asset_status(payload)
     video_status = summarize_scene_video_status(payload)
     scene_summaries = _scene_summaries(scenes, video_status.get("scene_video_states"))
+    package_video_states = _scene_video_state_index(payload, video_status)
+    package_preview_urls = _scene_preview_url_index(payload)
     return {
         key: value
         for key, value in {
@@ -523,7 +799,9 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "creation_contract": _safe_creation_contract(v2_payload),
             "narrative_plan": _safe_v2_narrative_plan(v2_payload) or None,
             "asset_registry": _safe_v2_asset_registry(v2_payload) or None,
-            "prompt_packages": _safe_v2_prompt_packages(v2_payload) or None,
+            "prompt_packages": _safe_v2_prompt_packages(
+                v2_payload, package_video_states, package_preview_urls
+            ) or None,
             "has_script": bool(script_content) or bool(pipeline_stages),
             "script_status": str(script.get("status") or "") or None,
             "script_source": str(script.get("source") or "") or None,
@@ -580,6 +858,8 @@ def build_workspace_digest(workspace: VideoWorkspace) -> dict[str, Any]:
             "has_materials": bool(_as_list(payload.get("materials"))),
             **video_status,
             "scene_summaries": scene_summaries or None,
+            "generation_jobs": _public_generation_jobs(payload) or None,
+            "merged_video": _merged_video_digest(payload),
         }.items()
         if value is not None
     }

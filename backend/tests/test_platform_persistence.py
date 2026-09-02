@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import Integer, String, inspect, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
 from pixelflow.platform.persistence import Base, close_engine, ensure_schema, get_engine, get_session_factory, init_engine
+from pixelflow.platform.persistence.engine import PixelFlowAsyncSession
 
 
 class _PlatformPersistenceProbeRow(Base):
@@ -45,6 +49,69 @@ async def test_platform_persistence_owns_sqlite_engine_and_metadata(tmp_path) ->
         await close_engine()
     assert get_engine() is None
     assert get_session_factory() is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sqlite_session_swallows_only_terminated_connection_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """取消请求后的 SQLite 死连接清理不得产生未回收 Session 异常。"""
+
+    await init_engine(
+        backend="sqlite",
+        url=f"sqlite+aiosqlite:///{tmp_path / 'cancelled-session.db'}",
+        sqlite_dir=str(tmp_path),
+    )
+    factory = get_session_factory()
+    assert factory is not None
+    session = factory()
+    assert isinstance(session, PixelFlowAsyncSession)
+
+    async def terminated_close() -> None:
+        raise OperationalError("no active connection", {}, ValueError("no active connection"))
+
+    monkeypatch.setattr(session, "close", terminated_close)
+    try:
+        await session.__aexit__(None, None, None)
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_session_waits_for_cleanup_task_before_reraising(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """取消发生在 close 执行中时，清理任务也必须被回收后再传播取消。"""
+
+    await init_engine(
+        backend="sqlite",
+        url=f"sqlite+aiosqlite:///{tmp_path / 'cancelled-close.db'}",
+        sqlite_dir=str(tmp_path),
+    )
+    factory = get_session_factory()
+    assert factory is not None
+    session = factory()
+    cleanup_errors: list[BaseException] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: cleanup_errors.append(context["exception"]))
+
+    async def delayed_terminated_close() -> None:
+        await asyncio.sleep(0.01)
+        raise OperationalError("no active connection", {}, ValueError("no active connection"))
+
+    monkeypatch.setattr(session, "close", delayed_terminated_close)
+    exit_task = asyncio.create_task(session.__aexit__(None, None, None))
+    await asyncio.sleep(0)
+    exit_task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await exit_task
+        await asyncio.sleep(0.03)
+        assert cleanup_errors == []
+    finally:
+        await close_engine()
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,6 @@
 - 已显式执行真实 Sidecar `kill`/restart：重启进程读取同一 SQLite Run/Event Store，将所有遗留非终态 Run 收口为 `failed / engine_error` 并追加 `run.failed` 的固定代码 `harness_run_recovery_required`，耗时 2.60 秒且不激活模型；该 Case 只验证 Sidecar 收口，完整 Gateway 恢复旅程见下一条。
 - 已显式执行完整真实恢复旅程：认证用户启动公开 Turn 后立即 `kill` Sidecar，重启进程复用同一 SQLite Run/Event Store；Gateway 按 binding 重新投影失败事件，持久化唯一 `recovery_event_id`，再由 `/recover` 从权威用户消息和当前 SQL Workspace 创建新的 `run_recovery`。恢复 Run 使用新的 Harness Session 并经真实模型、动态 Skill、Capability Plugin、短期 JWT、Tool Broker 和只读 Workspace Tool 完成，耗时 21.97 秒。原 Run 已存在 Tool Ledger 而尚无完整结果投影时会进入 `manual_review`，禁止自动重放。
 - 已显式执行真实 SSE 断线重连与 Gateway restart：认证客户端在收到首个 Gateway SSE 事件后主动关闭 HTTP 流，再按已收到的 sequence 重连；事件连续且不重复。随后停止 Gateway 并以新 FastAPI/Uvicorn 实例、同一 SQLite Outbox/消息表和持续运行的 Sidecar 启动，再从公开 Snapshot 与 SSE 回放原 Run 的完整事件和助手回复，耗时 58.09 秒。该 Case 不创建第二个模型 Run、不调用媒体 Provider。
-- M00 本地门禁已改为跨 macOS/Linux 的 Python 单一入口 `scripts/agentization/m00_local_gate.py`，不再依赖 PowerShell/Pester。它先执行中文工程规范检查，再执行后端、Web、Sidecar Ruff、官方安全 Composition 和 Capability Plugin 构建；macOS 以 `/usr/bin/arch -arm64` 强制运行 Sidecar 的独立 Runtime。实际命令矩阵已通过：后端 `91 passed`、Sidecar `2 passed, 1 skipped`、Capability Plugin 构建通过；默认不调用真实模型。
 - `RunResult.finish_reason` 可以返回 `completed`、`max-tokens` 或 `error` 等结束原因，Sidecar 必须映射为自身的 `status + termination_reason`。
 - 自定义 Cordis composition 必须保留 `@deepseek-ai/dsh-sdk-jsonrpc-server`，并显式设置 `DSH_CORDIS_CONFIG` 或 SDK 的 `cordis` 参数。
 - 官方 Session Persistence 在发现中断 Turn 时会将其收口为中断终态；不支持从 checkpoint、JSONL 或 Session 原位续跑未完成 Turn。PixelFlow 必须创建新的 `run_recovery`。

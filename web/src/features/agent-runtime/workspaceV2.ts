@@ -1,4 +1,4 @@
-/** Workspace V2 安全投影：优先消费 V2 摘要，缺失时回退 V1，绝不透传 URL、凭据或 Provider 原文。 */
+/** Workspace V2 安全投影：优先消费 V2 摘要，缺失时回退 V1；成片只透传白名单 TOS 播放地址。 */
 
 export type WorkspaceV2Asset = {
   assetId: string;
@@ -6,13 +6,14 @@ export type WorkspaceV2Asset = {
   kind: string;
   role: string;
   origin: "existing_material" | "planned_generation" | "provider_output";
-  generationPrompt: string;
-  state: "planned" | "generating" | "ready" | "failed";
-  referenceAssetIds: string[];
-  usableForVideo: boolean;
-  artifactRef: string;
-  generationStatus: string;
-};
+    generationPrompt: string;
+    state: "planned" | "generating" | "ready" | "failed";
+    referenceAssetIds: string[];
+    usableForVideo: boolean;
+    artifactRef: string;
+    generationStatus: string;
+    failureReasonCode: string;
+  };
 
 export type WorkspaceV2Package = {
   segmentId: string;
@@ -30,6 +31,8 @@ export type WorkspaceV2Package = {
   sound: string;
   hardConstraints: string[];
   state: string;
+  hasPreview: boolean;
+  previewUrl: string;
 };
 
 export type WorkspaceV2GenerationJob = {
@@ -47,6 +50,8 @@ export type WorkspaceV2Projection = {
   packages: WorkspaceV2Package[];
   generationJobs: WorkspaceV2GenerationJob[];
   outputs: Array<{ outputId: string; kind: string; status: string; title: string }>;
+  mergedPreviewUrl: string;
+  mergedReady: boolean;
   awaitingProductionConstraints: boolean;
 };
 
@@ -55,6 +60,7 @@ type RecordValue = Record<string, unknown>;
 const CREATIVE_FIELDS = ["brand", "product", "audience", "platform", "aspect_ratio", "target_duration_sec", "audio", "cta", "creative_direction", "tone", "visual_style", "delivery", "reference_strategy"] as const;
 const NARRATIVE_FIELDS = ["concept", "outline", "character_arc", "era", "narration", "dialogue", "sound", "brand_closure", "script", "status", "version"] as const;
 const STATE_VALUES = new Set(["planned", "generating", "ready", "failed"]);
+const PREVIEW_HOST_SUFFIXES = [".tos-cn-beijing.volces.com", ".vitamazing.top"];
 
 function record(value: unknown): RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as RecordValue : {};
@@ -74,6 +80,19 @@ function integer(value: unknown): number | null {
 
 function strings(value: unknown, max = 32): string[] {
   return Array.isArray(value) ? value.map((item) => string(item, 256)).filter(Boolean).slice(0, max) : [];
+}
+
+function previewUrl(value: unknown): string {
+  const candidate = string(value, 4_096);
+  try {
+    const parsed = new URL(candidate);
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return "";
+    if (!PREVIEW_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) return "";
+    return candidate;
+  } catch {
+    return "";
+  }
 }
 
 function status(value: unknown): WorkspaceV2Asset["state"] {
@@ -146,11 +165,12 @@ function assets(summary: RecordValue): WorkspaceV2Asset[] {
     role: string(item.role ?? item.name ?? item.title, 256) || "未命名资产",
     origin: assetOrigin(item.origin),
     generationPrompt: string(item.generation_prompt, 8_000),
-    state: status(item.state),
+    state: status(item.state === "planned" && string(item.generation_job_id, 128) ? "generating" : item.state),
     referenceAssetIds: strings(item.reference_asset_ids),
     usableForVideo: item.usable_for_video === true,
     artifactRef: string(item.artifact_ref ?? item.provider_artifact_ref, 256),
-    generationStatus: string(item.generation_status, 64),
+    generationStatus: string(item.generation_job_status ?? item.generation_status, 64),
+    failureReasonCode: string(item.failure_reason_code, 128),
   }));
 }
 
@@ -173,6 +193,8 @@ function packages(summary: RecordValue): WorkspaceV2Package[] {
     sound: string(item.sound, 1_000),
     hardConstraints: strings(item.hard_constraints, 64),
     state: string(item.state, 64) || "planned",
+    previewUrl: previewUrl(item.preview_url),
+    hasPreview: Boolean(previewUrl(item.preview_url)),
   })).sort((left, right) => left.sequence - right.sequence);
 }
 
@@ -180,12 +202,19 @@ function generationJobs(summary: RecordValue): WorkspaceV2GenerationJob[] {
   const explicit = records(summary.generation_jobs ?? summary.jobs);
   const assetJobs = records(summary.asset_registry)
     .filter((asset) => string(asset.generation_job_id, 128))
-    .map((asset) => ({
-      generation_job_id: asset.generation_job_id,
-      kind: "image",
-      item_id: asset.asset_id,
-      status: asset.generation_job_status ?? asset.generation_status,
-    }));
+    .map((asset) => {
+      const assetState = string(asset.state, 32).toLowerCase();
+      const jobStatus = string(asset.generation_job_status ?? asset.generation_status, 64);
+      const status = assetState === "failed" ? "failed"
+        : assetState === "ready" ? "succeeded"
+        : jobStatus;
+      return {
+        generation_job_id: asset.generation_job_id,
+        kind: "image",
+        item_id: asset.asset_id,
+        status,
+      };
+    });
   const sceneJobs = records(summary.scene_summaries)
     .flatMap((scene) => records(scene.generation_jobs).map((job) => ({
       ...job,
@@ -201,6 +230,16 @@ function generationJobs(summary: RecordValue): WorkspaceV2GenerationJob[] {
   }));
 }
 
+function mergedVideo(summary: RecordValue): { mergedPreviewUrl: string; mergedReady: boolean } {
+  const source = record(summary.merged_video);
+  const url = previewUrl(source.preview_url);
+  return {
+    mergedPreviewUrl: url,
+    mergedReady: source.ok === true || Boolean(url),
+  };
+}
+
+
 function outputs(summary: RecordValue): WorkspaceV2Projection["outputs"] {
   return records(summary.outputs).map((item, index) => ({
     outputId: string(item.output_id ?? item.asset_id ?? item.id, 128) || `output-${index + 1}`,
@@ -214,6 +253,7 @@ export function projectWorkspaceV2(rawSummary: Record<string, unknown>): Workspa
   /** 只投影文档明确允许的安全字段；V2 缺失时降级到已有 V1 摘要。 */
 
   const summary = record(rawSummary);
+  const merged = mergedVideo(summary);
   return {
     schemaVersion: integer(summary.workspace_schema_version) ?? 1,
     creativeBrief: creativeBrief(summary),
@@ -222,6 +262,8 @@ export function projectWorkspaceV2(rawSummary: Record<string, unknown>): Workspa
     packages: packages(summary),
     generationJobs: generationJobs(summary),
     outputs: outputs(summary),
+    mergedPreviewUrl: merged.mergedPreviewUrl,
+    mergedReady: merged.mergedReady,
     awaitingProductionConstraints: summary.awaiting_production_constraints === true,
   };
 }
@@ -235,11 +277,46 @@ export function generationJobCounts(jobs: WorkspaceV2GenerationJob[]): Record<st
     if (seen.has(job.jobId)) continue;
     seen.add(job.jobId);
     const normalized = job.status.toLowerCase();
-    if (normalized.includes("fail") || normalized.includes("error") || normalized.includes("timeout")) counts.failed += 1;
+    if (normalized.includes("fail") || normalized.includes("error") || normalized.includes("timeout") || normalized === "indeterminate") counts.failed += 1;
     else if (normalized.includes("success") || normalized.includes("succeed") || normalized.includes("complete")) counts.succeeded += 1;
     else if (normalized.includes("pause") || normalized.includes("authorization") || normalized.includes("quota")) counts.paused += 1;
-    else if (normalized.includes("poll") || normalized.includes("running")) counts.polling += 1;
+    else if (normalized.includes("poll") || normalized.includes("running") || normalized === "starting" || normalized === "generating") counts.polling += 1;
     else counts.queued += 1;
   }
   return counts;
+}
+
+export function workspaceHasInFlightGeneration(rawSummary: Record<string, unknown>): boolean {
+  /** 只根据 Gateway 公开摘要判断是否还有未完成生成，浏览器不自建任务列表。 */
+
+  const projection = projectWorkspaceV2(rawSummary);
+  if (projection.assets.some((asset) => asset.state === "generating")) return true;
+  const counts = generationJobCounts(projection.generationJobs);
+  if (counts.queued + counts.polling > 0) return true;
+  const pollingScenes = integer(rawSummary.scene_videos_polling_count);
+  return pollingScenes !== null && pollingScenes > 0;
+}
+
+export function generationProgressText(rawSummary: Record<string, unknown>): string {
+  /** 任务看板只展示公开计数，不含 URL、凭据或 Provider 原文。 */
+
+  const projection = projectWorkspaceV2(rawSummary);
+  const videoCounts = generationJobCounts(projection.generationJobs.filter((job) => job.kind === "video"));
+  const imageCounts = generationJobCounts(projection.generationJobs.filter((job) => job.kind !== "video"));
+  const generating = projection.assets.filter((asset) => asset.state === "generating");
+  const pollingScenes = integer(rawSummary.scene_videos_polling_count) ?? 0;
+  const videoInFlight = videoCounts.queued + videoCounts.polling || pollingScenes;
+  if (generating.length > 0) {
+    const names = generating.map((asset) => asset.slot || asset.role).filter(Boolean).slice(0, 3).join("、");
+    const target = names || `${generating.length} 项`;
+    return `正在生成 ${target} · 完成 ${imageCounts.succeeded} · 失败 ${imageCounts.failed} · 进行中 ${generating.length}`;
+  }
+  if (videoInFlight > 0) {
+    return `正在生成 ${videoInFlight} 个分镜视频 · 完成 ${videoCounts.succeeded} · 失败 ${videoCounts.failed}`;
+  }
+  if (videoCounts.failed > 0) return `分镜视频结束 · 成功 ${videoCounts.succeeded} · 失败 ${videoCounts.failed}`;
+  if (videoCounts.succeeded > 0) return `分镜视频完成 ${videoCounts.succeeded} 项`;
+  if (imageCounts.failed > 0) return `生成结束 · 成功 ${imageCounts.succeeded} · 失败 ${imageCounts.failed}`;
+  if (imageCounts.succeeded > 0) return `生成完成 ${imageCounts.succeeded} 项`;
+  return "";
 }

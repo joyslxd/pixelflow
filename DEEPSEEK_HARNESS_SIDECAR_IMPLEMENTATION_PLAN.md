@@ -1852,7 +1852,6 @@ Sidecar 自身配置文件的每个叶子项同样必须有中文说明；JSON �
 - Tool 返回 `pending_operation` 或 `awaiting_confirmation` 后停止下一次模型调用、持久化 interrupt/Operation 并创建恢复 Run，归属 M5；
 - ✅ 不装载 Bash/文件/Web/Subagent 后 Agent 仍可正常运行；已由安全 Composition 下真实模型 Turn 验证；
 - Sidecar 重启后的持久化事件恢复、`recovery_event_id`、`run_recovery` 和 Tool Ledger 安全收口归属 M2；与外部 Operation/确认的恢复语义归属 M5；
-- ✅ 已将 M00 本地门禁迁为 `scripts/agentization/m00_local_gate.py`，覆盖 `services/pixelflow-agent-harness/` 的中文 commit 语义、人工注释/docstring、Sidecar/Profile/Bundle 配置叶子项说明、ARM64/Linux 原生 Runtime 的 Ruff、官方安全 Composition 与 Capability Plugin 构建；未配置远端 CI，状态保持 `automation_local_ready`。
 
 M0 真实测试使用专用测试租户、测试数据库和最小权限服务凭据；数据在每个 Case 前创建、Case 后按 owner 清理。DeepSeek 模型调用会产生实际模型费用，必须设置单 Case token 上限和测试总预算并记录 usage，但不得把 API key 或用户正文写入测试报告。只有模型、Harness、最小内部 HTTP、Tool Broker、Repository 全部为真实实现的纵向 Case 才计入 Go/No-Go。
 

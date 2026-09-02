@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Literal, Protocol
 
@@ -21,6 +22,8 @@ from .contracts import (
 )
 
 DeliveryOutputType = Literal["mp4", "jianying_package"]
+_INFLIGHT_JOB_STATUSES = frozenset({"queued", "starting", "polling"})
+logger = logging.getLogger(__name__)
 
 
 class ComposeOrExportVideoInput(BaseModel):
@@ -104,6 +107,12 @@ class ComposeOrExportVideoTool:
         selected_scenes = _validated_delivery_scenes(context.workspace.payload)
         if self._operation_port is None:
             raise VideoToolExecutionError("视频交付Operation尚未装配")
+        logger.info(
+            "compose_or_export_video start output_type=%s scene_count=%s attempt=%s",
+            request.output_type,
+            len(selected_scenes),
+            request.attempt,
+        )
         try:
             job = await self._operation_port.start_delivery(
                 context,
@@ -205,9 +214,6 @@ class ComposeOrExportVideoTool:
 def _validated_delivery_scenes(
     payload: Mapping[str, object],
 ) -> list[dict[str, JsonValue]]:
-    dirty = _text_list(payload.get("dirty_scene_ids"))
-    if dirty:
-        raise VideoToolValidationError("dirty_scene_ids仍有未完成镜头")
     qc = payload.get("qc")
     if isinstance(qc, Mapping):
         unresolved = [
@@ -222,23 +228,22 @@ def _validated_delivery_scenes(
     scenes = _records(payload.get("scenes"))
     if not scenes:
         raise VideoToolValidationError("工作区没有可交付镜头")
+    indexes = _scene_indexes(scenes)
+    dirty = set(_text_list(payload.get("dirty_scene_ids")))
     selected: list[dict[str, JsonValue]] = []
-    seen_indexes: set[int] = set()
-    for scene in scenes:
+    seen_ids: set[str] = set()
+    for scene, scene_index in zip(scenes, indexes, strict=True):
         scene_id = str(scene.get("scene_id") or "").strip()
-        scene_index = scene.get("scene_index")
-        if (
-            not scene_id
-            or isinstance(scene_index, bool)
-            or not isinstance(scene_index, int)
-            or scene_index < 1
-            or scene_index in seen_indexes
-        ):
+        if not scene_id or scene_id in seen_ids:
             raise VideoToolValidationError("工作区镜头顺序无效")
-        seen_indexes.add(scene_index)
+        seen_ids.add(scene_id)
+        if _scene_has_inflight_job(scene):
+            raise VideoToolValidationError("仍有镜头正在生成")
         approved = _resolve_delivery_variant(scene)
         artifact_ref = approved.get("artifact_ref") if approved else None
         if not approved or not _is_artifact_ref(artifact_ref):
+            if scene_id in dirty:
+                raise VideoToolValidationError("dirty_scene_ids仍有未完成镜头")
             raise VideoToolValidationError("所有镜头必须选用审核通过的内部版本")
         selected.append(
             {
@@ -248,6 +253,9 @@ def _validated_delivery_scenes(
                 "artifact_ref": str(artifact_ref),
             }
         )
+    leftover_dirty = dirty - seen_ids
+    if leftover_dirty:
+        raise VideoToolValidationError("dirty_scene_ids仍有未完成镜头")
     ordered = sorted(selected, key=lambda item: int(item["_scene_index"]))
     return [
         {key: value for key, value in item.items() if key != "_scene_index"}
@@ -255,10 +263,36 @@ def _validated_delivery_scenes(
     ]
 
 
+def _scene_indexes(scenes: Sequence[Mapping[str, JsonValue]]) -> list[int]:
+    """有完整且不重复的 scene_index 时沿用；否则按工作区列表顺序编号。"""
+
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for scene in scenes:
+        scene_index = scene.get("scene_index")
+        if (
+            isinstance(scene_index, bool)
+            or not isinstance(scene_index, int)
+            or scene_index < 1
+            or scene_index in seen
+        ):
+            return list(range(1, len(scenes) + 1))
+        seen.add(scene_index)
+        indexes.append(scene_index)
+    return indexes
+
+
+def _scene_has_inflight_job(scene: Mapping[str, object]) -> bool:
+    return any(
+        str(item.get("status") or "") in _INFLIGHT_JOB_STATUSES
+        for item in _records(scene.get("generation_jobs"))
+    )
+
+
 def _resolve_delivery_variant(
     scene: Mapping[str, object],
 ) -> dict[str, JsonValue] | None:
-    """优先 approved_variant_id；否则取已选中且含 HTTPS 成片的版本。"""
+    """优先已审核选中版本；多候选时取工作区列表中最后一条可交付成片。"""
 
     variants = _records(scene.get("variants"))
     approved_variant_id = str(scene.get("approved_variant_id") or "").strip()
@@ -275,7 +309,6 @@ def _resolve_delivery_variant(
         )
         if approved is not None:
             return approved
-    # 异步回写后可能只有 selected/approved 标记、未写 approved_variant_id。
     selected_ready = [
         item
         for item in variants
@@ -286,7 +319,6 @@ def _resolve_delivery_variant(
     ]
     if len(selected_ready) == 1:
         return selected_ready[0]
-    # 单版本成片：默认可交付。
     ready = [
         item
         for item in variants
@@ -294,6 +326,8 @@ def _resolve_delivery_variant(
     ]
     if len(ready) == 1:
         return ready[0]
+    if ready:
+        return ready[-1]
     return None
 
 

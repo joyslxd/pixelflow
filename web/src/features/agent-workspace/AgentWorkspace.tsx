@@ -6,6 +6,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useAgentConversation } from "@/features/agent-runtime/useAgentConversation";
 import { isRecoveryRequired, projectVisible } from "@/features/agent-runtime/state";
 import { WorkspaceV2Panel } from "@/features/agent-runtime/WorkspaceV2Panel";
+import { generationProgressText, workspaceHasInFlightGeneration } from "@/features/agent-runtime/workspaceV2";
 import { ConversationList } from "@/features/conversations/ConversationList";
 import { ConversationMessages } from "@/features/conversations/ConversationMessages";
 
@@ -19,7 +20,7 @@ type AgentWorkspaceProps = {
   conversationId?: string;
 };
 
-/** 只消费 Gateway 公开 Snapshot/SSE 的新工作台，不保留旧任务轮询或业务状态副本。 */
+/** 新 Runtime 工作台组合根：消息、公开进度与只读 Workspace 均从 Snapshot 投影。 */
 export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
   const { conversationId: routeConversationId } = useParams();
   const navigate = useNavigate();
@@ -41,6 +42,9 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
     recoveringRunId,
   } = useAgentConversation(conversationId ?? routeConversationId);
   const snapshot = runtime.snapshot;
+  const workspaceSummary = runtime.videoWorkspace?.summary;
+  const generationBusy = workspaceSummary !== undefined && workspaceHasInFlightGeneration(workspaceSummary);
+  const generationHint = workspaceSummary === undefined ? "" : generationProgressText(workspaceSummary);
   // Snapshot 是刷新/重连后的权威运行态；不能只依赖 inputStatus（hydrate 期间可能尚未收到状态事件）。
   const agentBusy = runtime.inputStatus !== "idle"
     || snapshot?.status === "accepted"
@@ -100,6 +104,7 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
       )}
       messages={(
         <ConversationMessages
+          conversationId={detail?.conversation.conversation_id}
           messages={runtime.messages}
           responsePreview={visible.responsePreview}
           executionSummary={visible.thinkingPreview}
@@ -111,7 +116,8 @@ export function AgentWorkspace({ conversationId }: AgentWorkspaceProps) {
         <>
           <AgentTaskBoard
             status={snapshot?.status}
-            latestProgress={visible.progressLines.at(-1)}
+            latestProgress={generationHint || visible.progressLines.at(-1)}
+            generationBusy={generationBusy}
             recoveryRequired={recoveryRequired}
             recovering={recoveringRunId === snapshot?.run_id}
             onRecover={() => void recoverActiveRun()}

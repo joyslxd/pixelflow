@@ -22,6 +22,16 @@ from .port import AgentHarnessPort
 from .sidecar import GatewayHarnessSidecarError
 
 _SNAPSHOT_EVENT_LIMIT = 256
+_PUBLIC_RUN_STATUSES = {
+    "accepted",
+    "running",
+    "suspended_operation",
+    "suspended_confirmation",
+    "suspended_authorization",
+    "completed",
+    "failed",
+    "cancelled",
+}
 
 
 def _bounded_snapshot_events(events: list[AgentEvent]) -> list[AgentEvent]:
@@ -114,7 +124,7 @@ class HarnessRunProjector:
         status = "accepted"
         if events:
             state = events[-1].payload.get("status")
-            if isinstance(state, str) and state in {"accepted", "running", "completed", "failed", "cancelled"}:
+            if isinstance(state, str) and state in _PUBLIC_RUN_STATUSES:
                 status = state
         workspace = await self._workspace_projection(binding)
         last_event = events[-1] if events else None
@@ -335,6 +345,10 @@ class HarnessRunProjector:
                     "engine_execution_failed",
                     "engine_finish_reason_unexpected",
                     "harness_run_recovery_required",
+                    "deadline_exceeded",
+                    "max_model_steps",
+                    "max_business_tools",
+                    "max_output_tokens",
                 }:
                     payload["code"] = code
             return AgentEventType.RUN_STATE_CHANGED, payload

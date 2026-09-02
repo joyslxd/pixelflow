@@ -26,6 +26,9 @@ docs/*
 # 用途：忽略独立 Sidecar 本地 Python 虚拟环境；影响：依赖必须由 uv.lock 或固定安装命令复现，运行时二进制不提交。
 services/**/.venv/
 
+# 用途：忽略 Sidecar 本地服务配置与 Secret；影响：开发者从 .env.example 复制后自行注入，禁止提交真实密钥。
+services/pixelflow-agent-harness/.env
+
 # 用途：忽略独立 Sidecar 的本地 Node 依赖目录；影响：自定义 Plugin 依赖由 package-lock.json 复现，不提交平台相关二进制。
 services/**/node_modules/
 

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from pixelflow.agent_control_plane.persistence.models import PixelFlowGenerationJobRow
 from pixelflow.agent_control_plane.persistence.repositories import AgentRuntimeRecordConflictError
 
-from .contracts import GenerationJobRecord, GenerationJobStatus
+from .contracts import GenerationJobKind, GenerationJobRecord, GenerationJobStatus
 
 
 class GenerationJobRepository(Protocol):
@@ -49,6 +49,8 @@ class GenerationJobRepository(Protocol):
         lease_duration: timedelta,
         limit: int,
     ) -> tuple[GenerationJobRecord, ...]: ...
+
+    async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int: ...
 
     async def reschedule_poll(
         self,
@@ -224,6 +226,42 @@ class MemoryGenerationJobRepository:
                 self._records[item.generation_job_id] = updated
                 claimed.append(updated)
             return tuple(deepcopy(item) for item in claimed)
+
+    async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int:
+        """把仍缺结果的图片任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
+
+        if limit <= 0:
+            return 0
+        observed_at = _utc(now)
+        async with self._lock:
+            succeeded = {
+                (item.workspace_id, item.item_id)
+                for item in self._records.values()
+                if item.status is GenerationJobStatus.SUCCEEDED
+            }
+            latest: dict[tuple[str, str], GenerationJobRecord] = {}
+            for item in self._records.values():
+                if not _is_missing_image_result(item) or (item.workspace_id, item.item_id) in succeeded:
+                    continue
+                key = (item.workspace_id, item.item_id)
+                current = latest.get(key)
+                if current is None or item.created_at > current.created_at:
+                    latest[key] = item
+            reopened = 0
+            for item in list(latest.values())[:limit]:
+                self._records[item.generation_job_id] = item.model_copy(
+                    update={
+                        "status": GenerationJobStatus.POLLING,
+                        "failure_reason_code": None,
+                        "result_json": None,
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "next_poll_at": observed_at,
+                        "updated_at": observed_at,
+                    }
+                )
+                reopened += 1
+            return reopened
 
     async def complete(
         self,
@@ -436,6 +474,60 @@ class SQLGenerationJobRepository:
                     claimed.append(_record_from_row(row))
                 return tuple(claimed)
 
+    async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int:
+        """把仍缺结果的图片任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
+
+        if limit <= 0:
+            return 0
+        observed_at = _utc(now)
+        async with self._session_factory() as session:
+            async with session.begin():
+                missing = list(
+                    (
+                        await session.scalars(
+                            select(PixelFlowGenerationJobRow)
+                            .where(
+                                PixelFlowGenerationJobRow.kind == GenerationJobKind.IMAGE.value,
+                                PixelFlowGenerationJobRow.status == GenerationJobStatus.INDETERMINATE.value,
+                                PixelFlowGenerationJobRow.failure_reason_code == "provider_result_missing",
+                                PixelFlowGenerationJobRow.provider_job_id.is_not(None),
+                            )
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                if not missing:
+                    return 0
+                succeeded = {
+                    (workspace_id, item_id)
+                    for workspace_id, item_id in (
+                        await session.execute(
+                            select(PixelFlowGenerationJobRow.workspace_id, PixelFlowGenerationJobRow.item_id).where(
+                                PixelFlowGenerationJobRow.status == GenerationJobStatus.SUCCEEDED.value
+                            )
+                        )
+                    ).all()
+                }
+                latest: dict[tuple[str, str], PixelFlowGenerationJobRow] = {}
+                for row in missing:
+                    key = (row.workspace_id, row.item_id)
+                    if key in succeeded:
+                        continue
+                    current = latest.get(key)
+                    if current is None or row.created_at > current.created_at:
+                        latest[key] = row
+                reopened = 0
+                for row in list(latest.values())[:limit]:
+                    row.status = GenerationJobStatus.POLLING.value
+                    row.failure_reason_code = None
+                    row.result_json = None
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    row.next_poll_at = observed_at
+                    row.updated_at = observed_at
+                    reopened += 1
+                return reopened
+
     async def complete(
         self,
         *,
@@ -513,6 +605,17 @@ def _same_identity(left: GenerationJobRecord, right: GenerationJobRecord) -> boo
         and left.variant_index == right.variant_index
         and left.request_hash == right.request_hash
         and left.provider_id == right.provider_id
+    )
+
+
+def _is_missing_image_result(item: GenerationJobRecord) -> bool:
+    """只回放图片成功但没拿到 URL 的终态，避免重开授权丢失等其它 indeterminate。"""
+
+    return (
+        item.kind is GenerationJobKind.IMAGE
+        and item.status is GenerationJobStatus.INDETERMINATE
+        and item.failure_reason_code == "provider_result_missing"
+        and bool(item.provider_job_id)
     )
 
 

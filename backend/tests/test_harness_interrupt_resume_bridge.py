@@ -127,12 +127,14 @@ async def test_confirmation_resume_uses_gateway_run_bridge_and_current_workspace
         interrupt=interrupt,
         trigger_type="confirmation_resume",
         user_input="用户已确认继续执行。",
-        system_instruction="仅执行已确认操作。",
     )
 
     assert run_id == "hrun_" + "a" * 32
     assert harness.request is not None
     assert harness.request.trigger_type == "confirmation_resume"
+    assert harness.request.system_instruction.startswith("你是 PixelFlow Agent")
+    assert "本轮触发约束" in harness.request.system_instruction
+    assert "视频 Agent" not in harness.request.system_instruction
     assert harness.request.workspace_revision == 21
     assert harness.request.max_output_tokens == 32_768
     assert projector.calls == 1

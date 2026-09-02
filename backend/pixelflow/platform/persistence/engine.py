@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 
 from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -16,6 +18,34 @@ logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+class PixelFlowAsyncSession(AsyncSession):
+    """让取消请求后的 SQLite 死连接清理保持幂等，不吞掉其它数据库错误。"""
+
+    async def __aexit__(self, type_: object, value: object, traceback: object) -> None:
+        """保护 Session.close 的后台任务，并忽略 SQLite 已被取消关闭的连接。"""
+
+        cleanup_task = asyncio.create_task(self.close())
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            try:
+                await cleanup_task
+            except DBAPIError as error:
+                if not _is_terminated_sqlite_connection(error):
+                    raise
+            raise
+        except DBAPIError as error:
+            if _is_terminated_sqlite_connection(error):
+                return
+            raise
+
+
+def _is_terminated_sqlite_connection(error: DBAPIError) -> bool:
+    """仅匹配 aiosqlite 连接已被取消流程终止的固定错误文本。"""
+
+    return "no active connection" in str(error).lower()
 
 
 def _json_serializer(value: object) -> str:
@@ -73,7 +103,11 @@ async def init_engine(
         )
     else:
         raise ValueError("数据库 backend 只允许 memory、sqlite 或 postgres")
-    _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+    _session_factory = async_sessionmaker(
+        _engine,
+        expire_on_commit=False,
+        class_=PixelFlowAsyncSession,
+    )
     logger.info("PixelFlow 自有持久化引擎已初始化：backend=%s", backend)
 
 

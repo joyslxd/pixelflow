@@ -39,6 +39,20 @@ def test_video_provider_defaults_to_enabled_when_content_app_is_configured(
     assert settings.base_url == "https://content.example/api"
 
 
+def test_video_provider_appends_api_when_site_root_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """站点根地址必须补齐 /api，否则会打到前端 HTML。"""
+
+    monkeypatch.delenv("PIXELFLOW_M06_VIDEO_PROVIDER_ENABLED", raising=False)
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://test-video.borgrise.com")
+
+    settings = ContentAppVideoProviderSettings.from_env()
+
+    assert settings is not None
+    assert settings.base_url == "https://test-video.borgrise.com/api"
+
+
 def test_video_provider_can_be_explicitly_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -172,6 +186,105 @@ async def test_402_and_expired_map_to_stable_outcomes() -> None:
     assert started.outcome is ProviderJobOutcome.POLLING
     assert expired.outcome is ProviderJobOutcome.EXPIRED
     assert expired.provider_job_id == "task-expired"
+
+
+@pytest.mark.asyncio
+async def test_display_name_model_header_uses_catalog_id() -> None:
+    """展示名不能当作 modelType，否则 content-app 会用 402 表示价格档不存在。"""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"taskId": "task-1", "status": "processing"}},
+        )
+
+    provider = _provider(handler)
+    await provider.start(
+        {
+            "generation_mode": "text_to_video",
+            "prompt": "测试视频",
+            "model": "Seedance 2.5",
+            "ratio": "9:16",
+            "size": "1080p",
+            "duration": 8,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        },
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:test-model-id",
+    )
+    await provider.aclose()
+
+    assert requests[0].headers["modelType"] == "seedance-2.5"
+
+
+@pytest.mark.asyncio
+async def test_402_price_config_missing_is_not_quota() -> None:
+    """价格档不存在与账户额度不足不是同一类 402。"""
+
+    provider = _provider(
+        lambda _request: httpx.Response(
+            402,
+            json={"success": False, "message": "模型价格配置不存在: modelType=Seedance 2.5"},
+        )
+    )
+    request = provider.prepare_operation_request(
+        {
+            "generation_mode": "text_to_video",
+            "prompt": "测试视频",
+            "model": "seedance-2.5",
+            "ratio": "9:16",
+            "size": "1080p",
+            "duration": 8,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        }
+    )
+    with pytest.raises(ProviderJobMappingError, match="video_billing_profile_missing"):
+        await provider.start(
+            request,
+            authorization="Bearer user-start-token",
+            idempotency_key="operation:v1:test-billing-profile",
+        )
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_402_price_config_plain_text_is_not_quota() -> None:
+    """content-app 偶发用纯文本回 402，同样不能当成账户没额度。"""
+
+    provider = _provider(
+        lambda _request: httpx.Response(
+            402,
+            content="模型价格配置不存在: modelType=Seedance 2.5".encode(),
+            headers={"content-type": "text/plain; charset=utf-8"},
+        )
+    )
+    with pytest.raises(ProviderJobMappingError, match="video_billing_profile_missing"):
+        await provider.start(
+            {
+                "generation_mode": "text_to_video",
+                "prompt": "测试视频",
+                "model": "seedance-2.5",
+                "ratio": "9:16",
+                "size": "1080p",
+                "duration": 8,
+                "sound": "on",
+                "image_urls": [],
+                "video_urls": [],
+                "audio_urls": [],
+            },
+            authorization="Bearer user-start-token",
+            idempotency_key="operation:v1:test-billing-profile-text",
+        )
+    await provider.aclose()
 
 
 @pytest.mark.asyncio

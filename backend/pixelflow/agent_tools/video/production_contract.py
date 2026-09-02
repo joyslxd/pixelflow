@@ -24,7 +24,8 @@ class SetVideoGenerationContractTool:
         name="set_video_generation_contract",
         description=(
             "原子写入即将用于视频生成的完整生产合同（video_model、video_ratio、"
-            "video_size、video_sound），不生成视频也不计费。仅在 Agent 已根据当前工作区、"
+            "video_size、video_sound），不生成视频也不计费。video_model 必须是供应商目录 ID"
+            "（例如 seedance-2.5），不能写展示名。仅在 Agent 已根据当前工作区、"
             "用户确认和可用能力选定参数后调用；不得写入 Authorization、价格或 Provider 原始配置。"
         ),
         input_model=WorkspaceCreationContract,

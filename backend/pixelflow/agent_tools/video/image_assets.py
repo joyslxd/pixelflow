@@ -27,7 +27,8 @@ class GenerateImageAssetsTool:
         name="generate_image_assets",
         description=(
             "为已规划的角色、场景、道具等图片资产创建 GenerationJob；只能选择当前 Workspace "
-            "中 state=planned 且有 generation_prompt 的资产。Tool 返回后由 Gateway Worker 负责启动与轮询，"
+            "中 state=planned 且有 generation_prompt 的资产。failed 资产必须先调用 "
+            "retry_failed_image_assets。Tool 返回后由 Gateway Worker 负责启动与轮询，"
             "完成时 Gateway 将资产原子回写为 ready。此操作可能计费，需用户确认与瞬时授权。"
         ),
         input_model=GenerateImageAssetsInput,
@@ -83,6 +84,7 @@ class GenerateImageAssetsTool:
             next_registry.append(
                 {
                     **dict(item),
+                    "state": "generating",
                     "generation_job_id": submission.job_id,
                     "generation_job_status": submission.status.value,
                 }

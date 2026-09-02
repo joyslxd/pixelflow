@@ -1,6 +1,14 @@
 /** Gateway 与浏览器共享的 Harness Runtime 协议；禁止引入 Sidecar 私有 DTO。 */
 
-export type RunStatusV1 = "accepted" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatusV1 =
+  | "accepted"
+  | "running"
+  | "suspended_operation"
+  | "suspended_confirmation"
+  | "suspended_authorization"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type PublicAgentEventTypeV1 =
   | "run.state_changed"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent 扩展治理"
+  short_description: "按 PixelFlow 分层安全扩展 Agent 能力。"
+  default_prompt: "使用 agent-extension-governance 评估并实现这项 Agent 扩展。"

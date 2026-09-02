@@ -18,4 +18,4 @@ export {
   type EventApplyResult,
   type InputStatus,
 } from "./reducer.js";
-export { hydrateSnapshot, projectVisible, type VisibleProjection } from "./snapshotProjector.js";
+export { hydrateSnapshot, preferWorkspace, projectVisible, type VisibleProjection } from "./snapshotProjector.js";

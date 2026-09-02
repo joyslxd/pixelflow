@@ -360,6 +360,7 @@ async def test_patch_scene_tool_is_exposed_to_harness_and_replay_does_not_repeat
         "inspect_scene",
         "patch_scene",
         "replace_scene_asset",
+        "retry_failed_image_assets",
     }
     assert first.status == replay.status == second.status == "completed"
     assert first == replay

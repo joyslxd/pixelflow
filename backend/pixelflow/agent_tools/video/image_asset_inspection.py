@@ -60,7 +60,7 @@ class InspectImageAssetsTool:
         name="inspect_image_assets",
         description=(
             "查询当前 Workspace 中角色、场景和道具参考图的生成状态、失败数和可用性；"
-            "在 generate_image_assets 返回后或调用 generate_scenes 前使用。"
+            "在 generate_image_assets 返回后、retry_failed_image_assets 之前，或调用 generate_scenes 前使用。"
         ),
         input_model=InspectImageAssetsInput,
         cost_level=VideoToolCostLevel.NONE,

@@ -31,6 +31,7 @@ class ImageGenerationProvider(Protocol):
         *,
         user_id: str,
         conversation_id: str,
+        authorization: str = "",
     ) -> ProviderJobSnapshot: ...
 
     def as_operation_adapter(self) -> object: ...

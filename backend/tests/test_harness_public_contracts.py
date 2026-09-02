@@ -10,6 +10,7 @@ import pytest
 
 from pixelflow.agent_control_plane.contracts import AgentEvent, AgentEventType
 from pixelflow.agent_control_plane.public_contracts import AgentSnapshotV1
+from pixelflow.agent_harness.contracts import HarnessRunEvent
 from pixelflow.agent_harness.projector import HarnessRunProjector
 from pixelflow.video.workspace import MemoryVideoAgentRepository, ensure_conversation_video_workspace
 
@@ -26,6 +27,15 @@ def test_harness_snapshot_fixture_matches_public_contract() -> None:
     assert snapshot.messages[0].role == "user"
     assert snapshot.conversation_id == "conv-f0-1"
     assert snapshot.last_cursor == "cursor-3"
+
+
+def test_suspended_operation_is_a_public_snapshot_status() -> None:
+    """Provider 异步任务挂起必须能通过 Gateway Snapshot 合同公开给前端。"""
+
+    payload = json.loads(_FIXTURE.read_text(encoding="utf-8"))["snapshot"]
+    payload["status"] = "suspended_operation"
+    snapshot = AgentSnapshotV1.model_validate(payload)
+    assert snapshot.status == "suspended_operation"
 
 
 def test_public_event_keeps_canonical_agent_event_type() -> None:
@@ -45,6 +55,23 @@ def test_public_event_keeps_canonical_agent_event_type() -> None:
     assert public.type is AgentEventType.AGENT_TOOL_COMPLETED
     assert public.conversation_id == "conv-1"
     assert public.cursor == "cursor-1"
+
+
+def test_gateway_public_projection_keeps_runtime_limit_failure_code() -> None:
+    """Sidecar 已识别的 Runtime 限制结束码必须继续公开给前端。"""
+
+    source = HarnessRunEvent(
+        run_id="hrun_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        event_id="hevt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        sequence=1,
+        occurred_at="2026-08-26T00:00:00Z",
+        type="run.failed",
+        payload={"status": "failed", "code": "deadline_exceeded"},
+    )
+
+    event_type, payload = HarnessRunProjector._public_event(source)
+    assert event_type is AgentEventType.RUN_STATE_CHANGED
+    assert payload == {"status": "failed", "code": "deadline_exceeded"}
 
 
 @pytest.mark.asyncio

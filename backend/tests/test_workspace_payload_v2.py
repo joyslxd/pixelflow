@@ -12,8 +12,36 @@ from pixelflow.video.services.tool_executor import VideoToolExecutor
 from pixelflow.video.workspace import MemoryVideoAgentRepository
 from pixelflow.video.workspace.payload import (
     WORKSPACE_SCHEMA_VERSION,
+    WorkspaceCreationContract,
+    canonicalize_video_model,
     migrate_workspace_payload,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Seedance 2.5", "seedance-2.5"),
+        ("SEEDANCE-2.5", "seedance-2.5"),
+        ("seedance2.5", "seedance-2.5"),
+        ("seedance-2.5-fast", "seedance-2.5-fast"),
+        ("kling-1.6", "kling-1.6"),
+    ],
+)
+def test_canonicalize_video_model_aliases(raw: str, expected: str) -> None:
+    assert canonicalize_video_model(raw) == expected
+
+
+def test_creation_contract_canonicalizes_seedance_display_name() -> None:
+    contract = WorkspaceCreationContract.model_validate(
+        {
+            "video_model": "Seedance 2.5",
+            "video_ratio": "9:16",
+            "video_size": "1080p",
+            "video_sound": "on",
+        }
+    )
+    assert contract.video_model == "seedance-2.5"
 
 
 def test_legacy_workspace_payload_migrates_without_dropping_old_projection() -> None:

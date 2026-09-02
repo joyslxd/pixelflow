@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pydantic import JsonValue
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
+from pixelflow.video.workspace.payload import canonicalize_video_model
 
 
 def build_scene_generation_request(
@@ -25,9 +26,11 @@ def build_scene_generation_request(
     payload = context.workspace.payload
     contract = payload.get("creation_contract")
     contract_map = contract if isinstance(contract, Mapping) else {}
-    model = _text(scene.get("model")) or _text(contract_map.get("video_model"))
+    model = canonicalize_video_model(
+        _text(scene.get("model")) or _text(contract_map.get("video_model"))
+    )
     ratio = _text(scene.get("ratio")) or _text(contract_map.get("video_ratio"))
-    size = _text(scene.get("size")) or _text(contract_map.get("video_size")) or "1080p"
+    size = _provider_video_size(_text(scene.get("size")) or _text(contract_map.get("video_size")) or "1080p")
     sound = _text(scene.get("sound")) or _text(contract_map.get("video_sound")) or "on"
     duration = _duration(scene)
     if not model or not ratio:
@@ -37,7 +40,8 @@ def build_scene_generation_request(
     image_urls = _asset_reference_urls(payload, scene)
     video_urls = _https_urls(scene.get("video_urls"))
     audio_urls = _https_urls(scene.get("audio_urls"))
-    generation_mode = _text(scene.get("generation_mode")) or _infer_mode(
+    generation_mode = _provider_generation_mode(
+        declared=_text(scene.get("generation_mode")),
         image_urls=image_urls,
         video_urls=video_urls,
         audio_urls=audio_urls,
@@ -84,7 +88,7 @@ def _asset_reference_urls(
             raise VideoToolExecutionError("分镜引用了未登记资产，不能开始生成")
         if asset.get("state") != "ready" or asset.get("usable_for_video") is not True:
             raise VideoToolExecutionError("分镜引用资产尚未就绪，需先完成素材生成")
-        url = _safe_url(asset.get("image_url"))
+        url = _safe_url(asset.get("image_url")) or _existing_material_url(payload, asset)
         if url and url not in urls:
             urls.append(url)
     for item in payload.get("materials", []) if isinstance(payload.get("materials"), list) else []:
@@ -108,6 +112,64 @@ def _duration(scene: Mapping[str, JsonValue]) -> int | None:
         value = int(raw_ms) // 1000
         return value if 4 <= value <= 30 else None
     return None
+
+
+def _existing_material_url(payload: Mapping[str, JsonValue], asset: Mapping[str, object]) -> str | None:
+    """已有素材的可生产图在 materials 私有记录里，不复制到 asset_registry.image_url。"""
+
+    if str(asset.get("origin") or "") != "existing_material":
+        return None
+    material_id = _text(asset.get("source_material_id"))
+    if not material_id:
+        return None
+    materials = payload.get("materials")
+    if not isinstance(materials, list):
+        return None
+    for item in materials:
+        if isinstance(item, Mapping) and _text(item.get("material_id")) == material_id:
+            return _safe_url(item.get("url"))
+    return None
+
+
+def _provider_generation_mode(
+    *,
+    declared: str,
+    image_urls: Sequence[str],
+    video_urls: Sequence[str],
+    audio_urls: Sequence[str],
+) -> str:
+    """Workspace 的 independent/extend/reference 不能直接送给 Content-App。"""
+
+    if declared in {
+        "text_to_video",
+        "image_to_video",
+        "two_image_to_video",
+        "reference_mode_video",
+        "edit_video",
+        "extend_video",
+    }:
+        return declared
+    if declared == "extend" and video_urls:
+        return "extend_video"
+    return _infer_mode(image_urls=image_urls, video_urls=video_urls, audio_urls=audio_urls)
+
+
+def _provider_video_size(value: str) -> str:
+    """把合同里的 1080x1920 这类像素值收成 Content-App 清晰度档。"""
+
+    text = value.strip()
+    lowered = text.lower()
+    if lowered in {"480p", "720p", "1080p", "2k", "4k"}:
+        return "2K" if lowered == "2k" else "4K" if lowered == "4k" else lowered
+    parts = lowered.replace(" ", "").split("x")
+    if len(parts) == 2 and all(part.isdigit() for part in parts):
+        pixels = max(int(parts[0]), int(parts[1]))
+        if pixels >= 1920:
+            return "1080p"
+        if pixels >= 1280:
+            return "720p"
+        return "480p"
+    return text or "1080p"
 
 
 def _infer_mode(*, image_urls: Sequence[str], video_urls: Sequence[str], audio_urls: Sequence[str]) -> str:

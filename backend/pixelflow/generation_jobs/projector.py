@@ -22,16 +22,19 @@ def build_image_asset_success_patch(payload, *, asset_id: str, result: Mapping[s
             continue
         if item.get("origin") != "planned_generation":
             return None
-        next_assets.append(
-            {
-                **dict(item),
-                "state": "ready",
-                "usable_for_video": True,
-                "provider_artifact_ref": artifact_ref,
-                "image_url": image_url,
-                "completed_at": now.isoformat(),
-            }
-        )
+        next_item = {
+            **dict(item),
+            "state": "ready",
+            "usable_for_video": True,
+            "provider_artifact_ref": artifact_ref,
+            "image_url": image_url,
+            "completed_at": now.isoformat(),
+            "generation_job_status": "succeeded",
+        }
+        next_item.pop("failure_status", None)
+        next_item.pop("failure_reason_code", None)
+        next_item.pop("failed_at", None)
+        next_assets.append(next_item)
         changed = True
     return {"asset_registry": next_assets} if changed else None
 
@@ -56,6 +59,7 @@ def build_image_asset_failure_patch(payload, *, asset_id: str, status: str, reas
                 "failure_status": status,
                 "failure_reason_code": (reason_code or "provider_failed")[:128],
                 "failed_at": now.isoformat(),
+                "generation_job_status": status,
             }
         )
         changed = True
@@ -115,16 +119,29 @@ def build_scene_generation_success_patch(payload, *, job_id: str, result: Mappin
                 }
             )
             changed = True
-        all_succeeded = bool(next_jobs) and all(
-            isinstance(item, Mapping) and item.get("status") == "succeeded" for item in next_jobs
+        updated_job = next(
+            item
+            for item in next_jobs
+            if isinstance(item, Mapping) and str(item.get("job_id") or "") == job_id
         )
+        step_id = str(updated_job.get("plan_step_id") or "").strip()
+        cohort = [
+            item
+            for item in next_jobs
+            if isinstance(item, Mapping)
+            and (
+                (step_id and str(item.get("plan_step_id") or "") == step_id)
+                or (not step_id and str(item.get("job_id") or "") == job_id)
+            )
+        ]
+        all_succeeded = bool(cohort) and all(item.get("status") == "succeeded" for item in cohort)
         updated = {
             **dict(scene),
             "generation_jobs": next_jobs,
             "variants": variants,
             "edit_status": "重新生成完成" if all_succeeded else "等待版本审核",
         }
-        if all_succeeded and len(next_jobs) == 1:
+        if all_succeeded and len(cohort) == 1:
             updated["approved_variant_id"] = variant_id
             updated["video_url"] = video_url
         target_scene = updated

@@ -7,9 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from deepseek_harness.errors import JsonRpcError
 
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 from pixelflow_harness_sidecar.deepseek_engine import (
+    DeepSeekEngineResult,
     HarnessExecutionDiagnostic,
     HarnessExecutionError,
     HarnessProjectionError,
@@ -20,7 +22,6 @@ from pixelflow_harness_sidecar.deepseek_engine import (
 from pixelflow_harness_sidecar.event_store import SqliteRunEventStore
 from pixelflow_harness_sidecar.run_service import RunService
 from pixelflow_harness_sidecar.skill_snapshot import snapshot_skill_root
-from deepseek_harness.errors import JsonRpcError
 
 
 def _request() -> HarnessRunRequest:
@@ -112,6 +113,19 @@ class _OutputLimitWithoutResponseEngine(_TimeoutEngine):
                 failure_reason="max_output_tokens_without_public_response",
                 timeout_phase=None,
             )
+        )
+
+
+class _DeadlineEngine(_TimeoutEngine):
+    """构造当前 Runtime 的安全 deadline 结束原因。"""
+
+    async def execute(self, *_args, **_kwargs):
+        await asyncio.sleep(0)
+        return DeepSeekEngineResult(
+            final_response="已完成工具阶段的公开摘要",
+            finish_reason="deadline_exceeded",
+            tool_names=("generate_image_assets",),
+            tool_results_seen=True,
         )
 
 
@@ -215,6 +229,33 @@ async def test_output_limit_without_public_response_is_recoverable(tmp_path: Pat
         await service.aclose()
 
 
+@pytest.mark.asyncio
+async def test_runtime_deadline_reason_is_persisted_without_generic_engine_error(tmp_path: Path) -> None:
+    """Runtime deadline 只产生固定结束原因，并保留已完成 Tool 的公开事件。"""
+
+    service = RunService(
+        SqliteRunEventStore(tmp_path / "runs.sqlite3"),
+        _DeadlineEngine(tmp_path / "skills"),
+    )
+    try:
+        created = await service.create_run(_request())
+        await service.activate_run(created.run_id)
+        for _ in range(20):
+            state = await service.get_run(created.run_id)
+            if state is not None and state.status.value == "failed":
+                break
+            await asyncio.sleep(0)
+        state = await service.get_run(created.run_id)
+        events = await service.events_after(created.run_id, 0)
+
+        assert state is not None
+        assert state.termination_reason.value == "deadline_exceeded"
+        assert {event.type for event in events} >= {"tool.completed", "run.failed"}
+        assert events[-1].payload == {"code": "deadline_exceeded"}
+    finally:
+        await service.aclose()
+
+
 def test_result_projection_does_not_depend_on_harness_private_sequence() -> None:
     """PixelFlow 公开序号由 Event Store 生成，不能依赖 SDK 内部事件序号。"""
 
@@ -232,6 +273,87 @@ def test_result_projection_does_not_depend_on_harness_private_sequence() -> None
     assert projected.final_response == "已完成"
     assert projected.finish_reason == "completed"
     assert projected.tool_names == ("inspect_video_workspace",)
+
+
+def test_result_projection_recognizes_tool_call_content_blocks_and_deduplicates_names() -> None:
+    """当前 Runtime 同时发出 assistant/message 与 tool/call 时，Tool 名称只公开一次。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {
+                    "type": "assistant/message",
+                    "data": {
+                        "message": {
+                            "content": [
+                                {"type": "reasoning", "text": "不得公开"},
+                                {"type": "tool-call", "name": "generate_image_assets"},
+                            ]
+                        }
+                    },
+                },
+                {"type": "tool/call", "data": {"callId": "call_01", "name": "generate_image_assets"}},
+            ],
+            final_response="已提交生成任务",
+            finish_reason="completed",
+        )
+    )
+
+    assert projected.tool_names == ("generate_image_assets",)
+
+
+def test_result_projection_normalizes_runtime_error_deadline_reason() -> None:
+    """Runtime 的 turn/end.reason.error.code 必须投影为固定 deadline 结束原因。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {
+                    "type": "turn/end",
+                    "data": {
+                        "reason": {
+                            "kind": "error",
+                            "error": {"code": "deadline_exceeded", "message": "不得公开"},
+                        }
+                    },
+                }
+            ],
+            final_response="已输出安全摘要",
+            finish_reason="error",
+        )
+    )
+
+    assert projected.finish_reason == "deadline_exceeded"
+
+
+def test_result_projection_normalizes_policy_error_from_runtime_tool_result() -> None:
+    """Runtime 将 Policy 错误放在 isError ToolResult 文本时，仍只公开固定错误码。"""
+
+    projected = _project_harness_result(
+        SimpleNamespace(
+            events=[
+                {
+                    "type": "tool/result",
+                    "data": {
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool-result",
+                                    "isError": True,
+                                    "content": [{"type": "text", "text": "Error: deadline_exceeded\n"}],
+                                }
+                            ]
+                        }
+                    },
+                },
+                {"type": "turn/end", "data": {"reason": {"kind": "error", "error": {"code": "UNKNOWN"}}}},
+            ],
+            final_response="已输出安全摘要",
+            finish_reason="error",
+        )
+    )
+
+    assert projected.finish_reason == "deadline_exceeded"
 
 
 def test_model_input_includes_gateway_frozen_conversation_and_workspace_context() -> None:

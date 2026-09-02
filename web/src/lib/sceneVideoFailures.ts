@@ -6,6 +6,10 @@ const REASON_HINTS: Record<string, string> = {
   provider_timeout: "等待生成结果超时，可重试该镜。",
   provider_job_expired: "供应商任务已过期，需要重新发起该镜生成。",
   provider_quota_insufficient: "额度不足，充值后可继续生成失败分镜。",
+  video_billing_profile_missing:
+    "视频模型计费档不存在，通常是把展示名当成了目录 ID。请确认合同使用 seedance-2.5，不要当成没额度去充值。",
+  provider_start_video_billing_profile_missing:
+    "视频模型计费档不存在，通常是把展示名当成了目录 ID。请确认合同使用 seedance-2.5，不要当成没额度去充值。",
   provider_call_failed: "调用生成服务失败，请稍后重试该镜。",
   failed: "该镜视频生成未成功。",
   timeout: "该镜视频生成超时。",

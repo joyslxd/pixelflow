@@ -9,14 +9,16 @@ type Props = {
   workspaceId: string;
   assetId: string;
   alt: string;
+  revision: number;
 };
 
-export function WorkspaceAssetThumbnail({ conversationId, workspaceId, assetId, alt }: Props) {
+export function WorkspaceAssetThumbnail({ conversationId, workspaceId, assetId, alt, revision }: Props) {
   const [url, setUrl] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
     let objectUrl = "";
+    setUrl("");
     void fetch(
       agentApiUrl(`/conversations/${encodeURIComponent(conversationId)}/workspaces/${encodeURIComponent(workspaceId)}/assets/${encodeURIComponent(assetId)}/thumbnail`),
       { headers: agentHeaders({ Accept: "image/*" }), signal: controller.signal },
@@ -29,7 +31,7 @@ export function WorkspaceAssetThumbnail({ conversationId, workspaceId, assetId, 
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [assetId, conversationId, workspaceId]);
+  }, [assetId, conversationId, revision, workspaceId]);
 
   return url ? (
     <img src={url} alt={alt} className="h-16 w-16 shrink-0 rounded-lg border border-line object-cover" />

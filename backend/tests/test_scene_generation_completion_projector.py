@@ -73,6 +73,40 @@ def test_generation_job_failure_records_controlled_reason() -> None:
     assert job["error"] == "生成任务执行失败"
 
 
+def test_generation_job_success_ignores_historical_failures_in_same_scene() -> None:
+    payload = {
+        "dirty_scene_ids": ["scene-1"],
+        "scenes": [
+            {
+                "scene_id": "scene-1",
+                "scene_index": 1,
+                "edit_status": "重新生成中",
+                "generation_jobs": [
+                    {"job_id": "old-failed", "status": "failed", "plan_step_id": "step-old"},
+                    {"job_id": "job-new", "status": "polling", "plan_step_id": "step-new", "variant_index": 1},
+                ],
+                "variants": [],
+            }
+        ],
+    }
+    patch = build_scene_generation_success_patch(
+        payload,
+        job_id="job-new",
+        result={
+            "variant_id": "variant-new",
+            "artifact_ref": "artifact:scene-1-new",
+            "video_url": "https://cdn.example.invalid/scene-1.mp4",
+        },
+        now=NOW,
+    )
+    assert patch is not None
+    scene = patch["scenes"][0]
+    assert scene["edit_status"] == "重新生成完成"
+    assert scene["video_url"].endswith("scene-1.mp4")
+    assert scene["approved_variant_id"] == "variant-new"
+    assert patch["dirty_scene_ids"] == []
+
+
 def test_generation_job_projector_counts_polling_jobs() -> None:
     assert count_polling_scene_generation_jobs({
         "scenes": [{"generation_jobs": [{"status": "polling"}, {"status": "succeeded"}]}]
