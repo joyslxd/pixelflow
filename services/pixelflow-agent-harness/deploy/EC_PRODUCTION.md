@@ -63,6 +63,15 @@ location ^~ /agentfrontend/ {
     try_files $uri $uri/ /agentfrontend/index.html;
 }
 
+# Gateway 健康检查实际位于服务根路径；对外仍收敛在 /agent 下。
+location = /agent/live {
+    proxy_pass http://127.0.0.1:8001/live;
+}
+
+location = /agent/ready {
+    proxy_pass http://127.0.0.1:8001/ready;
+}
+
 location ^~ /agent/ {
     proxy_pass http://127.0.0.1:8001;
     proxy_http_version 1.1;
