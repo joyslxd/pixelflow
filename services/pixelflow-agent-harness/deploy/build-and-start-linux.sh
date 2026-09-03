@@ -21,6 +21,11 @@ if [[ ! -f "$RELEASE_FILE" ]]; then
   echo "缺少 .env.harness-release；请从 .env.harness-release.example 创建非敏感发布配置。" >&2
   exit 1
 fi
+# 用途：将受控发布身份导出给 Docker Compose；影响：镜像名、数据卷与 Skill 根只从该发布文件解析，避免首次发布因变量未注入而失败。
+set -a
+# shellcheck disable=SC1090
+. "$RELEASE_FILE"
+set +a
 # 用途：读取受控发布 Profile；影响：构建时用同一份 Gateway 配置生成 Sidecar 限额，防止两端漂移。
 PROFILE_ENV="$(python3 - "$RELEASE_FILE" <<'PY'
 from pathlib import Path
