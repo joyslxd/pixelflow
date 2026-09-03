@@ -12,7 +12,10 @@ pnpm prod         # 用 production 环境变量启动 Vite dev server
 pnpm lint         # tsc 类型检查
 pnpm test:auth-storage # Authorization 本地存储工具测试
 pnpm build-dev    # 使用 .env.development，产物到 dist/
-pnpm build-prod   # 使用 .env.production，产物到 dist/
+pnpm build-prod            # 使用 .env.production，产物到 dist/
+pnpm build-borgrise-test   # 使用 .env.borgrise-test，产物到 dist/
+pnpm build-borgrise-prod   # 使用 .env.borgrise-prod，产物到 dist/
+pnpm build-ec-prod         # 使用 .env.ec-prod，产物到 dist/
 ```
 
 ## 环境变量
@@ -21,13 +24,16 @@ Vite 配置会从当前 `web/` 目录读取环境文件：
 
 | 文件 | 当前值 | 使用场景 |
 | --- | --- | --- |
-| `.env.development` | `https://test-video.borgrise.com` | `pnpm dev`、`pnpm build-dev` |
-| `.env.production` | `https://video.borgrise.com` | `pnpm prod`、`pnpm build-prod` |
+| `.env.borgrise-test` | `https://test-video.borgrise.com` | `pnpm build-borgrise-test` |
+| `.env.borgrise-prod`、`.env.production` | `https://video.borgrise.com` | `pnpm build-borgrise-prod`、`pnpm build-prod` |
+| `.env.ec-prod` | `http://creator.vitamazing.top` | `pnpm build-ec-prod` |
+| `.env.development` | `http://creator.vitamazing.top` | `pnpm dev`、`pnpm build-dev` |
 
 支持的变量：
 
 - `VITE_API_TARGET`：开发服务器把 `/agent` 代理到的目标。
 - `VITE_CONTENT_APP_TARGET`：开发服务器把所有 `/api/...` 请求代理到的 content-app 目标。
+- `VITE_CONTENT_APP_ORIGIN`：浏览器与 Content-App 同域时使用的公开根地址；不同域时上传改走同域 `/api` 代理。
 
 当前 development 默认走测试 content-app。如果要联调本机 PixelFlow 后端：
 

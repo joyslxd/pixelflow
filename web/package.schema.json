@@ -15,6 +15,9 @@
         "build-dev": { "description": "用途：构建开发产物；影响：先执行 TypeScript 编译。" },
         "build-test": { "description": "用途：构建测试产物；影响：先执行 TypeScript 编译。" },
         "build-prod": { "description": "用途：构建生产产物；影响：先执行 TypeScript 编译。" },
+        "build-borgrise-test": { "description": "用途：构建博观测试环境前端；影响：使用 borgrise-test 的 Content-App 根地址。" },
+        "build-borgrise-prod": { "description": "用途：构建博观生产环境前端；影响：使用 borgrise-prod 的 Content-App 根地址。" },
+        "build-ec-prod": { "description": "用途：构建 EC 生产环境前端；影响：使用 ec-prod 的 Content-App 根地址。" },
         "preview": { "description": "用途：预览已构建前端；影响：不会启动 Gateway。" },
         "lint": { "description": "用途：执行 TypeScript 静态检查；影响：类型错误会阻断前端门禁。" }
       }

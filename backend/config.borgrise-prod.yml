@@ -1,0 +1,52 @@
+# 博观生产环境配置；所有 Secret 仅从服务器受保护环境文件注入。
+config_version: 2 # 用途：标识新 Harness 配置结构；影响：旧 DeerFlow 配置不再被加载。
+
+gateway:
+  host: "0.0.0.0" # 用途：设置 Gateway 监听地址；影响：由反向代理向用户暴露服务。
+  port: 8001 # 用途：设置 Gateway 端口；影响：部署编排应将流量转发到此端口。
+  enable_docs: false # 用途：控制 OpenAPI 文档；影响：生产不公开管理接口。
+  cors_origins: "" # 用途：限定跨域来源；影响：同域前端无需额外 CORS 放行。
+
+database:
+  backend: "sqlite" # 用途：选择持久化后端；影响：会话与 Tool Ledger 存在受挂载目录。
+  sqlite_dir: "/var/lib/pixelflow-gateway" # 用途：设置 SQLite 数据目录；影响：容器重建后保留生产会话。
+  url: "" # 用途：可选覆盖完整数据库 URL；影响：留空时根据 sqlite_dir 自动生成。
+  echo_sql: false # 用途：控制 SQL 调试日志；影响：避免记录业务数据。
+  pool_size: 5 # 用途：设置非 SQLite 连接池基础大小；影响：切换数据库时才生效。
+
+harness:
+  sidecar_base_url: "" # 用途：配置同机 Sidecar 地址；影响：真实值由部署环境注入。
+  gateway_instance_id: "pixelflow-gateway" # 用途：标识 Gateway 实例；影响：写入服务 JWT 审计 claim。
+  request_timeout_seconds: 15 # 用途：限制 Gateway 调用 Sidecar 的等待秒数；影响：超时关闭新 Run 准入。
+  run_limit_profiles:
+    video_interactive_v1:
+      deadline_seconds: 300 # 用途：限制互动 Run 总秒数；影响：到期安全停止模型循环。
+      max_model_steps: 24 # 用途：限制模型决策轮次；影响：防止无限循环。
+      max_business_tools: 12 # 用途：限制业务 Tool 次数；影响：防止过度编排。
+      max_billable_batch_starts: 1 # 用途：限制计费批次；影响：每轮最多启动一批。
+    confirmation_resume_v1:
+      deadline_seconds: 150 # 用途：限制确认恢复 Run 秒数；影响：确认后模型循环不扩张。
+      max_model_steps: 10 # 用途：限制确认恢复模型轮次；影响：达到上限后安全收口。
+      max_business_tools: 5 # 用途：限制确认恢复业务 Tool 数；影响：避免确认后无限编排。
+      max_billable_batch_starts: 1 # 用途：限制确认恢复计费批次；影响：一次确认最多启动一批。
+    run_recovery_v1:
+      deadline_seconds: 90 # 用途：限制故障恢复 Run 秒数；影响：只核对权威状态。
+      max_model_steps: 6 # 用途：限制故障恢复模型轮次；影响：防止恢复时扩大业务动作。
+      max_business_tools: 3 # 用途：限制故障恢复 Tool 数；影响：仅允许安全检查。
+      max_billable_batch_starts: 0 # 用途：禁止故障恢复自动计费；影响：须由新触发器决定。
+
+pixelflow:
+  mysql_url: "" # 用途：兼容 MySQL 任务库 URL；影响：留空时使用 SQLite。
+  long_term_memory_enabled: true # 用途：控制长期记忆读写；影响：关闭后不访问 Mem0。
+  volcengine_mem0_base_url: "" # 用途：配置 Mem0 HTTPS 地址；影响：真实值仅从部署环境注入。
+  volcengine_mem0_api_key: "" # 用途：预留 Mem0 密钥字段；影响：YAML 不保存 Secret。
+  long_term_memory_timeout_seconds: 3 # 用途：限制 Mem0 检索秒数；影响：超时 fail-open。
+  long_term_memory_search_limit: 5 # 用途：限制单次记忆条数；影响：限制上下文增长。
+  jianying_draft_enabled: false # 用途：控制已下线草稿 Provider；影响：保持 false。
+  content_app_internal_upload_enabled: false # 用途：控制内部上传兼容开关；影响：保持 false。
+
+content_app:
+  base_url: "https://video.borgrise.com" # 用途：配置博观生产 Content-App 根地址；影响：鉴权与媒体 Provider 自动追加 /api。
+  remote_verify_enabled: true # 用途：控制远端登录态校验；影响：无效授权会被拒绝。
+  verify_timeout_seconds: 10 # 用途：限制登录态校验秒数；影响：超时拒绝受保护请求。
+  skip_ssl_verify: false # 用途：控制 TLS 校验；影响：必须验证生产站点证书。

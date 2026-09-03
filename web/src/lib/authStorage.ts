@@ -4,6 +4,8 @@ export const AGENT_USER_MESSAGE_TYPE = "AGENT_USER_MESSAGE";
 export const TRUSTED_CONTENT_APP_ORIGINS = [
   "https://test-video.borgrise.com",
   "https://video.borgrise.com",
+  "http://creator.vitamazing.top",
+  "https://creator.vitamazing.top",
   "http://localhost:5174",
 ];
 

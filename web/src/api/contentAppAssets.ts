@@ -1,15 +1,18 @@
 /** content-app 图片上传与资产库 Client；文件不经过 Gateway、Sidecar 或浏览器业务状态。 */
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
+import { contentAppRequestUrl } from "@/lib/contentAppOrigin";
 
 /**
  * content-app 上传入口：同域站点可直连；独立 Agent 前端通过 Nginx 同源 /api 代理，
  * 避免 test-video 只允许自身 Origin 时阻断浏览器 CORS 预检。
  */
-const CONTENT_APP_ORIGIN = "https://test-video.borgrise.com";
-
 function contentAppUrl(path: string): string {
-  return window.location.origin === CONTENT_APP_ORIGIN ? `${CONTENT_APP_ORIGIN}${path}` : path;
+  return contentAppRequestUrl({
+    browserOrigin: window.location.origin,
+    contentAppOrigin: import.meta.env.VITE_CONTENT_APP_ORIGIN || "",
+    path,
+  });
 }
 
 type ContentAppEnvelope = {

@@ -12,6 +12,9 @@
     "build-dev": "tsc -b && vite build --mode development",
     "build-test": "tsc -b && vite build --mode test",
     "build-prod": "tsc -b && vite build --mode production",
+    "build-borgrise-test": "tsc -b && vite build --mode borgrise-test",
+    "build-borgrise-prod": "tsc -b && vite build --mode borgrise-prod",
+    "build-ec-prod": "tsc -b && vite build --mode ec-prod",
     "preview": "vite preview",
     "lint": "tsc --noEmit"
   },

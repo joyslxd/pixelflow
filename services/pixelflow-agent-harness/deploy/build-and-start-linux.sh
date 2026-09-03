@@ -21,12 +21,36 @@ if [[ ! -f "$RELEASE_FILE" ]]; then
   echo "缺少 .env.harness-release；请从 .env.harness-release.example 创建非敏感发布配置。" >&2
   exit 1
 fi
+# 用途：读取受控发布 Profile；影响：构建时用同一份 Gateway 配置生成 Sidecar 限额，防止两端漂移。
+PROFILE_ENV="$(python3 - "$RELEASE_FILE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("PIXELFLOW_CONFIG_ENV="):
+        value = line.split("=", 1)[1].strip()
+        if re.fullmatch(r"[a-z0-9-]+", value):
+            print(value)
+            break
+else:
+    raise SystemExit("发布配置缺少合法 PIXELFLOW_CONFIG_ENV。")
+PY
+)"
+# 用途：从 Gateway 同一 Profile 生成共享 Run 限额；影响：Sidecar 不再使用过期档案，避免请求阶段配置错误。
+RUN_LIMIT_PROFILES="$(cd "$ROOT_DIR/backend" && PIXELFLOW_CONFIG_ENV="$PROFILE_ENV" PYTHONPATH=. uv run python -c 'from app.gateway.profile_config import load_profile_config; import os; load_profile_config(); print(os.environ["PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES"])')"
 MANIFEST_DIGEST="$(cd "$ROOT_DIR/backend" && PYTHONPATH=. uv run python -c 'from pixelflow.agent_tools.manifest import manifest; print(manifest().digest)')"
 if ! grep -q '^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=' "$RELEASE_FILE"; then
   echo "发布配置缺少 PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST。" >&2
   exit 1
 fi
 sed -i.bak "s|^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=.*|PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=$MANIFEST_DIGEST|" "$RELEASE_FILE"
+rm -f "$RELEASE_FILE.bak"
+if grep -q '^PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES=' "$RELEASE_FILE"; then
+  sed -i.bak "s|^PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES=.*|PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES=$RUN_LIMIT_PROFILES|" "$RELEASE_FILE"
+else
+  printf '\nPIXELFLOW_HARNESS_RUN_LIMIT_PROFILES=%s\n' "$RUN_LIMIT_PROFILES" >> "$RELEASE_FILE"
+fi
 rm -f "$RELEASE_FILE.bak"
 
 # 用途：按 Compose 服务名读取解析后的镜像；影响：不依赖 config --images 的非稳定输出顺序，避免镜像错标。
