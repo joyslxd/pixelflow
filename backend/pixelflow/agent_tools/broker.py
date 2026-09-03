@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from pixelflow.agent_tools.video.confirmed_preferences import (
+    LongTermMemoryWritePort,
+    PresentationPreferenceStorePort,
+)
 from pixelflow.agent_tools.video.contracts import VideoToolContext
 from pixelflow.agent_tools.video.credential_store import TransientRunCredentialStore
 from pixelflow.agent_tools.video.registry import VideoToolRegistry
@@ -35,11 +39,15 @@ class AgentToolBroker:
         video_tools: VideoToolRegistry | None = None,
         credential_store: TransientRunCredentialStore | None = None,
         manifest_snapshot: ToolManifestResponse | None = None,
+        preference_store: PresentationPreferenceStorePort | None = None,
+        long_term_memory_service: LongTermMemoryWritePort | None = None,
     ) -> None:
         self._repository = repository
         self._video_repository = video_repository
         self._video_tools = video_tools or runtime_video_tool_registry(
             plan_repository=video_repository,
+            preference_store=preference_store,
+            long_term_memory_service=long_term_memory_service,
         )
         self._credential_store = credential_store
         self._manifest_snapshot = manifest_snapshot or manifest()

@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from pixelflow_harness_sidecar.contracts import HarnessRunRequest, RunStatus, TerminationReason
+from pixelflow_harness_sidecar.contracts import (
+    HarnessRunRequest,
+    RunStatus,
+    TerminationReason,
+)
 from pixelflow_harness_sidecar.deepseek_engine import DeepSeekEngineResult
 from pixelflow_harness_sidecar.event_store import SqliteRunEventStore
 from pixelflow_harness_sidecar.run_service import RunService

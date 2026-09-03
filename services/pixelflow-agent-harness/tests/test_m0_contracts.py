@@ -11,7 +11,10 @@ from pydantic import ValidationError
 
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 from pixelflow_harness_sidecar.engine import FakeAgentEngine
-from pixelflow_harness_sidecar.fake_tools import InspectVideoWorkspaceInput, inspect_video_workspace
+from pixelflow_harness_sidecar.fake_tools import (
+    InspectVideoWorkspaceInput,
+    inspect_video_workspace,
+)
 from pixelflow_harness_sidecar.skill_snapshot import snapshot_skill_root
 
 
@@ -155,6 +158,35 @@ def test_sidecar_compose_gateway_endpoint_is_limited_to_fixed_service_name(monke
     assert settings._tool_broker_url_is_safe
     monkeypatch.setenv("PIXELFLOW_TOOL_BROKER_BASE_URL", "http://untrusted-host:8001")
     assert not SidecarSettings.from_env()._tool_broker_url_is_safe
+
+
+def test_sidecar_readiness_rejects_non_object_limit_profiles(monkeypatch, tmp_path: Path) -> None:
+    """非对象限制档案必须映射为固定 readiness 错误，不能泄露内部异常。"""
+
+    from pixelflow_harness_sidecar.config import SidecarSettings
+    from pixelflow_harness_sidecar.model_profile import HarnessModelProfile
+
+    monkeypatch.setenv("PIXELFLOW_AGENT_HOME", str(tmp_path))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://model.example.test")
+    settings = SidecarSettings(
+        agent_home=tmp_path,
+        run_store_path=tmp_path / "runs.sqlite3",
+        gateway_jwt_verify_key="gateway-key",
+        gateway_jwt_issuer="pixelflow-gateway",
+        gateway_jwt_audience="pixelflow-harness-sidecar",
+        tool_broker_base_url="http://127.0.0.1:8001",
+        tool_broker_jwt_signing_key="k" * 32,
+        tool_broker_jwt_issuer="pixelflow-harness-sidecar",
+        tool_broker_jwt_audience="pixelflow-tool-broker",
+        sidecar_instance_id="sidecar-test",
+        model_profile=HarnessModelProfile("test", "model", "capability", "budget"),
+        tool_manifest_digest="sha256:" + "0" * 64,
+        request_timeout_seconds=90,
+        run_limit_profiles_json="[]",
+    )
+
+    assert settings.readiness_error() == "run_limit_profiles_invalid"
 
 
 def test_sidecar_rejects_limit_profile_or_digest_drift(monkeypatch) -> None:

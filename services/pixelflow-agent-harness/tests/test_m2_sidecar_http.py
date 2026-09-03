@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import socket
 import subprocess
@@ -16,7 +16,6 @@ from urllib.request import Request, urlopen
 
 import jwt
 import pytest
-
 
 _LIMIT_PROFILE = {
     "deadline_seconds": 180,
@@ -127,7 +126,7 @@ def _http_json(
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = Request(url, data=data, method=method, headers=headers)
     try:
-        with urlopen(request, timeout=5) as response:  # noqa: S310 - 固定为本机测试进程地址。
+        with urlopen(request, timeout=5) as response:
             return int(response.status), json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         return int(error.code), json.loads(error.read().decode("utf-8"))
@@ -264,7 +263,7 @@ def test_cancel_endpoint_is_authenticated_idempotent_and_replayable(tmp_path: Pa
             f"{base_url}/internal/v1/runs/{run_id}/events?after_sequence=0",
             headers={"Authorization": f"Bearer {token}", "Accept": "text/event-stream"},
         )
-        with urlopen(events_request, timeout=5) as response:  # noqa: S310 - 固定为本机测试进程地址。
+        with urlopen(events_request, timeout=5) as response:
             events = [
                 json.loads(line.removeprefix("data: "))
                 for line in response.read().decode("utf-8").splitlines()

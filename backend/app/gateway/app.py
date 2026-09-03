@@ -287,6 +287,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 generation_job_service=generation_job_service,
                 video_understanding_port=video_understanding_adapter,
                 delivery_operation_port=delivery_operation_port,
+                preference_store=app.state.pixelflow_preference_store,
+                long_term_memory_service=app.state.pixelflow_long_term_memory_service,
             )
             tool_manifest = manifest(video_tools)
             app.state.pixelflow_agent_tool_broker = AgentToolBroker(
@@ -295,6 +297,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 video_tools=video_tools,
                 credential_store=credential_store,
                 manifest_snapshot=tool_manifest,
+                preference_store=app.state.pixelflow_preference_store,
+                long_term_memory_service=app.state.pixelflow_long_term_memory_service,
             )
             app.state.pixelflow_m06_operation_recovery_runtime = None
             from pixelflow.platform import HarnessSidecarSettings

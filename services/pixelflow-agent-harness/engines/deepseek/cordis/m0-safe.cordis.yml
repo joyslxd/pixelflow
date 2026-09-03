@@ -13,13 +13,13 @@
   name: '../packages/dsh-plugin-run-policy/dist/index.js' # 用途：加载 Run 资源策略；影响：不提供任何业务 Tool。
   config:
     # 用途：限制单 Run 模型步骤；影响：超过后拒绝继续模型调用。
-    maxModelSteps: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_MODEL_STEPS)"
+    maxModelSteps: !!js "process.env.PIXELFLOW_HARNESS_MAX_MODEL_STEPS === undefined ? undefined : Number(process.env.PIXELFLOW_HARNESS_MAX_MODEL_STEPS)"
     # 用途：限制单 Run 业务 Tool 次数；影响：超过后拒绝继续 Tool 调用。
-    maxBusinessTools: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS)"
+    maxBusinessTools: !!js "process.env.PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS === undefined ? undefined : Number(process.env.PIXELFLOW_HARNESS_MAX_BUSINESS_TOOLS)"
     # 用途：限制单 Run 成功启动的计费批次；影响：达到上限后禁止再次启动 Provider Operation。
-    maxBillableBatchStarts: !!js "Number(process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS)"
+    maxBillableBatchStarts: !!js "process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS === undefined ? undefined : Number(process.env.PIXELFLOW_HARNESS_MAX_BILLABLE_BATCH_STARTS)"
     # 用途：限制单 Run 墙钟时长（秒）；影响：超时后拒绝继续执行。
-    deadlineSeconds: !!js "Number(process.env.PIXELFLOW_HARNESS_DEADLINE_SECONDS)"
+    deadlineSeconds: !!js "process.env.PIXELFLOW_HARNESS_DEADLINE_SECONDS === undefined ? undefined : Number(process.env.PIXELFLOW_HARNESS_DEADLINE_SECONDS)"
 
 # 用途：校验 Gateway 输入的安全上下文投影；影响：凭据类字段或超长字符串会使 Run 失败关闭。
 - id: pixelflow-context-policy

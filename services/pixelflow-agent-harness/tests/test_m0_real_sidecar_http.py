@@ -9,8 +9,8 @@ import os
 import socket
 import subprocess
 import sys
-import time
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +22,6 @@ import pytest
 
 from pixelflow_harness_sidecar.client import AgentHarnessSidecarClient
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
-
 
 _MODEL_PROFILE = {
     "logical_name": "deepseek-v4-pro",
@@ -102,7 +101,7 @@ def _start_manifest_broker(
     calls: list[dict[str, object]] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - HTTP 标准回调名称。
+        def do_GET(self) -> None:
             if self.path != "/agent/internal/agent-tools/manifest":
                 self.send_error(404)
                 return
@@ -112,7 +111,7 @@ def _start_manifest_broker(
             self.end_headers()
             self.wfile.write(encoded)
 
-        def do_POST(self) -> None:  # noqa: N802 - HTTP 标准回调名称。
+        def do_POST(self) -> None:
             if self.path != "/agent/internal/agent-tools/calls" or tool_observation is None:
                 self.send_error(404)
                 return
@@ -176,7 +175,7 @@ def _http_json(
         headers["Idempotency-Key"] = idempotency_key
     request = Request(url, data=data, method=method, headers=headers)
     try:
-        with urlopen(request, timeout=5) as response:  # noqa: S310 - 固定为本机测试进程地址
+        with urlopen(request, timeout=5) as response:
             return int(response.status), json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         return int(error.code), json.loads(error.read().decode("utf-8"))
@@ -190,7 +189,7 @@ def _http_sse(url: str, *, token: str) -> tuple[int, list[dict[str, object]]]:
         method="GET",
         headers={"Authorization": f"Bearer {token}", "Accept": "text/event-stream"},
     )
-    with urlopen(request, timeout=5) as response:  # noqa: S310 - 固定为本机测试进程地址
+    with urlopen(request, timeout=5) as response:
         data_lines = [
             line.removeprefix("data: ")
             for line in response.read().decode("utf-8").splitlines()
@@ -234,7 +233,7 @@ def _direct_deepseek_tool_call() -> dict[str, object]:
         },
     )
     try:
-        with urlopen(request, timeout=45) as response:  # noqa: S310 - 仅读取部署注入的 HTTPS 端点
+        with urlopen(request, timeout=45) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         pytest.fail(f"DeepSeek Tool Calling 请求被拒绝：HTTP {error.code}")

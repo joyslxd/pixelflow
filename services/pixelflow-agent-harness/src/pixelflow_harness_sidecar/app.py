@@ -11,13 +11,12 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from .config import SidecarSettings
 from .auth import ServiceJwtValidationError, validate_service_jwt
+from .config import SidecarSettings
 from .contracts import HarnessRunRequest, HarnessRunState, RunStatus
 from .deepseek_engine import DeepSeekHarnessEngine
 from .event_store import RunRequestConflictError, SqliteRunEventStore
 from .run_service import RunActivationError, RunService
-
 
 logger = logging.getLogger(__name__)
 

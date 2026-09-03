@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
-
 
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -47,21 +46,17 @@ class SkillCatalogSnapshot:
         root.mkdir(parents=True, mode=0o700)
         skills_root = root / "skills"
         skills_root.mkdir(mode=0o700)
-        try:
-            for entry in self.entries.values():
-                skill_dir = skills_root / entry.name
-                skill_dir.mkdir(mode=0o700)
-                skill_file = skill_dir / "SKILL.md"
-                temporary_file = skill_dir / ".SKILL.md.tmp"
-                temporary_file.write_text(entry.body, encoding="utf-8")
-                os.chmod(temporary_file, 0o400)
-                temporary_file.replace(skill_file)
-                os.chmod(skill_file, 0o400)
-                os.chmod(skill_dir, 0o500)
-            os.chmod(skills_root, 0o500)
-        except Exception:
-            # 失败时留下的半文件必须使该 Run 失败关闭，不能回退到源目录读取。
-            raise
+        for entry in self.entries.values():
+            skill_dir = skills_root / entry.name
+            skill_dir.mkdir(mode=0o700)
+            skill_file = skill_dir / "SKILL.md"
+            temporary_file = skill_dir / ".SKILL.md.tmp"
+            temporary_file.write_text(entry.body, encoding="utf-8")
+            os.chmod(temporary_file, 0o400)
+            temporary_file.replace(skill_file)
+            os.chmod(skill_file, 0o400)
+            os.chmod(skill_dir, 0o500)
+        os.chmod(skills_root, 0o500)
 
 
 def snapshot_skill_root(root: Path, *, max_body_bytes: int = 32_768) -> SkillCatalogSnapshot:

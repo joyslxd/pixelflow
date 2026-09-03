@@ -361,7 +361,7 @@ class SqliteRunEventStore:
         async with self._lock:
             placeholders = ", ".join("?" for _ in unfinished)
             rows = self._connection.execute(
-                f"SELECT run_id FROM harness_runs WHERE status IN ({placeholders}) ORDER BY accepted_at ASC",  # noqa: S608 - 占位符数量来自固定状态集合，不含外部输入。
+                f"SELECT run_id FROM harness_runs WHERE status IN ({placeholders}) ORDER BY accepted_at ASC",
                 tuple(sorted(unfinished)),
             ).fetchall()
             run_ids = tuple(str(row["run_id"]) for row in rows)
@@ -411,7 +411,7 @@ class SqliteRunEventStore:
         ).fetchone()
         sequence = int(row["max_sequence"]) + 1
         event_id = "hevt_" + hashlib.sha256(
-            f"{run_id}:{sequence}".encode("utf-8"),
+            f"{run_id}:{sequence}".encode(),
         ).hexdigest()[:32]
         occurred_at = _utc_now()
         self._connection.execute(

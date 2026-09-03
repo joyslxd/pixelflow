@@ -1,6 +1,10 @@
 """Harness 已发布视频 Capability Tool 的稳定公开边界。"""
 
 from .analyze import AnalyzeVideoInput, AnalyzeVideoTool
+from .confirmed_preferences import (
+    SaveConfirmedPresentationPreferencesInput,
+    SaveConfirmedPresentationPreferencesTool,
+)
 from .contracts import (
     VideoTool,
     VideoToolContext,
@@ -63,6 +67,8 @@ from .video_results import InspectVideoResultsInput, InspectVideoResultsTool
 __all__ = [
     "VideoTool",
     "TransientRunCredentialStore",
+    "SaveConfirmedPresentationPreferencesInput",
+    "SaveConfirmedPresentationPreferencesTool",
     "VideoToolContext",
     "VideoToolCostLevel",
     "VideoToolExecutionError",

@@ -1573,8 +1573,8 @@ Sidecar 不直接访问 Mem0，也拿不到连接地址、API key、真实 `user
 
 #### 用户隔离与标识
 
-- Mem0 `user_id` 使用 `HMAC-SHA256(environment + tenant_id + PixelFlow user_id)` 生成稳定不可逆标识，不发送数据库原始用户 ID；
-- HMAC Secret 只来自 Secret Manager，轮换要使用带版本的映射，避免旧记忆永久失联；
+- Mem0 `user_id` 当前使用部署盐与 PixelFlow `user_id` 计算的稳定不可逆摘要生成，不发送数据库原始用户 ID；后续如升级为 HMAC，必须使用带版本的映射，避免旧记忆永久失联；
+- 部署盐只来自 Secret Manager，轮换要保留带版本的匿名标识映射，避免旧记忆永久失联；
 - `agent_id` 固定为带环境后缀的 PixelFlow 标识，只用于产品级隔离，检索仍必须同时限定当前伪匿名 `user_id`；
 - 所有 search/get/update/delete 都先校验本地 owner binding，不能相信前端或 Sidecar 传入的 memory ID；
 - 账户删除、用户撤回长期记忆授权时调用 `delete_all(user_id=...)`，并保存不含内容的删除审计记录。
@@ -1597,6 +1597,19 @@ Sidecar 不直接访问 Mem0，也拿不到连接地址、API key、真实 `user
 5. 写入失败不回滚用户已保存的本地偏好；按固定退避重试，超过上限进入安全失败状态等待人工重放；
 6. 记忆写入不是用户可见媒体 Operation，不复用 M06 的视频计费状态机，但必须具有独立 Outbox、幂等键、租约和崩溃恢复；
 7. 保存外部 `memory_id` 时只保存 owner binding、category、内容摘要哈希和状态，不保存原始偏好正文副本。
+
+#### 2026-09-03 10:27 CST：首批受控偏好写入
+
+首批启用的长期记忆对象仅限用户**明确确认**的四类演示偏好：品牌偏好、PPT 模板偏好、语言风格和常用页数。它们由 Gateway 发布的 `save_confirmed_presentation_preferences` Tool 承载，不能由 Sidecar、模型推测、前端本地状态或普通对话文本直接写入。
+
+1. Agent 只有在用户明确要求长期记住上述偏好时才可调用该 Tool；Tool Manifest 强制 `confirmation_required=true`；
+2. 首次 Tool Call 由 Tool Broker 创建 `awaiting_confirmation` 中断，尚未确认时不得更新本地偏好、不得创建 Mem0 Outbox 记录、不得请求 Mem0；
+3. 用户确认后，Gateway 从 Run binding 解析 owner，而非信任 Sidecar 传参；随后先更新本地 `UserPreferenceStore` 的字段级权威值，再通过 `LongTermMemoryService.write_background()` 投递 Mem0 Outbox；
+4. Mem0 内容只允许由四个已校验字段组装成最小事实句；禁止写入完整对话、用户资料正文、附件、PPT 内容、模型推测、Authorization、原始用户 ID 或 Provider 异常；
+5. 该 Tool 的稳定 `memory_write_key` 固定为 `mem0-presentation-preference:{run_id}:{tool_call_id}`。`run_id + tool_call_id` 唯一标识同一次已绑定用户的 Tool 调用，负责重复提交、恢复回放时的幂等去重；
+6. `memory_write_key` 不包含原始 `user_id`。本地 Outbox 行另存受 Gateway 保护的 `user_id` 并校验 owner；发送到 Mem0 时只使用由部署盐派生的伪匿名 `user_id`，metadata 只包含 category 与 `memory_write_key`；
+7. 任何相同 `memory_write_key` 但 owner、category 或内容不一致的请求必须以 `memory_write_key_conflict` 失败，不能覆盖已有记录或跨用户复用；
+8. Mem0 不可用、Outbox 重试或人工重放均不得回滚已确认的本地结构化偏好，也不得把本次写入伪造为远端成功。
 
 #### PowerMem 移除与历史数据
 

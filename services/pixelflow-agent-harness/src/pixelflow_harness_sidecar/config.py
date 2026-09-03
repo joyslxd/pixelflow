@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +31,7 @@ class SidecarSettings:
     run_limit_profiles_json: str = ""
 
     @classmethod
-    def from_env(cls) -> "SidecarSettings":
+    def from_env(cls) -> SidecarSettings:
         """从环境读取配置；缺少敏感值时 readiness 失败而不是回退默认凭据。"""
 
         agent_home_raw = os.environ.get("PIXELFLOW_AGENT_HOME", "").strip()
@@ -90,7 +90,7 @@ class SidecarSettings:
             return "run_limit_profiles_unconfigured"
         try:
             self._limit_profiles()
-        except ValueError:
+        except (TypeError, ValueError):
             return "run_limit_profiles_invalid"
         try:
             from .skill_snapshot import snapshot_skill_root
@@ -142,7 +142,7 @@ class SidecarSettings:
         except json.JSONDecodeError as error:
             raise ValueError("Run 限制档案不是 JSON") from error
         if not isinstance(value, dict):
-            raise ValueError("Run 限制档案不是对象")
+            raise TypeError("Run 限制档案不是对象")
         required = {"deadline_seconds", "max_model_steps", "max_business_tools", "max_billable_batch_starts"}
         profiles: dict[str, dict[str, int | str]] = {}
         for name, raw in value.items():

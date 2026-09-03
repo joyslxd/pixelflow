@@ -7,7 +7,10 @@ import json
 import httpx
 import pytest
 
-from pixelflow_harness_sidecar.client import AgentHarnessSidecarClient, AgentHarnessSidecarClientError
+from pixelflow_harness_sidecar.client import (
+    AgentHarnessSidecarClient,
+    AgentHarnessSidecarClientError,
+)
 from pixelflow_harness_sidecar.contracts import HarnessRunRequest
 
 
