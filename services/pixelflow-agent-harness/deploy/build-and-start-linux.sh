@@ -43,7 +43,8 @@ else:
 PY
 )"
 # 用途：从 Gateway 同一 Profile 生成共享 Run 限额；影响：Sidecar 不再使用过期档案，避免请求阶段配置错误。
-RUN_LIMIT_PROFILES="$(cd "$ROOT_DIR/backend" && PIXELFLOW_CONFIG_ENV="$PROFILE_ENV" PYTHONPATH=. uv run python -c 'from app.gateway.profile_config import load_profile_config; import os; load_profile_config(); print(os.environ["PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES"])')"
+# 用途：从 Profile 重新生成共享 Run 限额；影响：忽略发布文件上一次写入的值，避免 Profile Loader 将旧环境变量误判为人工覆盖。
+RUN_LIMIT_PROFILES="$(cd "$ROOT_DIR/backend" && env -u PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES PIXELFLOW_CONFIG_ENV="$PROFILE_ENV" PYTHONPATH=. uv run python -c 'from app.gateway.profile_config import load_profile_config; import os; load_profile_config(); print(os.environ["PIXELFLOW_HARNESS_RUN_LIMIT_PROFILES"])')"
 MANIFEST_DIGEST="$(cd "$ROOT_DIR/backend" && PYTHONPATH=. uv run python -c 'from pixelflow.agent_tools.manifest import manifest; print(manifest().digest)')"
 if ! grep -q '^PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST=' "$RELEASE_FILE"; then
   echo "发布配置缺少 PIXELFLOW_HARNESS_TOOL_MANIFEST_DIGEST。" >&2
