@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.gateway.routers.pixelflow_conversations import (
+    _ASSET_THUMBNAIL_LEGACY_INSECURE_TLS_HOSTS,
     _safe_asset_thumbnail_target,
     _workspace_asset_thumbnail_url,
 )
@@ -70,3 +71,9 @@ def test_thumbnail_url_ignores_generating_assets_without_ready_image() -> None:
 def test_thumbnail_rejects_non_allowlisted_host() -> None:
     assert _safe_asset_thumbnail_target("https://evil.example/kitchen.jpeg") is None
     assert _safe_asset_thumbnail_target("http://bucket.tos-cn-beijing.volces.com/kitchen.jpeg") is None
+
+
+def test_thumbnail_allows_known_legacy_material_host_with_invalid_tls() -> None:
+    """历史上传素材的已知证书问题仅对精确域名放宽。"""
+
+    assert "www.vitamazing.top" in _ASSET_THUMBNAIL_LEGACY_INSECURE_TLS_HOSTS
