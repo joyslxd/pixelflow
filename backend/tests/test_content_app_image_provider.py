@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -48,6 +50,28 @@ async def test_start_maps_nested_content_app_task_id_to_polling() -> None:
 
     assert snapshot.provider_job_id == "image-task-1"
     assert snapshot.outcome is ProviderJobOutcome.POLLING
+
+
+@pytest.mark.asyncio
+async def test_start_maps_portrait_ratio_to_provider_pixel_dimensions() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"task": {"id": "image-task-1", "status": "processing"}}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-ratio")
+
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["width"] == 1440
+    assert body["height"] == 2560
 
 
 @pytest.mark.asyncio

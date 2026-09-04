@@ -28,6 +28,18 @@ _ENDPOINTS = {
 _POLLING = {"queued", "pending", "created", "submitted", "waiting", "running", "processing", "in_progress"}
 _SUCCESS = {"success", "succeeded", "completed", "done"}
 _FAILED = {"failed", "error", "cancelled"}
+# Content-App 的 DTO 需要实际像素值。此表采用 Seedream 支持的 1K-4K 区间，避免把工作区比例 9:16 误传成 9×16 像素。
+_RATIO_PIXEL_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "1:1": (2048, 2048),
+    "4:3": (2304, 1728),
+    "3:4": (1728, 2304),
+    "3:2": (2496, 1664),
+    "2:3": (1664, 2496),
+    "16:9": (2560, 1440),
+    "9:16": (1440, 2560),
+    "21:9": (3024, 1296),
+    "9:21": (1296, 3024),
+}
 
 
 @dataclass(frozen=True)
@@ -192,13 +204,31 @@ def _start_payload(request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return payload
 
 
-def _ratio_dimensions(ratio: str) -> tuple[str, str]:
-    """将工作区比例转换为 content-app 图片接口的 width/height 字符串。"""
+def _ratio_dimensions(ratio: str) -> tuple[int, int]:
+    """将工作区比例转换为 Content-App DTO 所需的实际像素宽高。"""
 
     parts = ratio.strip().split(":", 1)
     if len(parts) != 2 or not all(part.isdigit() and 0 < int(part) <= 99 for part in parts):
         raise ValueError("image_generation_ratio_invalid")
-    return parts[0], parts[1]
+    numerator, denominator = (int(part) for part in parts)
+    divisor = _greatest_common_divisor(numerator, denominator)
+    normalized = f"{numerator // divisor}:{denominator // divisor}"
+    if dimensions := _RATIO_PIXEL_DIMENSIONS.get(normalized):
+        return dimensions
+    if max(numerator, denominator) / min(numerator, denominator) > 3:
+        raise ValueError("image_generation_ratio_invalid")
+    # 非预设比例以约 3.9MP 生成，保持在 Provider 允许的 1K-4K 面积范围内；16 像素对齐便于下游处理。
+    scale = int((3_932_160 / (numerator * denominator)) ** 0.5) // 16 * 16
+    width, height = numerator * scale, denominator * scale
+    if width < 1024 or height < 1024 or width * height > 4_194_304:
+        raise ValueError("image_generation_ratio_invalid")
+    return width, height
+
+
+def _greatest_common_divisor(left: int, right: int) -> int:
+    while right:
+        left, right = right, left % right
+    return left
 
 
 def _to_snapshot(
