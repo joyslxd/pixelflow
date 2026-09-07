@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 # 用途：公网 HTTP 仅放行已验证的 content-app 站点；影响：其它 http 主机仍不能作为生图/生视频根。
 _ALLOWED_HTTP_HOSTS = ("vitamazing.top",)
 _ALLOWED_HTTP_HOST_SUFFIXES = (".vitamazing.top",)
+# 用途：Content-App 常返回 HTTP TOS；该域同时支持 HTTPS，与前端上传升协议一致。
+_TOS_HTTPS_HOST_SUFFIXES = (".tos-cn-beijing.volces.com",)
 
 
 def _is_allowed_content_app_base(base_url: str) -> bool:
@@ -44,3 +46,26 @@ def optional_content_app_base_url(raw: str) -> str | None:
     if not "".join(raw.split()):
         return None
     return normalize_content_app_base_url(raw)
+
+
+def canonical_provider_media_url(raw: str) -> str | None:
+    """生成结果只保留无用户信息的媒体地址；TOS HTTP 升 HTTPS，EC 站点允许 HTTP。"""
+
+    parsed = urlparse(raw.strip())
+    host = (parsed.hostname or "").lower()
+    if not host or parsed.username is not None or parsed.password is not None:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme == "http" and any(host.endswith(suffix) for suffix in _TOS_HTTPS_HOST_SUFFIXES):
+        scheme = "https"
+    if scheme == "https":
+        return urlunparse(("https", parsed.netloc, parsed.path or "/", "", "", ""))
+    if scheme == "http" and _is_allowed_http_media_host(host):
+        return urlunparse(("http", parsed.netloc, parsed.path or "/", "", "", ""))
+    return None
+
+
+def _is_allowed_http_media_host(host: str) -> bool:
+    """与 Content-App 根地址相同的 vitamazing 站点才允许保留 HTTP 结果。"""
+
+    return host in _ALLOWED_HTTP_HOSTS or any(host.endswith(suffix) for suffix in _ALLOWED_HTTP_HOST_SUFFIXES)

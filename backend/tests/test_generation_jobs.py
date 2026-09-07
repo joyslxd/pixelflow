@@ -368,8 +368,12 @@ async def test_generation_job_worker_fails_poll_mapping_error_instead_of_retryin
     assert failed.failure_reason_code == "provider_poll_image_result_url_missing"
 
 
+@pytest.mark.parametrize(
+    "failure_reason_code",
+    ("provider_result_missing", "provider_poll_image_result_url_missing"),
+)
 @pytest.mark.asyncio
-async def test_generation_job_worker_reclaims_missing_image_result() -> None:
+async def test_generation_job_worker_reclaims_missing_image_result(failure_reason_code: str) -> None:
     repository = MemoryGenerationJobRepository()
     context = _context()
     job_id = "generation-job-reclaim-1"
@@ -390,7 +394,7 @@ async def test_generation_job_worker_reclaims_missing_image_result() -> None:
                 "item_id": "asset-host",
                 "status": GenerationJobStatus.INDETERMINATE,
                 "provider_job_id": "provider-image-1",
-                "failure_reason_code": "provider_result_missing",
+                "failure_reason_code": failure_reason_code,
             }
         )
     )

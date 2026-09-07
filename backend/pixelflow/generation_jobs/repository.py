@@ -614,7 +614,11 @@ def _is_missing_image_result(item: GenerationJobRecord) -> bool:
     return (
         item.kind is GenerationJobKind.IMAGE
         and item.status is GenerationJobStatus.INDETERMINATE
-        and item.failure_reason_code == "provider_result_missing"
+        and item.failure_reason_code in {
+            "provider_result_missing",
+            "provider_poll_image_result_url_missing",
+            "provider_start_image_result_url_missing",
+        }
         and bool(item.provider_job_id)
     )
 

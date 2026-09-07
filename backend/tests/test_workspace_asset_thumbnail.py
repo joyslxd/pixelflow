@@ -70,7 +70,18 @@ def test_thumbnail_url_ignores_generating_assets_without_ready_image() -> None:
 
 def test_thumbnail_rejects_non_allowlisted_host() -> None:
     assert _safe_asset_thumbnail_target("https://evil.example/kitchen.jpeg") is None
-    assert _safe_asset_thumbnail_target("http://bucket.tos-cn-beijing.volces.com/kitchen.jpeg") is None
+    assert _safe_asset_thumbnail_target("http://evil.example/kitchen.jpeg") is None
+
+
+def test_thumbnail_rewrites_http_tos_and_allows_http_vitamazing() -> None:
+    assert (
+        _safe_asset_thumbnail_target("http://bucket.tos-cn-beijing.volces.com/kitchen.jpeg")
+        == "https://bucket.tos-cn-beijing.volces.com/kitchen.jpeg"
+    )
+    assert (
+        _safe_asset_thumbnail_target("http://creator.vitamazing.top/upload/kitten.png")
+        == "http://creator.vitamazing.top/upload/kitten.png"
+    )
 
 
 def test_thumbnail_allows_known_legacy_material_host_with_invalid_tls() -> None:

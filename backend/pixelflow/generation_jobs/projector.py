@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 
+from pixelflow.platform.content_app_url import canonical_provider_media_url
+
 
 def build_image_asset_success_patch(payload, *, asset_id: str, result: Mapping[str, object], now: datetime):
-    image_url = str(result.get("image_url") or "").strip()
+    image_url = canonical_provider_media_url(str(result.get("image_url") or ""))
     artifact_ref = str(result.get("artifact_ref") or "").strip()
-    if not image_url.startswith("https://") or not artifact_ref.startswith("artifact:"):
+    if image_url is None or not artifact_ref.startswith("artifact:"):
         return None
     assets = payload.get("asset_registry")
     if not isinstance(assets, list):

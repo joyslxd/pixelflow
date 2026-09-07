@@ -41,3 +41,17 @@ def test_normalize_content_app_base_url_rejects_public_http_ip() -> None:
         assert "已登记" in str(exc)
     else:
         raise AssertionError("公网 IP 不应作为 content-app 根")
+
+
+def test_canonical_provider_media_url_rewrites_tos_http_and_keeps_vitamazing_http() -> None:
+    from pixelflow.platform.content_app_url import canonical_provider_media_url
+
+    assert canonical_provider_media_url(
+        "http://bucket.tos-cn-beijing.volces.com/kitten.png?X-Tos-Signature=abc"
+    ) == "https://bucket.tos-cn-beijing.volces.com/kitten.png"
+    assert (
+        canonical_provider_media_url("http://creator.vitamazing.top/upload/kitten.png")
+        == "http://creator.vitamazing.top/upload/kitten.png"
+    )
+    assert canonical_provider_media_url("https://cdn.example/hero.png") == "https://cdn.example/hero.png"
+    assert canonical_provider_media_url("http://evil.example/kitten.png") is None

@@ -371,6 +371,67 @@ async def test_status_maps_result_data_object_and_list_urls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_rewrites_http_tos_result_to_https() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "id": "image-task-1",
+                    "status": "success",
+                    "result": {"data": "http://bucket.tos-cn-beijing.volces.com/kitten.png?X-Tos-Signature=abc"},
+                },
+            },
+            request=request,
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        snapshot = await adapter.status(
+            "image-task-1",
+            user_id="user-1",
+            conversation_id="conversation-1",
+            authorization="Bearer poll-token",
+        )
+
+    assert snapshot.outcome is ProviderJobOutcome.SUCCEEDED
+    assert snapshot.result == {
+        "image_url": "https://bucket.tos-cn-beijing.volces.com/kitten.png",
+        "artifact_ref": "artifact:image:kitten.png",
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_keeps_http_vitamazing_result_url() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "id": "image-task-1",
+                    "status": "success",
+                    "result": {"data": "http://creator.vitamazing.top/upload/kitten.png"},
+                },
+            },
+            request=request,
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        snapshot = await adapter.status(
+            "image-task-1",
+            user_id="user-1",
+            conversation_id="conversation-1",
+            authorization="Bearer poll-token",
+        )
+
+    assert snapshot.outcome is ProviderJobOutcome.SUCCEEDED
+    assert snapshot.result["image_url"] == "http://creator.vitamazing.top/upload/kitten.png"
+
+
+@pytest.mark.asyncio
 async def test_status_success_without_image_url_is_mapping_error() -> None:
     transport = httpx.MockTransport(
         lambda request: httpx.Response(

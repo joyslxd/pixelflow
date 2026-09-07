@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pixelflow.generation_jobs.projector import (
+    build_image_asset_success_patch,
     build_scene_generation_failure_patch,
     build_scene_generation_success_patch,
     count_polling_scene_generation_jobs,
@@ -111,3 +112,29 @@ def test_generation_job_projector_counts_polling_jobs() -> None:
     assert count_polling_scene_generation_jobs({
         "scenes": [{"generation_jobs": [{"status": "polling"}, {"status": "succeeded"}]}]
     }) == 1
+
+
+def test_image_asset_success_patch_accepts_http_vitamazing_url() -> None:
+    payload = {
+        "asset_registry": [
+            {
+                "asset_id": "asset-kitten",
+                "origin": "planned_generation",
+                "state": "generating",
+            }
+        ]
+    }
+    patch = build_image_asset_success_patch(
+        payload,
+        asset_id="asset-kitten",
+        result={
+            "image_url": "http://creator.vitamazing.top/upload/kitten.png",
+            "artifact_ref": "artifact:image:kitten.png",
+        },
+        now=NOW,
+    )
+
+    assert patch is not None
+    asset = patch["asset_registry"][0]
+    assert asset["state"] == "ready"
+    assert asset["image_url"] == "http://creator.vitamazing.top/upload/kitten.png"

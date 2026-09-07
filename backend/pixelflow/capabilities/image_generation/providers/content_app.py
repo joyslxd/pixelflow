@@ -8,7 +8,6 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlparse, urlunparse
 
 import httpx
 from pydantic import JsonValue
@@ -20,7 +19,7 @@ from pixelflow.generation_jobs.providers import (
     ProviderResponseDiagnostics,
 )
 from pixelflow.platform.content_app_authorization import TransientContentAppAuthorizationStore
-from pixelflow.platform.content_app_url import optional_content_app_base_url
+from pixelflow.platform.content_app_url import canonical_provider_media_url, optional_content_app_base_url
 
 _ENDPOINTS = {
     "text_to_image": "/picture/text_to_image",
@@ -318,7 +317,7 @@ def _to_snapshot(
 
 
 def _image_result(source: Mapping[str, object]) -> dict[str, JsonValue] | None:
-    """从 data/task/result.data 等受控层取出第一张 HTTPS 图，不保留查询串到 Artifact。"""
+    """从 data/task/result.data 等受控层取出第一张可公开图，不保留查询串到 Artifact。"""
 
     url = _first_image_url(source)
     if url is None:
@@ -333,7 +332,7 @@ def _first_image_url(value: object, *, depth: int = 0) -> str | None:
     if depth > 4:
         return None
     if isinstance(value, str):
-        return _canonical_https_image_url(value)
+        return canonical_provider_media_url(value)
     if isinstance(value, list):
         for item in value[:8]:
             found = _first_image_url(item, depth=depth + 1)
@@ -372,15 +371,6 @@ def _first_image_url(value: object, *, depth: int = 0) -> str | None:
             if found:
                 return found
     return None
-
-
-def _canonical_https_image_url(value: str) -> str | None:
-    """只接受无用户信息的 HTTPS 图地址，去掉查询串以免 Snapshot 安全校验拒绝。"""
-
-    parsed = urlparse(value.strip())
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username is not None or parsed.password is not None:
-        return None
-    return urlunparse(("https", parsed.netloc, parsed.path or "/", "", "", ""))
 
 
 def _quota_snapshot(provider_job_id: str | None = None) -> ProviderJobSnapshot:

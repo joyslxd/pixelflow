@@ -53,3 +53,6 @@ def test_scene_preview_rejects_non_allowlisted_host_and_missing_scene() -> None:
     assert workspace_scene_preview_url(payload, "s3") is None
     assert workspace_scene_preview_url(payload, "missing") is None
     assert public_workspace_media_url("https://evil.example/s3.mp4") is None
+    assert public_workspace_media_url("http://creator.vitamazing.top/upload/kitten.png") == (
+        "http://creator.vitamazing.top/upload/kitten.png"
+    )
