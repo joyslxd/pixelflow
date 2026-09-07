@@ -191,14 +191,14 @@ def _safe_v2_asset_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def public_workspace_media_url(url: object) -> str | None:
-    """只公开白名单 HTTPS TOS 地址，拒绝用户信息和任意外链。"""
+    """只公开白名单 TOS / vitamazing 地址，拒绝用户信息和任意外链。"""
 
     if not isinstance(url, str) or not url.strip():
         return None
     parsed = urlparse(url.strip())
     host = parsed.hostname.lower() if parsed.hostname else ""
     if (
-        parsed.scheme != "https"
+        parsed.scheme not in {"http", "https"}
         or parsed.username
         or parsed.password
         or not host

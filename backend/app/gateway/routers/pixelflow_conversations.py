@@ -44,6 +44,7 @@ from pixelflow.tasks import (
     PixelFlowTaskStore,
     sanitize_client_conversation_context,
 )
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.services.workspace_mutation import VideoWorkspaceMutationService
 
 router = APIRouter(prefix="/agent/conversations", tags=["pixelflow-conversations"])
@@ -1062,21 +1063,23 @@ def _material_image_url(payload: Mapping[str, object], material_id: str) -> str 
 
 
 def _safe_asset_thumbnail_target(url: str | None) -> str | None:
-    """只允许白名单 HTTPS TOS 域，拒绝用户信息和 SSRF 跳转目标。"""
+    """只允许白名单 TOS / vitamazing 域，拒绝用户信息和 SSRF 跳转目标。"""
 
     if not isinstance(url, str) or not url.strip():
         return None
-    parsed = urlparse(url.strip())
+    canonical = canonical_provider_media_url(url)
+    if canonical is None:
+        return None
+    parsed = urlparse(canonical)
     host = parsed.hostname.lower() if parsed.hostname else ""
     if (
-        parsed.scheme != "https"
-        or parsed.username
+        parsed.username
         or parsed.password
         or not host
         or not any(host.endswith(suffix) for suffix in _ASSET_THUMBNAIL_ALLOWED_HOST_SUFFIXES)
     ):
         return None
-    return url.strip()
+    return canonical
 
 
 async def _proxy_asset_thumbnail(source_url: str) -> Response:
