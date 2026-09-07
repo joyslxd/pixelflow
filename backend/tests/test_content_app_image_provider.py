@@ -14,11 +14,12 @@ from pixelflow.capabilities.image_generation.providers.content_app import (
 from pixelflow.generation_jobs.providers import ProviderJobMappingError, ProviderJobOutcome
 
 
-def _settings() -> ContentAppImageProviderSettings:
+def _settings(*, project_id: str | None = None) -> ContentAppImageProviderSettings:
     return ContentAppImageProviderSettings(
         base_url="https://content.example",
         provider_id="content-app-image",
         profile_version="v1",
+        project_id=project_id,
     )
 
 
@@ -32,18 +33,34 @@ def _request() -> dict[str, object]:
     }
 
 
+def _image_start_transport(
+    on_post,
+    *,
+    project_id: int | str = 1,
+    projects_payload: dict[str, object] | None = None,
+):
+    """先响应 /projects，再把生图 POST 交给原断言。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and str(request.url.path).rstrip("/").endswith("/projects"):
+            payload = projects_payload or {"success": True, "projects": [{"id": project_id}]}
+            return httpx.Response(200, json=payload, request=request)
+        return on_post(request)
+
+    return httpx.MockTransport(handler)
+
+
+def _polling_start_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"success": True, "data": {"task": {"id": "image-task-1", "status": "processing"}}},
+        request=request,
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_maps_nested_content_app_task_id_to_polling() -> None:
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(
-            200,
-            json={
-                "success": True,
-                "data": {"task": {"id": "image-task-1", "status": "processing"}},
-            },
-            request=request,
-        )
-    )
+    transport = _image_start_transport(_polling_start_response)
     async with httpx.AsyncClient(transport=transport) as client:
         adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
         snapshot = await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-1")
@@ -58,13 +75,9 @@ async def test_start_maps_portrait_ratio_to_provider_pixel_dimensions() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["body"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"success": True, "data": {"task": {"id": "image-task-1", "status": "processing"}}},
-            request=request,
-        )
+        return _polling_start_response(request)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_image_start_transport(handler)) as client:
         adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
         await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-ratio")
 
@@ -76,7 +89,7 @@ async def test_start_maps_portrait_ratio_to_provider_pixel_dimensions() -> None:
 
 @pytest.mark.asyncio
 async def test_start_preserves_provider_mapping_reason_without_raw_response() -> None:
-    transport = httpx.MockTransport(
+    transport = _image_start_transport(
         lambda request: httpx.Response(
             200,
             json={"success": True, "data": {"status": "processing"}},
@@ -94,7 +107,7 @@ async def test_start_preserves_provider_mapping_reason_without_raw_response() ->
 @pytest.mark.asyncio
 async def test_start_reports_safe_diagnostics_for_non_json_response() -> None:
     raw_response = "provider internal detail with prompt kitchen"
-    transport = httpx.MockTransport(
+    transport = _image_start_transport(
         lambda request: httpx.Response(
             200,
             content=raw_response.encode(),
@@ -118,7 +131,7 @@ async def test_start_reports_safe_diagnostics_for_non_json_response() -> None:
 
 @pytest.mark.asyncio
 async def test_start_reports_json_field_paths_without_response_values() -> None:
-    transport = httpx.MockTransport(
+    transport = _image_start_transport(
         lambda request: httpx.Response(
             200,
             json={
@@ -145,12 +158,92 @@ async def test_start_reports_json_field_paths_without_response_values() -> None:
 
 def test_image_provider_normalizes_borgrise_site_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PIXELFLOW_M06_IMAGE_PROVIDER_ENABLED", raising=False)
+    monkeypatch.delenv("PIXELFLOW_M06_IMAGE_PROJECT_ID", raising=False)
     monkeypatch.setenv("BORGRISE_BASE_URL", "https://test-video.borgrise.com/ /api")
 
     settings = ContentAppImageProviderSettings.from_env()
 
     assert settings is not None
     assert settings.base_url == "https://test-video.borgrise.com/api"
+    assert settings.project_id is None
+
+
+def test_image_provider_keeps_explicit_project_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PIXELFLOW_M06_IMAGE_PROVIDER_ENABLED", raising=False)
+    monkeypatch.setenv("BORGRISE_BASE_URL", "https://test-video.borgrise.com/api")
+    monkeypatch.setenv("PIXELFLOW_M06_IMAGE_PROJECT_ID", "148")
+
+    settings = ContentAppImageProviderSettings.from_env()
+
+    assert settings is not None
+    assert settings.project_id == "148"
+
+
+@pytest.mark.asyncio
+async def test_start_uses_first_content_app_project_id() -> None:
+    seen: dict[str, str] = {}
+
+    def on_post(request: httpx.Request) -> httpx.Response:
+        seen["project"] = request.url.params.get("projectId", "")
+        return _polling_start_response(request)
+
+    transport = _image_start_transport(
+        on_post,
+        projects_payload={"success": True, "data": {"projects": [{"id": 148}]}},
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-project")
+
+    assert seen["project"] == "148"
+
+
+@pytest.mark.asyncio
+async def test_start_reuses_resolved_project_id_for_same_authorization() -> None:
+    seen: dict[str, int] = {"projects": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and str(request.url.path).rstrip("/").endswith("/projects"):
+            seen["projects"] += 1
+            return httpx.Response(200, json={"success": True, "projects": [{"id": 148}]}, request=request)
+        return _polling_start_response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-a")
+        await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-b")
+
+    assert seen["projects"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_skips_projects_lookup_when_project_id_configured() -> None:
+    seen: dict[str, object] = {"projects": 0, "project": ""}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and str(request.url.path).rstrip("/").endswith("/projects"):
+            seen["projects"] += 1
+            return httpx.Response(200, json={"success": True, "projects": [{"id": 9}]}, request=request)
+        seen["project"] = request.url.params.get("projectId", "")
+        return _polling_start_response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(project_id="148"), client=client)
+        await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-fixed")
+
+    assert seen["projects"] == 0
+    assert seen["project"] == "148"
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_empty_project_list() -> None:
+    transport = _image_start_transport(_polling_start_response, projects_payload={"success": True, "projects": []})
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = ContentAppImageGenerationAdapter(_settings(), client=client)
+        with pytest.raises(ProviderJobMappingError) as error:
+            await adapter.start(_request(), authorization="Bearer test", idempotency_key="idem-empty")
+
+    assert error.value.reason_code == "image_provider_project_unavailable"
 
 
 @pytest.mark.asyncio

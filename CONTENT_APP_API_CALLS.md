@@ -27,7 +27,8 @@
 
 - 前端入口请求头 `Authorization`：由 content-app 登录后产生，pixelflow 网关校验通过后写入请求级 ContextVar。
 - `BORGRISE_BASE_URL`：content-app/Borgrise API 根地址，必须包含 `/api`；登录态校验也复用该地址并拼接 `/auth/verify`。
-- 不再传 `projectId`：content-app/Borgrise 现在按 `Authorization` 对应的登录用户识别项目、资产和扣费上下文。
+- 图片生成会传 `projectId`：未配置 `PIXELFLOW_M06_IMAGE_PROJECT_ID` 时，Gateway 用当前 `Authorization` 调用 `GET /api/projects`，取第一项 `id`（与资产库上传一致）。写死 `1` 只适用于博观测试 admin，会在 EC 触发项目外键约束失败。
+- 视频生成接口默认不传 `projectId`：content-app 按登录用户识别扣费上下文。
 
 下面接口都需要 `Authorization: Bearer <content-app-jwt>`。生成类接口还会附带额度相关请求头：
 
@@ -69,7 +70,7 @@ Plan 版本状态由 PixelFlow 自身维护，不调用 content-app：
 | `/api/modelParamConfig/listByCategory/video_generate` | `GET` | `web/src/lib/api.ts` 的 `listVideoGenerateModelConfigs()`，由视频需求清洗表单触发 | 查询可用视频模型、画幅、清晰度、声音、时长和端点能力。 | `ModelParamConfigController.listByCategory()` | 前端展示所有启用 Seedance；将 `aspectRatioList/sizeList/onSoundList/videoDurationList/modelGenerateTypeList/uploadFileTypeList` 规范化写入 `video_model_capabilities`。用户选择的画幅、清晰度和声音必须落在快照内；切换到当前仅支持 `480p/720p` 的 `seedance-2.0-mini` 或 `seedance-2.0-fast` 时会把旧 `1080p` 自动修正为 `720p`，避免价格配置无法命中。 |
 | `/api/upload` | `POST multipart` | `web/src/lib/api.ts` 的 `uploadAttachment()`，由普通附件、全局素材临时本地添加/替换和“上传到资产库”入口触发 | 上传本地文件并返回可引用 URL。 | `UploadController.uploadFile()` | 默认无进度回调时沿用 fetch；资产库入口传 `onProgress` 时 Client 内部改用 `XMLHttpRequest.upload.onprogress` 上报真实进度。上传到资产库只校验 JPG/JPEG/PNG/WEBP 和单张不超过 20MB，不校验宽高。 |
 | `/api/internal/upload` | `POST multipart` | R2`JianyingDraftProviderJobService.status_scoped()` | 恢复Worker以服务身份把已校验剪映ZIP幂等上传，并将资产归属到原用户。 | 待content-app新增内部上传Controller | Header必须包含服务`Authorization`和Operation派生`Idempotency-Key`；multipart包含单个ZIP`file`和`target_user_id`。服务端必须鉴别PixelFlow调用方、校验目标用户、以幂等键+请求摘要防冲突并重复返回同一TOS URL。`pixelflow.content_app_internal_upload_enabled=false`时Gateway不注册剪映live Provider；不得降级调用普通`/api/upload`或把资产归服务账号。 |
-| `/api/projects` | `GET` | `web/src/lib/api.ts` 的 `listContentProjects()`，由“上传到资产库”入口在创建资产前触发 | 查询当前用户可用项目，取第一项 `id` 作为图片资产 `projectId`。 | 项目查询 Controller | 获取失败时不继续上传或创建资产，不影响原临时“本地上传”入口。 |
+| `/api/projects` | `GET` | 前端 `contentAppAssets.ts` 上传资产前；Gateway `ContentAppImageGenerationAdapter` 在文生图 start 前 | 查询当前用户可用项目，取第一项 `id` 作为 `projectId`。 | 项目查询 Controller | 获取失败时不继续上传或生图。Gateway 按 Authorization 指纹缓存，不把 token 写入日志或 Workspace。 |
 | `/api/asset/create` | `POST` | `web/src/lib/api.ts` 的 `createContentImageAsset()`，由“上传到资产库”入口触发 | 将 `/api/upload` 返回的图片 URL 创建为当前用户长期图片资产。 | `AssetLibraryController.createAsset()` | 固定传 `assetType=image`、`assetSource=upload`、`projectId/name/refrenceUrl`；响应 `data.id` 只用于当前弹窗定位“刚刚上传”和回查同步，不能用创建响应临时插入列表，随后必须重新查询资产库第一页。 |
 | `/api/asset/character-assets` | `POST` | `web/src/lib/api.ts` 的 `listCharacterAssets()`，由分镜全局角色素材“添加素材/替换素材”弹层触发 | 查询数字人素材列表，支持 `xnszr` 虚拟数字人、`zrszr` 真人数字人、`ipsc` IP素材。 | `AssetLibraryController.getCharacterAssets()` | 前端直连 content-app，POST JSON 传 `assetSource`、`assetType`、`pageCurrent`、`pageSize`。展示图取 `refrenceUrl` 首个图片 URL，模型引用写入 `generation_reference_url=asset://thirdAssetId`；替换模式同步原 `asset_id` 的 mentions，添加模式创建新的 `character-manual-*` 全局素材且不自动绑定镜头。 |
 | `/api/asset/assets` | `POST` | `web/src/lib/api.ts` 的 `listContentImageAssets()`，由分镜全局素材“添加素材/替换素材”弹层触发 | 查询资产库图片素材列表。 | `AssetLibraryController.getAssets()` | 前端直连 content-app，固定传 `assetSource=all`、`assetType=image`，并分页传 `pageCurrent`、`pageSize`。展示图和模型引用都使用图片 URL；替换模式同步原 global asset/mentions，添加模式只追加带类型前缀的新 global asset，待用户手动 `@` 后才进入镜头生成。 |

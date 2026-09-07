@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -49,7 +50,8 @@ class ContentAppImageProviderSettings:
     profile_version: str
     connect_timeout_seconds: float = 10
     read_timeout_seconds: float = 30
-    project_id: str = "1"
+    # 用途：可选覆盖 Content-App 项目；影响：留空则按当前 Authorization 查询 /projects。
+    project_id: str | None = None
 
     @classmethod
     def from_env(cls) -> ContentAppImageProviderSettings | None:
@@ -59,12 +61,12 @@ class ContentAppImageProviderSettings:
         base_url = optional_content_app_base_url(os.environ.get("BORGRISE_BASE_URL", ""))
         if base_url is None:
             return None
+        configured_project = os.environ.get("PIXELFLOW_M06_IMAGE_PROJECT_ID", "").strip()
         return cls(
             base_url=base_url,
             provider_id=os.environ.get("PIXELFLOW_M06_IMAGE_PROVIDER_ID", "content-app-image"),
             profile_version=os.environ.get("PIXELFLOW_M06_IMAGE_PROVIDER_PROFILE_VERSION", "v1"),
-            # 用途：复用 content-app 图片生成的项目计费上下文；影响：缺省与当前 admin 图片创作页一致。
-            project_id=os.environ.get("PIXELFLOW_M06_IMAGE_PROJECT_ID", "1").strip() or "1",
+            project_id=configured_project or None,
         )
 
 
@@ -85,6 +87,7 @@ class ContentAppImageGenerationAdapter:
         self._authorization_store = authorization_store or TransientContentAppAuthorizationStore()
         self._owns_authorization_store = authorization_store is None
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(connect=settings.connect_timeout_seconds, read=settings.read_timeout_seconds, write=settings.read_timeout_seconds, pool=settings.connect_timeout_seconds))
+        self._project_ids_by_authorization: dict[str, str] = {}
 
     def prepare_operation_request(self, request: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         mode = str(request.get("generation_mode") or "").strip()
@@ -97,9 +100,10 @@ class ContentAppImageGenerationAdapter:
         mode = str(normalized["generation_mode"])
         body = _start_payload(normalized)
         try:
+            project_id = await self._resolve_project_id(authorization)
             response = await self._client.post(
                 f"{self._settings.base_url}{_ENDPOINTS[mode]}",
-                params={"projectId": self._settings.project_id},
+                params={"projectId": project_id},
                 headers={
                     "Authorization": _bearer(authorization),
                     "Idempotency-Key": idempotency_key,
@@ -182,6 +186,62 @@ class ContentAppImageGenerationAdapter:
             await self._authorization_store.aclose()
         if self._owns_client:
             await self._client.aclose()
+
+    async def _resolve_project_id(self, authorization: str) -> str:
+        """优先用部署覆盖；否则按当前用户项目列表第一项，避免 EC 写死 projectId=1。"""
+
+        if self._settings.project_id:
+            return self._settings.project_id
+        cache_key = hashlib.sha256(_bearer(authorization).encode("utf-8")).hexdigest()
+        cached = self._project_ids_by_authorization.get(cache_key)
+        if cached:
+            return cached
+        resolved = await self._fetch_project_id(authorization)
+        self._project_ids_by_authorization[cache_key] = resolved
+        return resolved
+
+    async def _fetch_project_id(self, authorization: str) -> str:
+        """GET /projects，解析与前端上传素材相同的第一项 id。"""
+
+        response = await self._client.get(
+            f"{self._settings.base_url}/projects",
+            headers={"Authorization": _bearer(authorization)},
+        )
+        if response.status_code >= 400:
+            raise ProviderJobMappingError("image_provider_project_unavailable")
+        payload, _diagnostics = _require_json_object(response)
+        project_id = _first_project_id(payload)
+        if project_id is None:
+            raise ProviderJobMappingError("image_provider_project_unavailable")
+        return project_id
+
+
+def _first_project_id(payload: Mapping[str, object]) -> str | None:
+    """从 projects 或 data.projects 读取第一项 id；不把任务 id 误当项目。"""
+
+    projects = payload.get("projects")
+    if not isinstance(projects, list):
+        data = payload.get("data")
+        if isinstance(data, Mapping):
+            projects = data.get("projects")
+        elif isinstance(data, list):
+            projects = data
+    if not isinstance(projects, list) or not projects:
+        return None
+    first = projects[0]
+    if not isinstance(first, Mapping):
+        return None
+    value = first.get("id")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return str(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text and len(text) <= 64:
+            return text
+    return None
+
 
 def _start_payload(request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     """映射 content-app 文生图 DTO，比例以 width/height 传递而非 ratio。"""
