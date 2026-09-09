@@ -274,6 +274,40 @@ def test_workspace_digest_exposes_allowlisted_scene_preview_url() -> None:
     assert digest["scene_videos_ready_count"] == 1
 
 
+def test_workspace_digest_exposes_http_vitamazing_scene_preview_url() -> None:
+    digest = build_workspace_digest(
+        VideoWorkspace(
+            workspace_id="workspace-scene-http",
+            conversation_id="conversation-scene-http",
+            payload={
+                "workspace_schema_version": 2,
+                "scenes": [
+                    {
+                        "scene_id": "s-http",
+                        "segment_id": "s-http",
+                        "scene_index": 1,
+                        "title": "EC成片",
+                        "video_url": "http://cdn.vitamazing.top/s-http.mp4",
+                    }
+                ],
+                "prompt_packages": [
+                    {
+                        "segment_id": "s-http",
+                        "sequence": 1,
+                        "duration_sec": 8,
+                        "generation_mode": "independent",
+                        "prompt": "EC 分镜成片。",
+                        "state": "planned",
+                    }
+                ],
+            },
+        )
+    )
+
+    assert digest["prompt_packages"][0]["has_preview"] is True
+    assert digest["prompt_packages"][0]["preview_url"] == "http://cdn.vitamazing.top/s-http.mp4"
+
+
 def test_workspace_digest_exposes_allowlisted_merged_video_preview_url() -> None:
     """合并成片同样只公开白名单 TOS 地址，供工作台回显。"""
 

@@ -60,7 +60,7 @@ type RecordValue = Record<string, unknown>;
 const CREATIVE_FIELDS = ["brand", "product", "audience", "platform", "aspect_ratio", "target_duration_sec", "audio", "cta", "creative_direction", "tone", "visual_style", "delivery", "reference_strategy"] as const;
 const NARRATIVE_FIELDS = ["concept", "outline", "character_arc", "era", "narration", "dialogue", "sound", "brand_closure", "script", "status", "version"] as const;
 const STATE_VALUES = new Set(["planned", "generating", "ready", "failed"]);
-const PREVIEW_HOST_SUFFIXES = [".tos-cn-beijing.volces.com", ".vitamazing.top"];
+const PREVIEW_HOST_SUFFIXES = [".tos-cn-beijing.volces.com", ".vitamazing.top", "vitamazing.top"];
 
 function record(value: unknown): RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as RecordValue : {};
@@ -87,9 +87,13 @@ function previewUrl(value: unknown): string {
   try {
     const parsed = new URL(candidate);
     const host = parsed.hostname.toLowerCase();
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password) return "";
-    if (!PREVIEW_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) return "";
-    return candidate;
+    if (parsed.username || parsed.password) return "";
+    if (!PREVIEW_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(suffix))) return "";
+    if (parsed.protocol === "https:") return candidate;
+    if (parsed.protocol === "http:" && (host === "vitamazing.top" || host.endsWith(".vitamazing.top"))) {
+      return candidate;
+    }
+    return "";
   } catch {
     return "";
   }

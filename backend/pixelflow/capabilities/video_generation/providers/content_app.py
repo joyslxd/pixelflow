@@ -20,7 +20,10 @@ from pixelflow.generation_jobs.providers import (
 from pixelflow.platform.content_app_authorization import (
     TransientContentAppAuthorizationStore,
 )
-from pixelflow.platform.content_app_url import optional_content_app_base_url
+from pixelflow.platform.content_app_url import (
+    canonical_provider_media_url,
+    optional_content_app_base_url,
+)
 from pixelflow.video.workspace.payload import canonicalize_video_model
 
 _MODE_ENDPOINTS = {
@@ -429,21 +432,43 @@ def _result_projection(value: object, *, job_id: str) -> dict[str, JsonValue]:
     }
 
 
-def _first_video_url(value: object) -> str | None:
-    candidates: list[object] = []
-    if isinstance(value, Mapping):
-        candidates.extend(value.get(key) for key in ("video_url", "videoUrl", "url", "video"))
-        candidates.extend(value.get(key) for key in ("videos", "video_urls", "videoUrls"))
-    else:
-        candidates.append(value)
-    for candidate in candidates:
-        values = candidate if isinstance(candidate, list) else [candidate]
-        for item in values:
-            if not isinstance(item, str):
-                continue
-            parsed = urlparse(item)
-            if parsed.scheme == "https" and parsed.netloc and not parsed.query and not parsed.fragment:
-                return item
+def _first_video_url(value: object, *, depth: int = 0) -> str | None:
+    """兼容 content-app 把成片放在 result / videoUrl 的成功 DTO；vitamazing 保留 HTTP。"""
+
+    if depth > 4:
+        return None
+    if isinstance(value, str):
+        return canonical_provider_media_url(value)
+    if isinstance(value, list):
+        for item in value[:8]:
+            found = _first_video_url(item, depth=depth + 1)
+            if found:
+                return found
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    for key in (
+        "video_url",
+        "videoUrl",
+        "url",
+        "video",
+        "videos",
+        "video_urls",
+        "videoUrls",
+        "fileUrl",
+        "file_url",
+    ):
+        if key not in value:
+            continue
+        found = _first_video_url(value.get(key), depth=depth + 1)
+        if found:
+            return found
+    for key in ("data", "result", "task", "job", "payload"):
+        nested = value.get(key)
+        if isinstance(nested, (Mapping, list, str)):
+            found = _first_video_url(nested, depth=depth + 1)
+            if found:
+                return found
     return None
 
 

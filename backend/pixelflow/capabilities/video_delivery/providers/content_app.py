@@ -7,7 +7,6 @@ import json
 import logging
 import os
 from collections.abc import Mapping, Sequence
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import JsonValue
@@ -18,6 +17,7 @@ from pixelflow.agent_tools.video.contracts import (
 )
 from pixelflow.agent_tools.video.credentials import VideoAgentCredentialUnavailableError
 from pixelflow.agent_tools.video.delivery import DeliveryOperationJob, DeliveryOutputType
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.workspace.payload import canonicalize_video_model
 
 _MERGE_ENDPOINT = "/video/merge"
@@ -210,18 +210,13 @@ def _variant_urls_by_artifact(payload: Mapping[str, object]) -> dict[str, str]:
     for scene in _records(payload.get("scenes")):
         for variant in _records(scene.get("variants")):
             ref = str(variant.get("artifact_ref") or "")
-            url = variant.get("video_url")
-            if ref.startswith("artifact:") and isinstance(url, str) and url.startswith("https://"):
-                mapping[ref] = url.strip()
+            url = _media_url(variant.get("video_url"))
+            if ref.startswith("artifact:") and url:
+                mapping[ref] = url
         scene_ref = str(scene.get("artifact_ref") or "")
-        scene_url = scene.get("video_url")
-        if (
-            scene_ref.startswith("artifact:")
-            and scene_ref not in mapping
-            and isinstance(scene_url, str)
-            and scene_url.startswith("https://")
-        ):
-            mapping[scene_ref] = scene_url.strip()
+        scene_url = _media_url(scene.get("video_url"))
+        if scene_ref.startswith("artifact:") and scene_ref not in mapping and scene_url:
+            mapping[scene_ref] = scene_url
     return mapping
 
 
@@ -262,33 +257,30 @@ def _video_size(value: str) -> str:
 def _merge_result_url(payload: Mapping[str, object]) -> str | None:
     data = payload.get("data")
     if isinstance(data, str):
-        return _https_url(data)
-    return _first_https_url(data) or _first_https_url(payload)
+        return _media_url(data)
+    return _first_media_url(data) or _first_media_url(payload)
 
 
-def _first_https_url(value: object) -> str | None:
+def _first_media_url(value: object) -> str | None:
     if isinstance(value, Mapping):
         for key in ("video_url", "videoUrl", "url", "video", "merged_video_url"):
-            found = _https_url(value.get(key))
+            found = _media_url(value.get(key))
             if found:
                 return found
         for key in ("videos", "video_urls", "videoUrls"):
             items = value.get(key)
             if isinstance(items, list):
                 for item in items:
-                    found = _https_url(item)
+                    found = _media_url(item)
                     if found:
                         return found
-    return _https_url(value)
+    return _media_url(value)
 
 
-def _https_url(value: object) -> str | None:
+def _media_url(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    parsed = urlparse(value.strip())
-    if parsed.scheme == "https" and parsed.netloc:
-        return value.strip()
-    return None
+    return canonical_provider_media_url(value)
 
 
 def _json_object(response: httpx.Response) -> Mapping[str, object]:

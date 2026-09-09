@@ -3,7 +3,7 @@ import test from "node:test";
 
 const moduleUrl = process.env.CONTENT_APP_ORIGIN_TEST_MODULE;
 assert.ok(moduleUrl, "CONTENT_APP_ORIGIN_TEST_MODULE 必须指向已编译模块");
-const { contentAppRequestUrl } = await import(moduleUrl);
+const { canonicalUploadedMediaUrl, contentAppRequestUrl } = await import(moduleUrl);
 
 test("Content-App 同域地址按当前部署 Profile 使用其公开根", () => {
   assert.equal(
@@ -32,5 +32,20 @@ test("Content-App 非同域地址保持相对路径并交给同域 Nginx 代理"
       path: "/api/upload",
     }),
     "/api/upload",
+  );
+});
+
+test("上传结果 TOS 升 HTTPS，vitamazing 站点改回 HTTP", () => {
+  assert.equal(
+    canonicalUploadedMediaUrl("http://bucket.tos-cn-beijing.volces.com/kitten.png?X-Tos-Signature=abc"),
+    "https://bucket.tos-cn-beijing.volces.com/kitten.png",
+  );
+  assert.equal(
+    canonicalUploadedMediaUrl("https://www.vitamazing.top/image/shampoo.jpg"),
+    "http://www.vitamazing.top/image/shampoo.jpg",
+  );
+  assert.equal(
+    canonicalUploadedMediaUrl("http://www.vitamazing.top/image/shampoo.jpg"),
+    "http://www.vitamazing.top/image/shampoo.jpg",
   );
 });

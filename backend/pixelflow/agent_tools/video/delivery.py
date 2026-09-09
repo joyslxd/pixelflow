@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from pixelflow.generation_jobs.quota import build_start_quota_interrupt_id
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.contracts import VideoAgentContract, VideoToolResult
 
 from .contracts import (
@@ -44,7 +45,7 @@ class DeliveryOperationJob(VideoAgentContract):
         pattern=r"^artifact:[A-Za-z0-9._:-]+$",
         max_length=256,
     )
-    # 成片 HTTPS URL；仅 succeeded 时写入，供工作台资产包预览回填。
+    # 成片受控 URL；仅 succeeded 时写入，供工作台资产包预览回填。
     delivery_url: str | None = Field(default=None, max_length=2048)
 
     @model_validator(mode="after")
@@ -56,10 +57,10 @@ class DeliveryOperationJob(VideoAgentContract):
         if self.status in {"polling", "start_paused_quota"} and self.delivery_url is not None:
             raise ValueError("运行中的交付Operation不能提前包含成片URL")
         if self.delivery_url is not None:
-            normalized = self.delivery_url.strip()
-            if not normalized.lower().startswith("https://"):
-                raise ValueError("交付URL必须是HTTPS")
-            object.__setattr__(self, "delivery_url", normalized)
+            canonical = canonical_provider_media_url(self.delivery_url)
+            if canonical is None:
+                raise ValueError("交付URL必须是受控媒体地址")
+            object.__setattr__(self, "delivery_url", canonical)
         return self
 
 
@@ -314,7 +315,7 @@ def _resolve_delivery_variant(
         for item in variants
         if item.get("selected") is True
         and str(item.get("review_status") or "") == "approved"
-        and _is_https_url(item.get("video_url"))
+        and _is_delivery_media_url(item.get("video_url"))
         and _is_artifact_ref(item.get("artifact_ref"))
     ]
     if len(selected_ready) == 1:
@@ -322,7 +323,7 @@ def _resolve_delivery_variant(
     ready = [
         item
         for item in variants
-        if _is_https_url(item.get("video_url")) and _is_artifact_ref(item.get("artifact_ref"))
+        if _is_delivery_media_url(item.get("video_url")) and _is_artifact_ref(item.get("artifact_ref"))
     ]
     if len(ready) == 1:
         return ready[0]
@@ -331,10 +332,10 @@ def _resolve_delivery_variant(
     return None
 
 
-def _is_https_url(value: object) -> bool:
+def _is_delivery_media_url(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    return value.strip().lower().startswith("https://")
+    return canonical_provider_media_url(value) is not None
 
 
 def _records(value: object) -> list[dict[str, JsonValue]]:

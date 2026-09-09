@@ -50,6 +50,35 @@ def test_generation_job_success_updates_only_target_scene() -> None:
     assert patch["scene_video_progress"]["scene_index"] == 1
 
 
+def test_generation_job_success_accepts_http_vitamazing_video_url() -> None:
+    payload = {
+        "dirty_scene_ids": ["scene-1"],
+        "scenes": [
+            {
+                "scene_id": "scene-1",
+                "scene_index": 1,
+                "edit_status": "重新生成中",
+                "generation_jobs": [{"job_id": "job-1", "status": "polling", "variant_index": 1}],
+                "variants": [],
+            }
+        ],
+    }
+    patch = build_scene_generation_success_patch(
+        payload,
+        job_id="job-1",
+        result={
+            "variant_id": "variant-1",
+            "artifact_ref": "artifact:scene-1-v1",
+            "video_url": "http://cdn.vitamazing.top/scene-1.mp4",
+        },
+        now=NOW,
+    )
+
+    assert patch is not None
+    assert patch["scenes"][0]["video_url"] == "http://cdn.vitamazing.top/scene-1.mp4"
+    assert patch["scenes"][0]["edit_status"] == "重新生成完成"
+
+
 def test_generation_job_failure_records_controlled_reason() -> None:
     payload = {
         "scenes": [{

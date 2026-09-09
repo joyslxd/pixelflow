@@ -24,7 +24,7 @@ keywords:
 ## 核心逻辑
 
 1. TOS 主机 `.tos-cn-beijing.volces.com` 的 HTTP 升为 HTTPS，去掉查询串。
-2. 已登记 `*.vitamazing.top` 允许保留 HTTP（EC 站点本身无 TLS）。
+2. 已登记 `*.vitamazing.top` **一律写成 HTTP**（该站点无可用 TLS；前端误升的 HTTPS 也要降回来）。
 3. 其它公网 HTTP 仍拒绝。
 4. Worker 会回放 `provider_poll_image_result_url_missing` / `provider_result_missing` 且已有 `provider_job_id` 的图片 Job，不再次 `text_to_image` 扣费。
 

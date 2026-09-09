@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pydantic import JsonValue
 
 from pixelflow.agent_tools.video.contracts import VideoToolContext, VideoToolExecutionError
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.workspace.payload import canonicalize_video_model
 
 
@@ -187,10 +188,11 @@ def _https_urls(value: object) -> list[str]:
 
 
 def _safe_url(value: object) -> str | None:
+    """只保留无用户信息的媒体地址；TOS HTTP 升 HTTPS，vitamazing 允许 HTTP。"""
+
     if not isinstance(value, str):
         return None
-    text = value.strip()
-    return text if text.startswith("https://") and "?" not in text and "#" not in text else None
+    return canonical_provider_media_url(value)
 
 
 def _text(value: object) -> str:

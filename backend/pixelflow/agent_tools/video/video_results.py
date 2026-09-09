@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.contracts import VideoToolResult
 
 from .contracts import (
@@ -80,7 +81,7 @@ class InspectVideoResultsTool:
                     item
                     for item in variants
                     if isinstance(item, Mapping)
-                    and str(item.get("video_url") or "").strip().startswith("https://")
+                    and canonical_provider_media_url(str(item.get("video_url") or ""))
                     and (item.get("selected") is True or item.get("variant_id") == selected_variant_id)
                 ),
                 None,
@@ -91,7 +92,7 @@ class InspectVideoResultsTool:
                         item
                         for item in variants
                         if isinstance(item, Mapping)
-                        and str(item.get("video_url") or "").strip().startswith("https://")
+                        and canonical_provider_media_url(str(item.get("video_url") or ""))
                     ),
                     None,
                 )

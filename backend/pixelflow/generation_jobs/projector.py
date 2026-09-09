@@ -69,10 +69,10 @@ def build_image_asset_failure_patch(payload, *, asset_id: str, status: str, reas
 
 
 def build_scene_generation_success_patch(payload, *, job_id: str, result: Mapping[str, object], now: datetime):
-    video_url = str(result.get("video_url") or "").strip()
+    video_url = canonical_provider_media_url(str(result.get("video_url") or ""))
     variant_id = str(result.get("variant_id") or "").strip()
     artifact_ref = str(result.get("artifact_ref") or "").strip()
-    if not video_url.startswith("https://") or not variant_id or not artifact_ref.startswith("artifact:"):
+    if video_url is None or not variant_id or not artifact_ref.startswith("artifact:"):
         return None
     scenes = payload.get("scenes")
     if not isinstance(scenes, list):

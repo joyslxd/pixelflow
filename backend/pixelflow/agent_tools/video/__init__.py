@@ -27,6 +27,7 @@ from .credential_store import TransientRunCredentialStore
 from .delivery import ComposeOrExportVideoTool
 from .image_asset_inspection import InspectImageAssetsInput, InspectImageAssetsTool
 from .image_asset_retry import RetryFailedImageAssetsInput, RetryFailedImageAssetsTool
+from .image_asset_revise import ReviseImageAssetItem, ReviseImageAssetsInput, ReviseImageAssetsTool
 from .image_assets import GenerateImageAssetsInput, GenerateImageAssetsTool
 from .inspect_workspace import InspectVideoWorkspaceInput, InspectVideoWorkspaceTool
 from .production_contract import SetVideoGenerationContractTool
@@ -83,6 +84,9 @@ __all__ = [
     "InspectImageAssetsTool",
     "RetryFailedImageAssetsInput",
     "RetryFailedImageAssetsTool",
+    "ReviseImageAssetItem",
+    "ReviseImageAssetsInput",
+    "ReviseImageAssetsTool",
     "InspectVideoResultsInput",
     "InspectVideoResultsTool",
     "ComposeOrExportVideoTool",

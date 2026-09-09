@@ -114,6 +114,92 @@ async def test_compose_rejects_inflight_scene_even_when_other_scenes_are_ready()
 
 
 @pytest.mark.asyncio
+async def test_compose_accepts_http_vitamazing_scene_url() -> None:
+    port = _RecordingPort()
+    result = await ComposeOrExportVideoTool(operation_port=port).execute(
+        _context(
+            {
+                "scenes": [
+                    {
+                        "scene_id": "scene_a",
+                        "approved_variant_id": "variant:a1",
+                        "variants": [
+                            {
+                                "variant_id": "variant:a1",
+                                "artifact_ref": "artifact:video:a1",
+                                "video_url": "http://cdn.vitamazing.top/a1.mp4",
+                                "selected": True,
+                                "review_status": "approved",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        {"output_type": "mp4"},
+    )
+
+    assert result.public_summary == "MP4成片已生成"
+    assert port.scenes == [
+        {
+            "scene_id": "scene_a",
+            "variant_id": "variant:a1",
+            "artifact_ref": "artifact:video:a1",
+        }
+    ]
+    assert result.workspace_patch["merged_video"]["merged_video_url"] == (
+        "https://cdn.example.invalid/merged.mp4"
+    )
+
+
+def test_delivery_job_accepts_http_vitamazing_url() -> None:
+    job = DeliveryOperationJob(
+        job_id="delivery-http-ok",
+        output_type="mp4",
+        status="succeeded",
+        artifact_ref="artifact:merge:http1",
+        delivery_url="https://cdn.vitamazing.top/merged.mp4",
+    )
+
+    assert job.delivery_url == "http://cdn.vitamazing.top/merged.mp4"
+
+
+@pytest.mark.asyncio
+async def test_compose_selects_http_vitamazing_variant_without_approved_id() -> None:
+    port = _RecordingPort()
+    result = await ComposeOrExportVideoTool(operation_port=port).execute(
+        _context(
+            {
+                "scenes": [
+                    {
+                        "scene_id": "scene_a",
+                        "variants": [
+                            {
+                                "variant_id": "variant:a1",
+                                "artifact_ref": "artifact:video:a1",
+                                "video_url": "http://cdn.vitamazing.top/a1.mp4",
+                                "selected": False,
+                                "review_status": "pending",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        {"output_type": "mp4"},
+    )
+
+    assert result.public_summary == "MP4成片已生成"
+    assert port.scenes == [
+        {
+            "scene_id": "scene_a",
+            "variant_id": "variant:a1",
+            "artifact_ref": "artifact:video:a1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_compose_without_port_still_reports_unassembled() -> None:
     with pytest.raises(VideoToolValidationError, match="工作区没有可交付镜头"):
         await ComposeOrExportVideoTool().execute(

@@ -90,6 +90,44 @@ class _FakeProvider:
         )
 
 
+class _FakeVideoProvider:
+    provider_id = "fake-video"
+    profile_version = "test-v1"
+
+    def prepare_operation_request(self, request):
+        return {**dict(request), "provider_id": self.provider_id, "provider_profile_version": self.profile_version}
+
+    async def start(self, request, *, authorization, idempotency_key):
+        del request, authorization, idempotency_key
+        return ProviderJobSnapshot(
+            provider_job_id="provider-video-1",
+            outcome=ProviderJobOutcome.POLLING,
+            reason_code="provider_polling",
+            message="供应商任务处理中。",
+        )
+
+    async def status(self, provider_job_id, *, user_id, conversation_id):
+        del user_id, conversation_id
+        return ProviderJobSnapshot(
+            provider_job_id=provider_job_id,
+            outcome=ProviderJobOutcome.SUCCEEDED,
+            result={
+                "variant_id": "variant:video-1",
+                "artifact_ref": "artifact:video:scene-1",
+                "video_url": "http://cdn.vitamazing.top/scene-1.mp4",
+                "completed_at": "2026-09-01T00:00:00+00:00",
+            },
+            reason_code="provider_succeeded",
+            message="供应商任务已完成。",
+        )
+
+
+class _AuthUnavailableVideoProvider(_FakeVideoProvider):
+    async def status(self, provider_job_id, *, user_id, conversation_id):
+        del provider_job_id, user_id, conversation_id
+        raise ProviderJobMappingError("provider_status_authorization_unavailable")
+
+
 class _MappingErrorProvider(_FakeProvider):
     async def start(self, request, *, authorization, idempotency_key):
         del request, authorization, idempotency_key
@@ -417,6 +455,90 @@ async def test_generation_job_worker_reclaims_missing_image_result(failure_reaso
     assert asset["state"] == "ready"
     assert asset["generation_job_status"] == "succeeded"
     assert asset["image_url"] == "https://cdn.example/image-1.png"
+
+
+@pytest.mark.parametrize(
+    "failure_reason_code",
+    ("provider_poll_video_result_url_missing", "provider_poll_provider_status_authorization_unavailable"),
+)
+@pytest.mark.asyncio
+async def test_generation_job_worker_reclaims_missing_video_result(failure_reason_code: str) -> None:
+    repository = MemoryGenerationJobRepository()
+    context = _context()
+    job_id = "generation-job-reclaim-video"
+    context.workspace.payload["scenes"] = [
+        {
+            "scene_id": "scene-1",
+            "scene_index": 1,
+            "edit_status": "重新生成失败",
+            "generation_jobs": [{"job_id": job_id, "status": "indeterminate", "variant_index": 1}],
+            "variants": [],
+        }
+    ]
+    workspace_repository = MemoryVideoAgentRepository()
+    await workspace_repository.create_workspace(context.user_id, context.workspace)
+    now = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+    await repository.create_or_read(
+        _job(job_id=job_id, idempotency_key="generation:v1:reclaim-video").model_copy(
+            update={
+                "kind": GenerationJobKind.VIDEO,
+                "item_id": "scene-1",
+                "status": GenerationJobStatus.INDETERMINATE,
+                "provider_job_id": "provider-video-1",
+                "failure_reason_code": failure_reason_code,
+            }
+        )
+    )
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=workspace_repository,
+        credential_store=TransientGenerationJobCredentialStore(),
+        video_provider=_FakeVideoProvider(),
+        worker_id="generation-worker-reclaim-video-test",
+        clock=lambda: now,
+    )
+
+    assert await worker.run_once() == 1
+    completed = await repository.get(job_id)
+    assert completed is not None
+    assert completed.status is GenerationJobStatus.SUCCEEDED
+    updated = await workspace_repository.get_workspace(context.user_id, context.workspace.workspace_id)
+    assert updated is not None
+    scene = updated.payload["scenes"][0]
+    assert scene["edit_status"] == "重新生成完成"
+    assert scene["video_url"] == "http://cdn.vitamazing.top/scene-1.mp4"
+
+
+@pytest.mark.asyncio
+async def test_generation_job_worker_retries_poll_when_status_authorization_is_missing() -> None:
+    repository = MemoryGenerationJobRepository()
+    now = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+    job_id = "generation-job-auth-retry"
+    await repository.create_or_read(
+        _job(job_id=job_id, idempotency_key="generation:v1:auth-retry").model_copy(
+            update={
+                "kind": GenerationJobKind.VIDEO,
+                "item_id": "scene-1",
+                "status": GenerationJobStatus.POLLING,
+                "provider_job_id": "provider-video-1",
+                "next_poll_at": now,
+            }
+        )
+    )
+    worker = GenerationJobWorker(
+        repository=repository,
+        workspace_repository=MemoryVideoAgentRepository(),
+        credential_store=TransientGenerationJobCredentialStore(),
+        video_provider=_AuthUnavailableVideoProvider(),
+        worker_id="generation-worker-auth-retry",
+        clock=lambda: now,
+    )
+
+    assert await worker.run_once() == 1
+    current = await repository.get(job_id)
+    assert current is not None
+    assert current.status is GenerationJobStatus.POLLING
+    assert current.failure_reason_code is None
 
 
 @pytest.mark.asyncio

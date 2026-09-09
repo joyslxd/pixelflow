@@ -133,6 +133,62 @@ async def test_start_and_status_reuse_browser_authorization_without_environment_
 
 
 @pytest.mark.asyncio
+async def test_status_accepts_http_vitamazing_video_url() -> None:
+    """EC 成片常是 http://*.vitamazing.top；只收 HTTPS 会把已成功任务写成 result_url_missing。"""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/video/text-to-video"):
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"taskId": "task-http", "status": "processing"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "taskId": "task-http",
+                    "status": "succeeded",
+                    "result": {"videoUrl": "http://cdn.vitamazing.top/scene.mp4"},
+                },
+            },
+        )
+
+    provider = _provider(handler)
+    request = provider.prepare_operation_request(
+        {
+            "generation_mode": "text_to_video",
+            "prompt": "测试视频",
+            "model": "seedance-2.0",
+            "ratio": "16:9",
+            "size": "720p",
+            "duration": 5,
+            "sound": "on",
+            "image_urls": [],
+            "video_urls": [],
+            "audio_urls": [],
+        }
+    )
+    await provider.start(
+        request,
+        authorization="Bearer user-start-token",
+        idempotency_key="operation:v1:http-video",
+    )
+    completed = await provider.status(
+        "task-http",
+        user_id="user",
+        conversation_id="conversation",
+    )
+    await provider.aclose()
+
+    assert completed.outcome is ProviderJobOutcome.SUCCEEDED
+    assert completed.result["video_url"] == "http://cdn.vitamazing.top/scene.mp4"
+
+
+@pytest.mark.asyncio
 async def test_status_fails_closed_when_browser_authorization_lease_is_absent() -> None:
     """未由本进程创建的任务不能借用或猜测其他用户 Authorization。"""
 

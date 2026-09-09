@@ -151,7 +151,7 @@ class GenerationJobWorker:
             await self._finish_failure(job, GenerationJobStatus.INDETERMINATE, "provider_job_unavailable")
             return
         credential = await self._credentials.get(generation_job_id=job.generation_job_id)
-        if credential is None and job.kind is not GenerationJobKind.IMAGE:
+        if credential is None and job.kind not in {GenerationJobKind.IMAGE, GenerationJobKind.VIDEO}:
             await self._finish_failure(job, GenerationJobStatus.INDETERMINATE, "authorization_unavailable")
             return
         try:
@@ -166,6 +166,10 @@ class GenerationJobWorker:
                 return
             await self._accept_snapshot(job, snapshot, phase="poll")
         except ProviderJobMappingError as exc:
+            if _safe_provider_mapping_reason(exc.reason_code) == "provider_status_authorization_unavailable":
+                # Gateway 重启后任务租约会丢；等用户已登录请求补上 put_user，不能写成终态。
+                await self._reschedule_poll(job)
+                return
             await self._fail_provider_mapping(job, exc, phase="poll")
         except Exception as exc:  # noqa: BLE001 - 单轮失败释放 lease，下一轮安全重试 status。
             logger.warning(
@@ -174,19 +178,7 @@ class GenerationJobWorker:
                 job.kind.value,
                 type(exc).__name__,
             )
-            try:
-                await self._jobs.reschedule_poll(
-                    generation_job_id=job.generation_job_id,
-                    worker_id=self._worker_id,
-                    now=self._clock(),
-                    next_poll_at=self._clock() + self._poll_interval,
-                )
-            except Exception as lease_exc:  # noqa: BLE001
-                logger.warning(
-                    "generation_job_poll_reschedule_failed job_id=%s error_type=%s",
-                    job.generation_job_id,
-                    type(lease_exc).__name__,
-                )
+            await self._reschedule_poll(job)
 
     async def _fail_provider_mapping(
         self,
@@ -225,6 +217,23 @@ class GenerationJobWorker:
             GenerationJobStatus.INDETERMINATE,
             f"provider_{phase}_{reason_code}",
         )
+
+    async def _reschedule_poll(self, job: GenerationJobRecord) -> None:
+        """释放本轮 lease，让后续扫描继续 status；不把瞬时授权缺失写成终态。"""
+
+        try:
+            await self._jobs.reschedule_poll(
+                generation_job_id=job.generation_job_id,
+                worker_id=self._worker_id,
+                now=self._clock(),
+                next_poll_at=self._clock() + self._poll_interval,
+            )
+        except Exception as lease_exc:  # noqa: BLE001
+            logger.warning(
+                "generation_job_poll_reschedule_failed job_id=%s error_type=%s",
+                job.generation_job_id,
+                type(lease_exc).__name__,
+            )
 
     async def _provider_status(
         self,

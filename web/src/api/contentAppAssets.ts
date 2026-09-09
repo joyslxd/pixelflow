@@ -1,7 +1,7 @@
 /** content-app 图片上传与资产库 Client；文件不经过 Gateway、Sidecar 或浏览器业务状态。 */
 
 import { getBrowserAuthorization } from "@/lib/authStorage";
-import { contentAppRequestUrl } from "@/lib/contentAppOrigin";
+import { canonicalUploadedMediaUrl, contentAppRequestUrl } from "@/lib/contentAppOrigin";
 
 /**
  * content-app 上传入口：同域站点可直连；独立 Agent 前端通过 Nginx 同源 /api 代理，
@@ -81,8 +81,7 @@ export async function uploadContentAppFile(file: File, displayName = file.name):
   const uploaded = await contentAppRequest("/api/upload", { method: "POST", body: form });
   const uploadData = object(uploaded.data);
   const rawUrl = text(uploadData.url) || text(uploadData.path) || text(uploaded.url) || text(uploaded.path);
-  // content-app 测试环境会返回 HTTP TOS 地址；该域已验证同时支持 HTTPS，统一写入 Provider 可接收的安全协议。
-  const url = rawUrl.replace(/^http:\/\//u, "https://");
+  const url = canonicalUploadedMediaUrl(rawUrl);
   if (!/^https?:\/\//u.test(url)) throw new Error("content-app 上传成功但未返回可引用的图片地址。");
 
   if (!file.type.startsWith("image/")) return { url, name: displayName, contentType: file.type || "application/octet-stream" };

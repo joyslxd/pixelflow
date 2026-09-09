@@ -52,7 +52,7 @@ PowerMem 调用边界：
 
 V2 live 合并使用`provider_jobs.ContentAppMergeJobService`适配同步接口：多镜头start携带一次性用户Authorization与Operation幂等键调用`/api/video/merge`，单镜头直接复用原视频且不发送HTTP；成功或业务失败从start租约直接在同一Repository事务写入Operation终态和`external_job.state_changed`事件，不伪造taskId，也不进入`/api/task/{taskId}/status`。进程在供应商返回前退出时仍保留start租约，后续只允许用同一幂等键显式恢复，不能把同步接口当作可轮询任务。
 
-项目内 `skills/seedance-prompt/SKILL.md` 对所有启用的 Seedance 系列模型通用，不以 2.0 型号作为调用开关。模型特有的画幅、清晰度、声音和参考素材能力以 content-app 实时配置与实际生成 API 为准。相邻的 `THIRD_PARTY_NOTICE.md` 记录两个输入来源、哈希和授权边界，具有来源审计价值，不能删除。
+当前提示词适配入口为 `backend/skills/skills/bgrs-sd25-skill/SKILL.md`，用于 Seedance 2.5；旧通用及 2.0 提示词 Skill 已移除。模型特有的画幅、清晰度、声音和参考素材能力仍以 content-app 实时配置与实际生成 API 为准。历史 `THIRD_PARTY_NOTICE.md` 的来源、哈希和授权审计记录应继续保留。
 
 视频需求表单会完整保存 `aspectRatioList/sizeList/onSoundList/videoDurationList/modelGenerateTypeList/uploadFileTypeList` 的实时快照。场景视频调用只使用已确认合同里的 `video_model/video_ratio/video_size/video_sound`；切换模型时必须同步修正不受支持的旧清晰度，不能让当前只支持 `480p/720p` 的 `seedance-2.0-mini` 或 `seedance-2.0-fast` 继续携带 `1080p`。
 

@@ -27,9 +27,10 @@ class GenerateImageAssetsTool:
         name="generate_image_assets",
         description=(
             "为已规划的角色、场景、道具等图片资产创建 GenerationJob；只能选择当前 Workspace "
-            "中 state=planned 且有 generation_prompt 的资产。failed 资产必须先调用 "
-            "retry_failed_image_assets。Tool 返回后由 Gateway Worker 负责启动与轮询，"
-            "完成时 Gateway 将资产原子回写为 ready。此操作可能计费，需用户确认与瞬时授权。"
+            "中 state=planned 且有 generation_prompt 的资产。用户要求改图或重跑 ready 资产时，"
+            "先调用 revise_image_assets；仅失败且不改提示词时可用 retry_failed_image_assets。"
+            "Tool 返回后由 Gateway Worker 负责启动与轮询，完成时 Gateway 将资产原子回写为 ready。"
+            "此操作可能计费，需用户确认与瞬时授权；不要在对话里再要一次确认。"
         ),
         input_model=GenerateImageAssetsInput,
         cost_level=VideoToolCostLevel.BILLABLE,

@@ -49,7 +49,7 @@ def optional_content_app_base_url(raw: str) -> str | None:
 
 
 def canonical_provider_media_url(raw: str) -> str | None:
-    """生成结果只保留无用户信息的媒体地址；TOS HTTP 升 HTTPS，EC 站点允许 HTTP。"""
+    """生成结果只保留无用户信息的媒体地址；TOS 升 HTTPS，vitamazing 一律降为 HTTP。"""
 
     parsed = urlparse(raw.strip())
     host = (parsed.hostname or "").lower()
@@ -58,10 +58,11 @@ def canonical_provider_media_url(raw: str) -> str | None:
     scheme = parsed.scheme.lower()
     if scheme == "http" and any(host.endswith(suffix) for suffix in _TOS_HTTPS_HOST_SUFFIXES):
         scheme = "https"
+    if _is_allowed_http_media_host(host):
+        # EC 站点无可用 TLS；https://www.vitamazing.top 证书无效，必须写成 HTTP。
+        return urlunparse(("http", parsed.netloc, parsed.path or "/", "", "", ""))
     if scheme == "https":
         return urlunparse(("https", parsed.netloc, parsed.path or "/", "", "", ""))
-    if scheme == "http" and _is_allowed_http_media_host(host):
-        return urlunparse(("http", parsed.netloc, parsed.path or "/", "", "", ""))
     return None
 
 

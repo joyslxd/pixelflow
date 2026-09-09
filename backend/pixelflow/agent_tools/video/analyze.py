@@ -26,7 +26,7 @@ class AnalyzeVideoTool:
         description="提交一个已授权视频进行镜头、字幕、音频和叙事结构拆解；不会生成或修改视频。",
         input_model=AnalyzeVideoInput,
         cost_level=VideoToolCostLevel.EXTERNAL_READ,
-        confirmation_required=False,
+        confirmation_required=True,
         idempotency_mode=VideoToolIdempotencyMode.REQUEST,
         recovery_mode=VideoToolRecoveryMode.OPERATION,
         workspace_mutations=(),

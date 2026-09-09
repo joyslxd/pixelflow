@@ -6,6 +6,7 @@ keywords:
   - generate_image_assets
   - inspect_image_assets
   - retry_failed_image_assets
+  - revise_image_assets
   - prepare_scene_packages
   - failed
   - planned
@@ -13,12 +14,13 @@ keywords:
 ---
 ## 结论摘要
 
-`generate_image_assets` 只接受 `origin=planned_generation` 且 `state=planned` 的资产。`failed` / `ready` 都会被拒绝。`prepare_scene_packages` 的 `asset_registry` 不能覆盖已有 `asset_id`；`asset_updates` 只改已上传素材的 slot/kind/role，不能把 failed 改回 planned。失败图的合法重试入口是非计费 Tool `retry_failed_image_assets`：保留原 `asset_id` 与 `generation_prompt`，清掉失败投影后再走 `generate_image_assets`。
+`generate_image_assets` 只接受 `origin=planned_generation` 且 `state=planned` 的资产。`failed` / `ready` 都会被拒绝。`prepare_scene_packages` 的 `asset_registry` 不能覆盖已有 `asset_id`；`asset_updates` 只改已上传素材的 slot/kind/role，不能把 failed 改回 planned。用户点名改图或重跑 ready 时走非计费 `revise_image_assets`（可改 prompt 并重置为 planned）。仅失败且不改提示词时仍可用 `retry_failed_image_assets`。真正出图必须再走确认后的 `generate_image_assets`。
 
 ## 关键文件
 
 - `backend/pixelflow/agent_tools/video/image_assets.py`
 - `backend/pixelflow/agent_tools/video/image_asset_retry.py`
+- `backend/pixelflow/agent_tools/video/image_asset_revise.py`
 - `backend/pixelflow/agent_tools/video/storyboard.py`
 - `backend/pixelflow/generation_jobs/projector.py`
 - `backend/skills/skills/image-generation/SKILL.md`
@@ -29,7 +31,8 @@ keywords:
 2. 再次 `generate_image_assets` 因 state≠planned 直接校验失败；`attempt` 只用于 Job 幂等，不重置 Workspace 状态。
 3. 用原 ID 再写 `asset_registry` 会报「只能登记新的待生成资产」。
 4. `asset_updates` 目标必须是 `origin=existing_material`，对 planned_generation 无效。
-5. 正确顺序：`inspect_image_assets` → `retry_failed_image_assets` → `generate_image_assets`。
+5. 失败且不改 prompt：`inspect_image_assets` → `retry_failed_image_assets` → `generate_image_assets`。
+6. 改图或重跑 ready：`inspect_image_assets` → `revise_image_assets` → `generate_image_assets`。
 
 ## 注意事项
 

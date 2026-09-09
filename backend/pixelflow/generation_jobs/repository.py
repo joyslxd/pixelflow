@@ -50,7 +50,9 @@ class GenerationJobRepository(Protocol):
         limit: int,
     ) -> tuple[GenerationJobRecord, ...]: ...
 
-    async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int: ...
+    async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int:
+        """回放仍缺结果 URL、但已有 provider_job_id 的图片/视频任务。"""
+        ...
 
     async def reschedule_poll(
         self,
@@ -228,7 +230,7 @@ class MemoryGenerationJobRepository:
             return tuple(deepcopy(item) for item in claimed)
 
     async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int:
-        """把仍缺结果的图片任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
+        """把仍缺结果 URL 的图片/视频任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
 
         if limit <= 0:
             return 0
@@ -241,7 +243,7 @@ class MemoryGenerationJobRepository:
             }
             latest: dict[tuple[str, str], GenerationJobRecord] = {}
             for item in self._records.values():
-                if not _is_missing_image_result(item) or (item.workspace_id, item.item_id) in succeeded:
+                if not _is_missing_mapped_result(item) or (item.workspace_id, item.item_id) in succeeded:
                     continue
                 key = (item.workspace_id, item.item_id)
                 current = latest.get(key)
@@ -475,7 +477,7 @@ class SQLGenerationJobRepository:
                 return tuple(claimed)
 
     async def reopen_missing_image_results(self, *, now: datetime, limit: int = 6) -> int:
-        """把仍缺结果的图片任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
+        """把仍缺结果 URL 的图片/视频任务重新打开轮询，已有成功任务的资产不回放旧任务。"""
 
         if limit <= 0:
             return 0
@@ -487,9 +489,13 @@ class SQLGenerationJobRepository:
                         await session.scalars(
                             select(PixelFlowGenerationJobRow)
                             .where(
-                                PixelFlowGenerationJobRow.kind == GenerationJobKind.IMAGE.value,
+                                PixelFlowGenerationJobRow.kind.in_(
+                                    (GenerationJobKind.IMAGE.value, GenerationJobKind.VIDEO.value)
+                                ),
                                 PixelFlowGenerationJobRow.status == GenerationJobStatus.INDETERMINATE.value,
-                                PixelFlowGenerationJobRow.failure_reason_code == "provider_result_missing",
+                                PixelFlowGenerationJobRow.failure_reason_code.in_(
+                                    tuple(_MISSING_MAPPED_RESULT_REASONS)
+                                ),
                                 PixelFlowGenerationJobRow.provider_job_id.is_not(None),
                             )
                             .with_for_update()
@@ -608,17 +614,25 @@ def _same_identity(left: GenerationJobRecord, right: GenerationJobRecord) -> boo
     )
 
 
-def _is_missing_image_result(item: GenerationJobRecord) -> bool:
-    """只回放图片成功但没拿到 URL 的终态，避免重开授权丢失等其它 indeterminate。"""
+_MISSING_MAPPED_RESULT_REASONS = frozenset(
+    {
+        "provider_result_missing",
+        "provider_poll_image_result_url_missing",
+        "provider_start_image_result_url_missing",
+        "provider_poll_video_result_url_missing",
+        "provider_start_video_result_url_missing",
+        "provider_poll_provider_status_authorization_unavailable",
+    }
+)
+
+
+def _is_missing_mapped_result(item: GenerationJobRecord) -> bool:
+    """只回放供应商已成功但没抽到可公开 URL 的终态，避免重开授权丢失等其它 indeterminate。"""
 
     return (
-        item.kind is GenerationJobKind.IMAGE
+        item.kind in {GenerationJobKind.IMAGE, GenerationJobKind.VIDEO}
         and item.status is GenerationJobStatus.INDETERMINATE
-        and item.failure_reason_code in {
-            "provider_result_missing",
-            "provider_poll_image_result_url_missing",
-            "provider_start_image_result_url_missing",
-        }
+        and item.failure_reason_code in _MISSING_MAPPED_RESULT_REASONS
         and bool(item.provider_job_id)
     )
 

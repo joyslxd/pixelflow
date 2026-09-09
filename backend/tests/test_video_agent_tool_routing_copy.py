@@ -92,6 +92,22 @@ def test_orchestration_and_authoring_skills_forbid_reprepare_on_local_edit() -> 
     assert "不要为改第 N 段再输出整包 `prepare_scene_packages`" in authoring
 
 
+def test_orchestration_routes_ecommerce_ad_intent_to_the_dedicated_script_skill() -> None:
+    orchestration = (_SKILLS_ROOT / "pixelflow-video-orchestration" / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+    ecommerce_script = _SKILLS_ROOT / "ecommerce-ad-script" / "SKILL.md"
+    viral_analysis = _SKILLS_ROOT / "viral-video-analysis" / "SKILL.md"
+
+    assert ecommerce_script.is_file()
+    assert viral_analysis.is_file()
+    assert "千川、投流、信息流、广告素材、ROI、进直播间、带货转化" in orchestration
+    assert "ecommerce-ad-script" in orchestration
+    assert "viral-video-analysis" in orchestration
+    assert "revise_image_assets" in orchestration
+    assert "不要在对话里再要一次「确认重生成」" in orchestration
+
+
 def _prepare_arguments(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "script": "产品展示",

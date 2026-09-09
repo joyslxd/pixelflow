@@ -42,7 +42,26 @@ def test_scene_preview_url_matches_segment_id_and_job_result() -> None:
         ],
     }
 
-    assert workspace_scene_preview_url(payload, "s2") == "https://cdn.vitamazing.top/s2.mp4"
+    assert workspace_scene_preview_url(payload, "s2") == "http://cdn.vitamazing.top/s2.mp4"
+
+
+def test_scene_preview_url_accepts_http_vitamazing_job_result() -> None:
+    payload = {
+        "scenes": [
+            {
+                "scene_id": "s-http",
+                "generation_jobs": [
+                    {
+                        "job_id": "job-2",
+                        "status": "succeeded",
+                        "video_url": "http://cdn.vitamazing.top/s-http.mp4",
+                    }
+                ],
+            }
+        ],
+    }
+
+    assert workspace_scene_preview_url(payload, "s-http") == "http://cdn.vitamazing.top/s-http.mp4"
 
 
 def test_scene_preview_rejects_non_allowlisted_host_and_missing_scene() -> None:

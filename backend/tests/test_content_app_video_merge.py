@@ -176,6 +176,99 @@ async def test_merge_402_billing_profile_is_not_quota() -> None:
 
 
 @pytest.mark.asyncio
+async def test_multi_scene_posts_http_vitamazing_urls_and_accepts_http_result() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"success": True, "data": {"url": "http://cdn.vitamazing.top/merged.mp4"}},
+        )
+
+    adapter = ContentAppVideoMergeAdapter(
+        base_url="https://content.example.invalid/api",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    payload = {
+        "creation_contract": {"video_model": "Seedance 2.5", "video_size": "1080p"},
+        "scenes": [
+            {
+                "scene_id": "scene_a",
+                "duration_sec": 8,
+                "variants": [
+                    {
+                        "variant_id": "variant:a1",
+                        "artifact_ref": "artifact:video:a1",
+                        "video_url": "http://cdn.vitamazing.top/a1.mp4",
+                        "selected": True,
+                        "review_status": "approved",
+                    }
+                ],
+            },
+            {
+                "scene_id": "scene_b",
+                "duration_sec": 8,
+                "variants": [
+                    {
+                        "variant_id": "variant:b1",
+                        "artifact_ref": "artifact:video:b1",
+                        "video_url": "http://cdn.vitamazing.top/b1.mp4",
+                        "selected": True,
+                        "review_status": "approved",
+                    }
+                ],
+            },
+        ],
+    }
+    job = await adapter.start_delivery(
+        _context(payload),
+        output_type="mp4",
+        scenes=[
+            {"scene_id": "scene_a", "variant_id": "variant:a1", "artifact_ref": "artifact:video:a1"},
+            {"scene_id": "scene_b", "variant_id": "variant:b1", "artifact_ref": "artifact:video:b1"},
+        ],
+        attempt=1,
+    )
+
+    assert job.status == "succeeded"
+    assert job.delivery_url == "http://cdn.vitamazing.top/merged.mp4"
+    body = json.loads(requests[0].content.decode())
+    assert body == {
+        "videoUrls": [
+            "http://cdn.vitamazing.top/a1.mp4",
+            "http://cdn.vitamazing.top/b1.mp4",
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_scene_url_without_allowlisted_host_cannot_resolve() -> None:
+    adapter = ContentAppVideoMergeAdapter(base_url="https://content.example.invalid/api")
+    payload = _contract_payload(
+        {
+            "scene_id": "scene_a",
+            "variants": [
+                {
+                    "variant_id": "variant:a1",
+                    "artifact_ref": "artifact:video:a1",
+                    "video_url": "http://evil.example/a1.mp4",
+                    "selected": True,
+                    "review_status": "approved",
+                }
+            ],
+        }
+    )
+    with pytest.raises(VideoToolExecutionError, match="视频交付无法解析分镜成片"):
+        await adapter.start_delivery(
+            _context(payload),
+            output_type="mp4",
+            scenes=[{"scene_id": "scene_a", "artifact_ref": "artifact:video:a1"}],
+            attempt=1,
+        )
+
+
+@pytest.mark.asyncio
 async def test_jianying_package_is_not_assembled() -> None:
     adapter = ContentAppVideoMergeAdapter(base_url="https://content.example.invalid/api")
     with pytest.raises(VideoToolExecutionError, match="剪映工程包交付尚未装配"):

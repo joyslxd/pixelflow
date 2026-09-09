@@ -53,5 +53,11 @@ def test_canonical_provider_media_url_rewrites_tos_http_and_keeps_vitamazing_htt
         canonical_provider_media_url("http://creator.vitamazing.top/upload/kitten.png")
         == "http://creator.vitamazing.top/upload/kitten.png"
     )
+    assert (
+        canonical_provider_media_url(
+            "https://www.vitamazing.top/image/17887561295971358_蓝甘菊洗发水.jpg"
+        )
+        == "http://www.vitamazing.top/image/17887561295971358_蓝甘菊洗发水.jpg"
+    )
     assert canonical_provider_media_url("https://cdn.example/hero.png") == "https://cdn.example/hero.png"
     assert canonical_provider_media_url("http://evil.example/kitten.png") is None

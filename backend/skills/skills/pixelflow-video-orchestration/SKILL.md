@@ -3,7 +3,7 @@ name: pixelflow-video-orchestration
 description: 在 PixelFlow 权威视频工作区内，自主组合检查、创意、脚本、分镜、图片资产、视频生成、审片与交付 Tool；只输出安全创作决策，不直接执行外部操作。
 metadata:
   pixelflow:
-    version: "1.4.1"
+    version: "1.4.2"
   invocation_policy: agent_only
 disable-model-invocation: false
 user-invocable: false
@@ -14,6 +14,19 @@ user-invocable: false
 本 Skill 是视频工作流的应用编排说明，类似 Service 的调用准则，而不是固定 Workflow。
 当前 Workspace、Tool Observation 和用户本轮明确输入才是事实来源。不得访问数据库、Provider、
 宿主文件或凭据；任何写入、生成、确认和恢复都必须调用受控 Tool。
+
+## 创作 Skill 选择
+
+- 用户要求拆解、复盘、复刻或审核已有短视频素材，或提供播放、CTR、留存、商品点击、成交、ROI
+  等数据时，先加载 `viral-video-analysis`，把可验证的结论整理为复刻 Brief；不得假装读取未提供或
+  不可读取的素材。
+- 用户明确提出千川、投流、信息流、广告素材、ROI、进直播间、带货转化时，使用
+  `ecommerce-ad-script` 组织脚本结构；“千川”只是常见渠道别名，不将能力限制为单一平台。
+- 用户未明确投放或转化目标时，默认使用 `daoyan-video-director` 组织品牌故事、剧情、情绪或通用
+  视频创作。不要同时让导演 Skill 与电商投放脚本为同一份新脚本提供相互竞争的结构。
+- 完成脚本或分镜合同后，当前 Seedance 2.5 提示词适配加载 `bgrs-sd25-skill`，将已确认的资产、镜头和
+  脚本细化为可提交的 Prompt；Prompt Skill 不重新选择投放策略或改写已确认商品事实。
+  模型档案不支持 2.5 时说明当前缺少对应提示词适配，不自动更换模型。
 
 ## 选择 Tool 的顺序
 
@@ -28,17 +41,19 @@ user-invocable: false
    禁止在已有分镜上把「第一段不对」做成 `prepare_scene_packages` 整包覆盖，也不要为此先读导演
    Skill 再重写未改动镜头。工作区已有分镜时，未声明 `replace_existing=true` 的整包写入会被
    Tool 拒绝。
-4. 图片资产处于 planned 时，先用 `generate_image_assets` 请求生成；该 Tool 可能要求用户确认。
-   若 inspect 显示 failed，先调用 `retry_failed_image_assets` 把原资产改回 planned，再生成；
-   不要新建 asset_id 或改写分镜引用。返回 GenerationJob 后使用 `inspect_image_assets` 查询状态；
-   Gateway 轮询期间停止当前 Run，不能自行循环调用或承诺已经完成。
+4. 图片资产处于 planned 时，先用 `generate_image_assets` 请求生成；该 Tool 会要求用户确认，
+   不要在对话里再要一次「确认重生成」。用户点名修改已就绪或已失败的参考图内容时，先调用
+   `revise_image_assets` 更新 `generation_prompt` 并把资产重置为 planned，保留原 `asset_id`
+   与分镜引用，再调用 `generate_image_assets`。若 inspect 显示 failed 且不改提示词，仍可先
+   调用 `retry_failed_image_assets`。不要新建 asset_id。返回 GenerationJob 后使用
+   `inspect_image_assets` 查询状态；Gateway 轮询期间停止当前 Run，不能自行循环调用或承诺已经完成。
 5. 所有视频参考资产 ready 且生产合同已冻结后，才能使用 `create_video` 创建视频；它会按分镜
    素材自动选择文生、图生、首尾帧、多参考、编辑或延展模式，并为每个分镜创建一个受控
    GenerationJob。生成后先用 `inspect_video_results` 查询每镜结果，需要选版时使用
    `review_generated_scenes`。`generate_scenes` 是同一 GenerationJob 能力的兼容入口，新的创作
    请求优先使用 `create_video`。
 6. 用户明确要求合并/导出，或全部镜头都已有可交付成片（已审核版本，或最新一份
-   HTTPS 成片）且没有仍在生成的镜头时，才请求 `compose_or_export_video`。脏镜头
+   受控成片地址）且没有仍在生成的镜头时，才请求 `compose_or_export_video`。脏镜头
    标记若对应镜头已有成片，可继续交付；Gateway 会拒绝未完成镜头。若交付
    Provider 未装配，说明当前不可执行，不伪造成片。
 

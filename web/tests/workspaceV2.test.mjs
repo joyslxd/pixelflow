@@ -106,6 +106,17 @@ test("成片就绪的 Prompt Package 投影白名单 TOS 地址，拒绝其它�
   });
   assert.equal(blocked.packages[0].hasPreview, false);
   assert.equal(blocked.packages[0].previewUrl, "");
+
+  const httpPreview = projectWorkspaceV2({
+    workspace_schema_version: 2,
+    prompt_packages: [{
+      segment_id: "s1", sequence: 1, duration_sec: 12, generation_mode: "independent",
+      prompt_summary: "厨房开场", state: "ready", has_preview: true,
+      preview_url: "http://cdn.vitamazing.top/s1.mp4",
+    }],
+  });
+  assert.equal(httpPreview.packages[0].hasPreview, true);
+  assert.equal(httpPreview.packages[0].previewUrl, "http://cdn.vitamazing.top/s1.mp4");
 });
 
 test("合并成片只回显白名单 TOS 地址", () => {

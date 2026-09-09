@@ -176,3 +176,79 @@ def test_existing_material_without_image_url_uses_materials_record() -> None:
 
     assert request["image_urls"] == ["https://cdn.example/upload.png"]
     assert request["generation_mode"] == "reference_mode_video"
+
+
+def test_v2_scene_keeps_http_vitamazing_character_urls() -> None:
+    """EC 角色图常是 http://www.vitamazing.top；只收 HTTPS 会把人物参考丢掉。"""
+
+    request = build_scene_generation_request(
+        _context({
+            "creation_contract": {
+                "video_model": "seedance-2.5",
+                "video_ratio": "9:16",
+                "video_size": "1080x1920",
+                "video_sound": "on",
+            },
+            "asset_registry": [
+                {
+                    "asset_id": "asset_character_01",
+                    "origin": "planned_generation",
+                    "state": "ready",
+                    "usable_for_video": True,
+                    "image_url": "http://www.vitamazing.top/upload/hero.png",
+                },
+                {
+                    "asset_id": "asset_character_02",
+                    "origin": "planned_generation",
+                    "state": "ready",
+                    "usable_for_video": True,
+                    "image_url": "http://www.vitamazing.top/upload/friend.png",
+                },
+            ],
+        }),
+        {
+            "scene_id": "scene_1",
+            "prompt": "闺蜜发现女主头发塌油",
+            "duration_sec": 4,
+            "generation_mode": "independent",
+            "reference_asset_ids": ["asset_character_01", "asset_character_02"],
+        },
+        1,
+    )
+
+    assert request["image_urls"] == [
+        "http://www.vitamazing.top/upload/hero.png",
+        "http://www.vitamazing.top/upload/friend.png",
+    ]
+    assert request["generation_mode"] == "reference_mode_video"
+
+
+def test_v2_scene_drops_untrusted_http_reference_url() -> None:
+    request = build_scene_generation_request(
+        _context({
+            "creation_contract": {
+                "video_model": "seedance-2.5",
+                "video_ratio": "9:16",
+                "video_size": "1080p",
+                "video_sound": "on",
+            },
+            "asset_registry": [{
+                "asset_id": "asset_character_01",
+                "origin": "planned_generation",
+                "state": "ready",
+                "usable_for_video": True,
+                "image_url": "http://cdn.example/hero.png",
+            }],
+        }),
+        {
+            "scene_id": "scene_1",
+            "prompt": "女主特写",
+            "duration_sec": 5,
+            "generation_mode": "independent",
+            "reference_asset_ids": ["asset_character_01"],
+        },
+        1,
+    )
+
+    assert request["image_urls"] == []
+    assert request["generation_mode"] == "text_to_video"

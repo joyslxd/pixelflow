@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
+from pixelflow.platform.content_app_url import canonical_provider_media_url
 from pixelflow.video.contracts import AgentPlan, PlanStepStatus, VideoWorkspace
 from pixelflow.video.services.production_fields import (
     workspace_has_ending_cta,
@@ -205,7 +206,7 @@ def public_workspace_media_url(url: object) -> str | None:
         or not any(host.endswith(suffix) for suffix in _PUBLIC_MEDIA_HOST_SUFFIXES)
     ):
         return None
-    return url.strip()
+    return canonical_provider_media_url(url.strip())
 
 
 def _merged_video_digest(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -269,10 +270,10 @@ def _workspace_scene_record(payload: Mapping[str, Any], scene_id: str) -> Mappin
 
 
 def _scene_preview_url_candidates(scene: Mapping[str, Any]) -> list[str]:
-    """只收集 HTTPS 成片地址，顺序：镜头主 URL、已选 variant、成功任务。"""
+    """只收集白名单成片地址，顺序：镜头主 URL、已选 variant、成功任务。"""
 
     urls: list[str] = []
-    primary = _https_media_url(scene.get("video_url"))
+    primary = public_workspace_media_url(scene.get("video_url"))
     if primary:
         urls.append(primary)
     approved = str(scene.get("approved_variant_id") or "").strip()
@@ -283,7 +284,7 @@ def _scene_preview_url_candidates(scene: Mapping[str, Any]) -> list[str]:
         for item in variants:
             if not isinstance(item, Mapping):
                 continue
-            url = _https_media_url(item.get("video_url"))
+            url = public_workspace_media_url(item.get("video_url"))
             if not url:
                 continue
             variant_id = str(item.get("variant_id") or "").strip()
@@ -298,19 +299,10 @@ def _scene_preview_url_candidates(scene: Mapping[str, Any]) -> list[str]:
         for item in jobs:
             if not isinstance(item, Mapping) or str(item.get("status") or "") != "succeeded":
                 continue
-            url = _https_media_url(item.get("video_url"))
+            url = public_workspace_media_url(item.get("video_url"))
             if url:
                 urls.append(url)
     return urls
-
-
-def _https_media_url(value: object) -> str | None:
-    """只接受 https 媒体地址，拒绝相对路径和内部 artifact。"""
-
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    return text if text.lower().startswith("https://") else None
 
 
 def _scene_video_state_index(payload: Mapping[str, Any], video_status: Mapping[str, Any]) -> dict[str, str]:

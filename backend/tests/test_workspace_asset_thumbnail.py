@@ -82,6 +82,10 @@ def test_thumbnail_rewrites_http_tos_and_allows_http_vitamazing() -> None:
         _safe_asset_thumbnail_target("http://creator.vitamazing.top/upload/kitten.png")
         == "http://creator.vitamazing.top/upload/kitten.png"
     )
+    assert (
+        _safe_asset_thumbnail_target("https://www.vitamazing.top/image/shampoo.jpg")
+        == "http://www.vitamazing.top/image/shampoo.jpg"
+    )
 
 
 def test_thumbnail_allows_known_legacy_material_host_with_invalid_tls() -> None:

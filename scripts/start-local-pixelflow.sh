@@ -224,6 +224,8 @@ printf '%s\n' "$SIDECAR_PID" > "$SIDECAR_PID_FILE"
 ) >"$GATEWAY_LOG" 2>&1 < /dev/null &
 GATEWAY_PID=$!
 printf '%s\n' "$GATEWAY_PID" > "$GATEWAY_PID_FILE"
+# 用途：启动脚本退出后子进程仍保持运行；影响：避免 Cursor/终端关闭时把 Gateway、Sidecar 一起带走。
+disown "$SIDECAR_PID" "$GATEWAY_PID" 2>/dev/null || true
 
 wait_ready() {
   local url="$1"

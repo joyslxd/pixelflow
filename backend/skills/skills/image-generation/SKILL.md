@@ -3,7 +3,7 @@ name: image-generation
 description: 为 PixelFlow 视频项目规划角色、产品、道具与场景参考图，并安全编排图片资产生成和状态核查；不直接调用图片 Provider。
 metadata:
   pixelflow:
-    version: "1.1.0"
+    version: "1.2.0"
   invocation_policy: agent_only
 disable-model-invocation: false
 user-invocable: false
@@ -27,14 +27,17 @@ Prompt 至少包含主体、材质或外观、背景、光线、视角、不可�
 ## 生成与核查
 
 1. 资产计划写入后，先通过 `inspect_image_assets` 核查 ready、planned、running 与 failed 状态。
-2. 若目标资产 `state=failed`，先调用 `retry_failed_image_assets` 把它重新登记为 planned，保留原
-   `asset_id` 与 `generation_prompt`；不要新建 asset_id，也不要改写分镜引用。
-3. 只选择 `state=planned` 且包含 `generation_prompt` 的资产调用 `generate_image_assets`。计费确认、
+2. 用户点名修改已有参考图内容，或要求重跑 `ready` 资产时，先调用 `revise_image_assets` 更新
+   `generation_prompt`（可选）并把目标资产重置为 planned；保留原 `asset_id` 与分镜引用，不要
+   新建资产。不要在对话里再要一次确认。
+3. 若目标资产 `state=failed` 且不改提示词，可调用 `retry_failed_image_assets` 把它重新登记为
+   planned，或同样使用 `revise_image_assets`。
+4. 只选择 `state=planned` 且包含 `generation_prompt` 的资产调用 `generate_image_assets`。计费确认、
    瞬时授权和幂等由 Tool Broker 强制处理；每个资产对应一个 Gateway GenerationJob。
-4. Tool 返回 GenerationJob 后，调用 `inspect_image_assets` 读取安全进度。异步任务未完成时结束当前
+5. Tool 返回 GenerationJob 后，调用 `inspect_image_assets` 读取安全进度。异步任务未完成时结束当前
    Run，不能自行轮询 Provider 或重新创建 GenerationJob。
-5. 全部视频依赖资产 ready 后，才建议调用 `generate_scenes`；failed 资产先 `retry_failed_image_assets`
-   再生成，不回显 Provider 原始异常，也不通过 `prepare_scene_packages` 覆盖已有资产。
+6. 全部视频依赖资产 ready 后，才建议调用 `generate_scenes`；failed 或用户改图先修订/重试再生成，
+   不回显 Provider 原始异常，也不通过 `prepare_scene_packages` 覆盖已有资产。
 
 ## 边界
 
